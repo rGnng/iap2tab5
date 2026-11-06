@@ -89,6 +89,7 @@ void ui_system_toggle_screen_flip(void);
 
 /** Debug: page the active list by one viewport (direction +1/-1). */
 void ui_debug_page(int direction);
+void ui_debug_trace(bool enabled);
 
 /** Debug: scroll the active list by dy pixels (negative = content up). */
 void ui_debug_scroll(int dy);

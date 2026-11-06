@@ -24,6 +24,9 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #define UI_PERF_LOG(...) ESP_LOGI("uiperf", __VA_ARGS__)
 #else
 #define UI_PERF_LOG(...) fprintf(stderr, __VA_ARGS__)
@@ -464,36 +467,6 @@ static lv_obj_t * make_icon(lv_obj_t * parent, const char * icon, uint32_t color
     return make_label(parent, icon, &bootstrap_icons_24, color);
 }
 
-/* Compact Back control used at the top-right of every detail header. */
-static lv_obj_t * make_header_back(lv_obj_t * parent, bool interactive,
-                                   focus_activate_fn action,
-                                   lv_event_cb_t touch_cb, int * focus_out)
-{
-    lv_obj_t * back = lv_obj_create(parent);
-    lv_obj_set_size(back, 90, 34);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(back, 0, 0);
-    lv_obj_set_style_radius(back, 0, 0);
-    lv_obj_set_style_pad_all(back, 0, 0);
-    lv_obj_set_style_pad_column(back, 6, 0);
-    lv_obj_set_flex_flow(back, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(back, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(back, false);
-    make_icon(back, ICON_BACK, COL_TEXT);
-    make_label(back, "Back", FONT_BODY, COL_TEXT);
-
-    int index = -1;
-    if(interactive) {
-        index = focus_add_clickable(back, action, NULL, NULL, true);
-    }
-    else {
-        touch_add_clickable(back, touch_cb, NULL);
-    }
-    if(focus_out) *focus_out = index;
-    return back;
-}
-
 static lv_obj_t * make_panel(lv_obj_t * parent)
 {
     lv_obj_t * panel = lv_obj_create(parent);
@@ -651,10 +624,14 @@ static void thumbs_init(void)
 }
 
 #define REAL_THUMB_SIZE 54
-#define COVER_CACHE_SLOTS 48
+#define COVER_CACHE_SLOTS 192
 
 static char s_thumb_pack_path[128];
 static char s_thumb_pack_dir[128];
+static FILE * s_thumb_pack_file;
+static uint8_t * s_thumb_pack_ram;
+static size_t s_thumb_pack_ram_size;
+static bool s_thumb_pack_ram_ready;
 static uint32_t s_thumb_pack_count;
 static uint8_t s_thumb_valid[512];
 static bool s_thumb_pack_ready;
@@ -665,10 +642,55 @@ void ui_set_thumb_pack_dir(const char * dir)
              dir != NULL ? dir : "");
 }
 
+#if defined(ESP_PLATFORM)
+typedef struct {
+    char path[128];
+    int albums;
+} thumb_load_arg_t;
+
+static void thumb_pack_load_task(void * p)
+{
+    thumb_load_arg_t * a = (thumb_load_arg_t *)p;
+    const size_t one = (size_t)REAL_THUMB_SIZE * REAL_THUMB_SIZE * 2;
+    size_t bytes = (size_t)a->albums * one;
+    if(bytes > 0 && bytes <= 16u * 1024u * 1024u) {
+        FILE * f = fopen(a->path, "rb");
+        if(f != NULL) {
+            uint32_t t0 = (uint32_t)esp_timer_get_time();
+            uint8_t * ram = ui_alloc_aligned(bytes);
+            if(ram != NULL && fread(ram, 1, bytes, f) == bytes) {
+                s_thumb_pack_ram = ram;
+                s_thumb_pack_ram_size = bytes;
+                s_thumb_pack_ram_ready = true;
+                UI_PERF_LOG("thumb pack in PSRAM: %d albums, %u KB, %u ms",
+                            a->albums, (unsigned)(bytes / 1024),
+                            (unsigned)((esp_timer_get_time() - t0) / 1000));
+            }
+            else {
+                free(ram);
+            }
+            fclose(f);
+        }
+    }
+    free(a);
+    vTaskDelete(NULL);
+}
+#endif
+
 void ui_set_thumb_pack_path(const char * path, int album_count)
 {
     s_thumb_pack_ready = false;
     s_thumb_pack_count = 0;
+    if(s_thumb_pack_file != NULL) {
+        fclose(s_thumb_pack_file);
+        s_thumb_pack_file = NULL;
+    }
+    if(s_thumb_pack_ram != NULL) {
+        free(s_thumb_pack_ram);
+        s_thumb_pack_ram = NULL;
+    }
+    s_thumb_pack_ram_size = 0;
+    s_thumb_pack_ram_ready = false;
     memset(s_thumb_valid, 0, sizeof(s_thumb_valid));
     if(path == NULL || path[0] == '\0' || album_count <= 0) return;
 
@@ -692,7 +714,28 @@ void ui_set_thumb_pack_path(const char * path, int album_count)
     size_t n = fread(s_thumb_valid, 1, need, f);
     fclose(f);
     if(n == 0) return;
+    /* Keep the pack open: opening the thumbnail file for every row was the
+     * main source of album-list scrolling stalls.  Only the UI thread reads
+     * thumbnails, so a single shared FILE is safe here. */
+    s_thumb_pack_file = fopen(s_thumb_pack_path, "rb");
+    if(s_thumb_pack_file == NULL) return;
     s_thumb_pack_ready = true;
+
+    /* Keep the whole packed thumbnail set in PSRAM.  Reading one 54x54
+     * cover from SD during a scroll costs tens of milliseconds; a memcpy
+     * from PSRAM makes list scrolling effectively free.  Load it in the
+     * background so the 10+ MB read does not delay boot. */
+#if defined(ESP_PLATFORM)
+    thumb_load_arg_t * arg = malloc(sizeof(*arg));
+    if(arg != NULL) {
+        snprintf(arg->path, sizeof(arg->path), "%s", s_thumb_pack_path);
+        arg->albums = album_count;
+        if(xTaskCreate(thumb_pack_load_task, "thumb_load", 6144, arg, 1,
+                       NULL) != pdPASS) {
+            free(arg);
+        }
+    }
+#endif
 }
 
 static char s_artwork_dir[64] = "/sdcard/covers";
@@ -705,13 +748,15 @@ static bool real_thumb_read(uint16_t id, uint8_t * dst)
     if(s_thumb_pack_ready && id <= s_thumb_pack_count) {
         uint32_t n = (uint32_t)id - 1;
         if((s_thumb_valid[n >> 3] & (1u << (n & 7))) != 0) {
-            FILE * f = fopen(s_thumb_pack_path, "rb");
-            if(f != NULL) {
-                bool ok = fseek(f, (long)thumb_cache_slot_offset(id),
-                                SEEK_SET) == 0 &&
-                          fread(dst, 1, one, f) == one;
-                fclose(f);
-                if(ok) return true;
+            size_t off = (size_t)thumb_cache_slot_offset(id);
+            if(s_thumb_pack_ram_ready && off + one <= s_thumb_pack_ram_size) {
+                memcpy(dst, s_thumb_pack_ram + off, one);
+                return true;
+            }
+            if(s_thumb_pack_file != NULL &&
+               fseek(s_thumb_pack_file, (long)off, SEEK_SET) == 0 &&
+               fread(dst, 1, one, s_thumb_pack_file) == one) {
+                return true;
             }
         }
     }
@@ -996,6 +1041,10 @@ static lv_obj_t * g_mini_queue;
 static lv_obj_t * g_mini_time;
 static uint64_t g_mini_track_id;
 static uint32_t g_mini_art_rev;
+static uint32_t g_mini_rev = 0xffffffffu;
+static uint32_t g_mini_elapsed = 0xffffffffu;
+static int g_mini_queue_index = -999;
+static int g_mini_queue_count = -999;
 static lv_obj_t * g_status_time;
 static bool g_clock_12h;
 static int g_clock_offset_min;
@@ -1007,9 +1056,27 @@ static bool g_menubar_left = true;
 static lv_indev_t * g_touch_indev;
 static bool g_touch_enabled = true;
 static screen_id_t g_current_screen = SCR_NOW_PLAYING;
+static screen_id_t g_ble_return_screen = SCR_COUNT;
 static bool g_ctx_menu_open;
 static bool g_afc_sync_mode;
 static bool g_device_available;
+static bool g_ui_trace;
+
+static uint32_t perf_now(void)
+{
+#ifdef ESP_PLATFORM
+    return (uint32_t)esp_timer_get_time();
+#else
+    return (uint32_t)((uint64_t)clock() * 1000000u / CLOCKS_PER_SEC);
+#endif
+}
+
+static void perf_log_us(const char * name, uint32_t t0)
+{
+    if(g_ui_trace) {
+        UI_PERF_LOG("%s: %u us", name, (unsigned)(perf_now() - t0));
+    }
+}
 
 typedef struct {
     void (*create)(lv_obj_t * parent);
@@ -1060,7 +1127,9 @@ static void ui_player_changed(void)
 static void ui_menu_update(void)
 {
     for(int i = 0; i < SCR_COUNT; i++) {
-        bool active = (i == (int)g_current_screen);
+        if(g_menu_items[i] == NULL || g_menu_icons[i] == NULL) continue;
+        bool active = (i == (int)g_current_screen) ||
+                      (i == SCR_SETTINGS && g_current_screen == SCR_BLUETOOTH);
         /* The selected tile is a solid square: the full 112 x 112 touch area
          * uses the focus grey fill, with a white icon and no edge strip. */
         lv_obj_set_style_bg_color(g_menu_items[i],
@@ -1092,8 +1161,28 @@ static void ui_mini_update(void)
     player_get_snapshot(&snapshot);
 
     uint32_t art_rev = player_artwork_revision();
+    /* The mini player lives on every non-Now-Playing screen.  Re-writing its
+     * labels and styles every 500 ms invalidates a large part of the screen
+     * even when nothing changed, which makes the lists feel sluggish. */
+    if(snapshot.revision == g_mini_rev && art_rev == g_mini_art_rev) {
+        if(g_mini_time != NULL && snapshot.elapsed_sec != g_mini_elapsed) {
+            g_mini_elapsed = snapshot.elapsed_sec;
+            char current[16];
+            char total[16];
+            format_time(snapshot.elapsed_sec, current, sizeof(current));
+            format_time(snapshot.duration_sec, total, sizeof(total));
+            lv_label_set_text_fmt(g_mini_time, "%s / %s", current, total);
+        }
+        return;
+    }
+    g_mini_rev = snapshot.revision;
+    g_mini_elapsed = snapshot.elapsed_sec;
     bool art_changed = (art_rev != g_mini_art_rev);
     g_mini_art_rev = art_rev;
+    int queue_index = player_queue_index();
+    int queue_count = player_queue_count();
+    g_mini_queue_index = queue_index;
+    g_mini_queue_count = queue_count;
 
     if(snapshot.track.id != g_mini_track_id || art_changed) {
         g_mini_track_id = snapshot.track.id;
@@ -1154,8 +1243,6 @@ static void ui_mini_update(void)
                       snapshot.repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE
                                                            : ICON_REPEAT);
 
-    int queue_index = player_queue_index();
-    int queue_count = player_queue_count();
     if(g_mini_queue) {
         if(queue_count > 0 && queue_index >= 0) {
             lv_label_set_text_fmt(g_mini_queue, "%d / %d",
@@ -1330,21 +1417,20 @@ static void build_menubar(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(menu_area, false);
 
-    static const int menu_order[7] = {
+    static const int menu_order[6] = {
         SCR_NOW_PLAYING, SCR_ALBUMS, SCR_ARTISTS, SCR_SONGS,
-        SCR_PLAYLISTS, SCR_BLUETOOTH, SCR_SETTINGS,
+        SCR_PLAYLISTS, SCR_SETTINGS,
     };
-    static const char * const icons[7] = {
+    static const char * const icons[6] = {
         ICON_PLAY,
         ICON_DISC,
         ICON_PERSON,
         ICON_MUSIC_LIST,
         ICON_LIST,
-        ICON_BLUETOOTH,
         ICON_SETTINGS,
     };
 
-    for(int slot = 0; slot < 7; slot++) {
+    for(int slot = 0; slot < 6; slot++) {
         int screen = menu_order[slot];
         lv_obj_t * item = lv_obj_create(menu_area);
         lv_obj_set_size(item, MENUBAR_W, 80);
@@ -1383,6 +1469,7 @@ static void build_menubar(lv_obj_t * parent)
                                   &bootstrap_icons_32, COL_MENU_BODY_FG);
 
 }
+
 
 static void ui_menubar_apply_side(void)
 {
@@ -1477,6 +1564,12 @@ void ui_debug_page(int direction)
     ui_list_page(direction >= 0 ? 1 : -1);
 }
 
+void ui_debug_trace(bool enabled)
+{
+    g_ui_trace = enabled;
+    UI_PERF_LOG("trace %s", enabled ? "on" : "off");
+}
+
 void ui_debug_scroll(int dy)
 {
     if(g_current_screen == SCR_ALBUMS && albums_left_list != NULL) {
@@ -1539,10 +1632,16 @@ static void ui_tick_cb(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
     static uint32_t last_second;
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
+    uint32_t perf_t1 = 0, perf_t2 = 0, perf_t3 = 0, perf_t4 = 0;
+    uint32_t perf_t5 = 0, perf_t6 = 0;
 
     update_clock();
+    if(g_ui_trace) perf_t1 = perf_now();
     update_status();
+    if(g_ui_trace) perf_t2 = perf_now();
     ui_menu_play_update();
+    if(g_ui_trace) perf_t3 = perf_now();
 
     bool device_available = player_device_available();
     if(device_available != g_device_available) {
@@ -1552,18 +1651,36 @@ static void ui_tick_cb(lv_timer_t * timer)
             return;
         }
     }
+    if(g_ui_trace) perf_t4 = perf_now();
 
     uint32_t now = lv_tick_get();
     if(now - last_second >= 1000) {
         last_second = now;
         player_tick();
     }
+    if(g_ui_trace) perf_t5 = perf_now();
 
     if(g_current_screen < SCR_COUNT && g_pages[g_current_screen].tick) {
         g_pages[g_current_screen].tick();
     }
+    if(g_ui_trace) perf_t6 = perf_now();
 
     if(g_current_screen != SCR_NOW_PLAYING) ui_mini_update();
+    if(g_ui_trace) {
+        uint32_t perf_t7 = perf_now();
+        uint32_t dt = perf_t7 - perf_t0;
+        if(dt > 8000) {
+            UI_PERF_LOG("tick slow: %u us (clock=%u status=%u menu=%u dev=%u ptick=%u page=%u mini=%u)",
+                         (unsigned)dt,
+                         (unsigned)(perf_t1 - perf_t0),
+                         (unsigned)(perf_t2 - perf_t1),
+                         (unsigned)(perf_t3 - perf_t2),
+                         (unsigned)(perf_t4 - perf_t3),
+                         (unsigned)(perf_t5 - perf_t4),
+                         (unsigned)(perf_t6 - perf_t5),
+                         (unsigned)(perf_t7 - perf_t6));
+        }
+    }
 }
 
 static void settings_time_blink_timer_cb(lv_timer_t * timer)
@@ -1584,6 +1701,7 @@ static void ui_show_screen(screen_id_t id)
         return;
     }
 
+    if(id != SCR_BLUETOOTH) g_ble_return_screen = SCR_COUNT;
     g_current_screen = id;
     ui_exit_edit();
     focus_clear();
@@ -1592,7 +1710,7 @@ static void ui_show_screen(screen_id_t id)
     ui_layout_page_area();
     uint32_t trace_start = lv_tick_get();
     g_pages[id].create(g_page);
-    if(getenv("IAP2TAB5_TRACE")) {
+    if(g_ui_trace || getenv("IAP2TAB5_TRACE")) {
         fprintf(stderr, "[trace] create screen %d in %u ms\n", (int)id,
                 (unsigned)(lv_tick_get() - trace_start));
     }
@@ -1607,7 +1725,7 @@ static void ui_rebuild_page(void)
     ui_set_hint("");
     uint32_t trace_start = lv_tick_get();
     g_pages[g_current_screen].create(g_page);
-    if(getenv("IAP2TAB5_TRACE")) {
+    if(g_ui_trace || getenv("IAP2TAB5_TRACE")) {
         fprintf(stderr, "[trace] rebuild screen %d in %u ms\n",
                 (int)g_current_screen, (unsigned)(lv_tick_get() - trace_start));
     }
@@ -1624,8 +1742,12 @@ static void ui_back(void)
     if(g_pages[g_current_screen].back && g_pages[g_current_screen].back()) {
         return;
     }
-    if(g_current_screen != SCR_NOW_PLAYING) {
-        ui_show_screen(SCR_NOW_PLAYING);
+    screen_id_t fallback = SCR_NOW_PLAYING;
+    if(g_current_screen == SCR_BLUETOOTH && g_ble_return_screen != SCR_COUNT) {
+        fallback = g_ble_return_screen;
+    }
+    if(g_current_screen != fallback) {
+        ui_show_screen(fallback);
     }
 }
 
@@ -1780,16 +1902,18 @@ void ui_handle_key(ui_key_t key)
         case UI_KEY_PAGE_DOWN:
             ui_list_page(1);
             break;
-        case UI_KEY_SCREEN_PREV:
-            if(g_current_screen > 0) {
-                ui_show_screen((screen_id_t)(g_current_screen - 1));
-            }
+        case UI_KEY_SCREEN_PREV: {
+            int target = (int)g_current_screen - 1;
+            if(target == SCR_BLUETOOTH) target--;
+            if(target >= 0) ui_show_screen((screen_id_t)target);
             break;
-        case UI_KEY_SCREEN_NEXT:
-            if(g_current_screen < SCR_COUNT - 1) {
-                ui_show_screen((screen_id_t)(g_current_screen + 1));
-            }
+        }
+        case UI_KEY_SCREEN_NEXT: {
+            int target = (int)g_current_screen + 1;
+            if(target == SCR_BLUETOOTH) target++;
+            if(target < SCR_COUNT) ui_show_screen((screen_id_t)target);
             break;
+        }
         default:
             break;
     }
@@ -2829,11 +2953,12 @@ static void np_create(lv_obj_t * parent)
 #define ALBUMS_LIST_H      (ALBUMS_VISIBLE_ROWS * ALBUMS_ROW_H + \
                             (ALBUMS_VISIBLE_ROWS - 1) * LIST_ROW_GAP)
 #define ALBUMS_STRIDE      (ALBUMS_ROW_H + LIST_ROW_GAP)
-#define ALBUMS_POOL        10
+#define ALBUMS_POOL        8
 #define ALBUM_TRACK_ROW_H  52
 #define ALBUM_HEADER_H     (34 + ALBUM_TRACK_ROW_H)
 #define ALBUM_TRACK_ROWS   9
 #define ALBUM_TRACK_LIST_H (ALBUM_TRACK_ROWS * ALBUM_TRACK_ROW_H)
+#define ALBUM_DETAIL_MAX_TRACKS 18
 
 static int albums_selected;
 static bool albums_detail_open;
@@ -2846,6 +2971,12 @@ static lv_obj_t * albums_row_covers[ALBUMS_POOL];
 static lv_obj_t * albums_row_titles[ALBUMS_POOL];
 static lv_obj_t * albums_row_artists[ALBUMS_POOL];
 static uint32_t albums_swipe_guard;
+static uint64_t albums_row_album_ids[ALBUMS_POOL];
+static int albums_row_indices[ALBUMS_POOL] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+static bool albums_row_visible[ALBUMS_POOL];
+static bool albums_row_selected[ALBUMS_POOL];
+static int albums_view_top;
+static int albums_view_h;
 static int albums_first_index = -1;
 static bool albums_detail_dirty;
 static lv_timer_t * albums_detail_timer;
@@ -2877,12 +3008,24 @@ static void albums_apply_row_style(lv_obj_t * row, int index)
 {
     bool selected = (index == albums_selected);
     bool focused = selected && !albums_detail_open;
-
     lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_bg_color(row, lv_color_hex(focused ? COL_FOCUS : COL_ACCENT_DARK), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(focused ? COL_FOCUS
+                                                       : COL_ACCENT_DARK), 0);
     lv_obj_set_style_border_width(row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+}
+
+static void albums_update_selection(void)
+{
+    for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+        int index = albums_row_indices[slot];
+        bool selected = (index >= 0 && index == albums_selected);
+        if(albums_row_selected[slot] != selected) {
+            albums_row_selected[slot] = selected;
+            albums_apply_row_style(albums_rows[slot], index);
+        }
+    }
 }
 
 static void albums_fill_row(int slot, int index)
@@ -2902,44 +3045,94 @@ static void albums_fill_row(int slot, int index)
     /* Only decode covers that are actually inside the viewport. The pool has
      * a few rows above/below the visible area; loading those covers just
      * wastes SPIFFS reads and PSRAM. */
-    int top = lv_obj_get_scroll_top(albums_left_list);
-    if(top < 0) top = 0;
-    int view_h = lv_obj_get_height(albums_left_list);
+    int top = albums_view_top;
+    int view_h = albums_view_h;
     int row_top = index * ALBUMS_STRIDE;
     bool visible = row_top < top + view_h && row_top + ALBUMS_ROW_H > top;
 
-    if(visible) {
-        lv_image_set_src(albums_row_covers[slot], thumb_for_album(&album, 54));
+    bool same = albums_row_album_ids[slot] == album.id &&
+                albums_row_indices[slot] == index;
+    if(!same) {
+        lv_label_set_text(albums_row_titles[slot], album.title);
+        lv_label_set_text(albums_row_artists[slot], album.artist);
+        lv_obj_set_style_bg_color(albums_row_covers[slot],
+                                  lv_color_hex(album.color ? album.color : COL_PANEL), 0);
+        albums_row_album_ids[slot] = album.id;
+        albums_row_indices[slot] = index;
+        albums_row_visible[slot] = !visible; /* force the cover update below */
     }
-    else {
-        lv_image_set_src(albums_row_covers[slot], NULL);
+    if(visible != albums_row_visible[slot]) {
+        lv_image_set_src(albums_row_covers[slot],
+                         visible ? thumb_for_album(&album, 54) : NULL);
+        albums_row_visible[slot] = visible;
     }
-    lv_obj_set_style_bg_color(albums_row_covers[slot],
-                              lv_color_hex(album.color ? album.color : COL_PANEL), 0);
-    lv_label_set_text(albums_row_titles[slot], album.title);
-    lv_label_set_text(albums_row_artists[slot], album.artist);
     albums_apply_row_style(row, index);
+    albums_row_selected[slot] = (index == albums_selected);
 }
 
 static void albums_refresh_rows(void)
 {
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     if(albums_left_list == NULL) return;
     int count = player_album_count();
     if(count <= 0) {
-        for(int i = 0; i < ALBUMS_POOL; i++) lv_obj_set_hidden(albums_rows[i], true);
+        for(int i = 0; i < ALBUMS_POOL; i++) {
+            lv_obj_set_hidden(albums_rows[i], true);
+            albums_row_indices[i] = -1;
+        }
+        perf_log_us("albums_refresh", perf_t0);
         return;
     }
 
     int top = lv_obj_get_scroll_top(albums_left_list);
     if(top < 0) top = 0;
+    albums_view_top = top;
+    albums_view_h = lv_obj_get_height(albums_left_list);
     int first = top / ALBUMS_STRIDE;
     if(first > 0) first--;
     if(first > count - 1) first = count - 1;
     albums_first_index = first;
 
-    for(int i = 0; i < ALBUMS_POOL; i++) {
-        albums_fill_row(i, first + i);
+    int end = first + ALBUMS_POOL;
+    if(end > count) end = count;
+
+    /* Keep the existing widgets for the overlapping window and only fill the
+     * slots that scrolled out.  Rebuilding all 10 rows on every one-row move
+     * cost ~80 ms because each row re-laid out text and artwork. */
+    for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+        int index = albums_row_indices[slot];
+        if(index < first || index >= end) {
+            albums_row_indices[slot] = -1;
+        }
     }
+    for(int index = first; index < end; index++) {
+        bool present = false;
+        for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+            if(albums_row_indices[slot] == index) {
+                present = true;
+                break;
+            }
+        }
+        if(present) continue;
+        int free_slot = -1;
+        for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+            if(albums_row_indices[slot] < 0) {
+                free_slot = slot;
+                break;
+            }
+        }
+        if(free_slot < 0) break;
+        albums_fill_row(free_slot, index);
+    }
+    for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+        if(albums_row_indices[slot] >= 0) {
+            albums_apply_row_style(albums_rows[slot], albums_row_indices[slot]);
+        }
+        else {
+            lv_obj_set_hidden(albums_rows[slot], true);
+        }
+    }
+    perf_log_us("albums_refresh", perf_t0);
 }
 
 static void albums_scroll_cb(lv_event_t * event)
@@ -2959,7 +3152,9 @@ static void albums_detail_timer_cb(lv_timer_t * timer)
     lv_timer_pause(timer);
     if(albums_detail_dirty && albums_right_content != NULL) {
         albums_detail_dirty = false;
+        uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
         albums_render_detail(albums_right_content, albums_detail_open);
+        perf_log_us("albums_detail", perf_t0);
     }
 }
 
@@ -2967,7 +3162,7 @@ static void albums_schedule_detail(void)
 {
     albums_detail_dirty = true;
     if(albums_detail_timer == NULL) {
-        albums_detail_timer = lv_timer_create(albums_detail_timer_cb, 260, NULL);
+        albums_detail_timer = lv_timer_create(albums_detail_timer_cb, 140, NULL);
         if(albums_detail_timer == NULL) return;
         lv_timer_pause(albums_detail_timer);
     }
@@ -3027,22 +3222,30 @@ static void albums_scroll_to_selected(void)
     if(new_top != top) {
         lv_obj_scroll_to_y(albums_left_list, new_top, LV_ANIM_OFF);
     }
-    albums_refresh_rows();
+    int actual = lv_obj_get_scroll_top(albums_left_list);
+    if(actual < 0) actual = 0;
+    int first = actual / ALBUMS_STRIDE;
+    if(first > 0) first--;
+    if(first != albums_first_index) {
+        albums_refresh_rows();
+    }
+    else {
+        albums_update_selection();
+    }
 }
 
 static void albums_select(int index)
 {
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     int count = player_album_count();
     if(count <= 0) return;
     if(index < 0) index = 0;
     if(index >= count) index = count - 1;
     albums_selected = index;
     albums_update_count();
-    albums_detail_dirty = false;
-    if(albums_detail_timer) lv_timer_pause(albums_detail_timer);
-    if(albums_right_content) albums_render_detail(albums_right_content, false);
     albums_scroll_to_selected();
-    albums_refresh_rows();
+    if(albums_right_content) albums_schedule_detail();
+    perf_log_us("albums_select", perf_t0);
 }
 
 static void albums_open(void * user)
@@ -3054,7 +3257,7 @@ static void albums_open(void * user)
     albums_update_count();
     albums_detail_open = true;
     albums_rebuild();
-    if(g_focus_count > 0) focus_select(1);
+    if(g_focus_count > 0) focus_select(0);
 }
 
 static void albums_track_action(void * user)
@@ -3141,25 +3344,6 @@ static bool albums_back(void)
     return false;
 }
 
-static void albums_back_action(void * user)
-{
-    LV_UNUSED(user);
-    albums_detail_open = false;
-    albums_rebuild();
-}
-
-static void albums_back_async(void * arg)
-{
-    LV_UNUSED(arg);
-    albums_back_action(NULL);
-}
-
-static void albums_back_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    ui_call_async(albums_back_async, NULL);
-}
-
 static void albums_same_key(void)
 {
     if(albums_detail_open) {
@@ -3221,8 +3405,6 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
                                   COL_TEXT);
     lv_obj_set_flex_grow(title, 1);
     lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
-    make_header_back(title_row, interactive, albums_back_action,
-                     albums_back_touch_cb, NULL);
 
     char subtitle[96];
     snprintf(subtitle, sizeof(subtitle), "%s  |  %u  |  %u tracks",
@@ -3248,7 +3430,9 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
 
-    for(int i = 0; i < track_count; i++) {
+    int max_tracks = interactive ? ALBUM_DETAIL_MAX_TRACKS : 3;
+    if(max_tracks > track_count) max_tracks = track_count;
+    for(int i = 0; i < max_tracks; i++) {
         player_track_t track;
         if(!player_album_track_get(album.id, i, &track)) continue;
         bool current = (track.id == snapshot.track.id);
@@ -3280,6 +3464,11 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
             touch_add_clickable(row, albums_track_touch_cb, (void *)(intptr_t)i);
         }
     }
+    if(interactive && max_tracks < track_count) {
+        lv_obj_t * more = make_label(track_list, "More tracks not shown",
+                                     FONT_CAPTION, COL_MUTED);
+        lv_obj_set_height(more, 32);
+    }
 }
 
 static void albums_create(lv_obj_t * parent)
@@ -3288,6 +3477,12 @@ static void albums_create(lv_obj_t * parent)
     albums_left_list = NULL;
     albums_count_label = NULL;
     albums_first_index = -1;
+    for(int i = 0; i < ALBUMS_POOL; i++) {
+        albums_row_album_ids[i] = 0;
+        albums_row_indices[i] = -1;
+        albums_row_visible[i] = false;
+        albums_row_selected[i] = false;
+    }
     albums_detail_dirty = false;
     if(albums_detail_timer) lv_timer_pause(albums_detail_timer);
 
@@ -3393,7 +3588,7 @@ static void albums_create(lv_obj_t * parent)
     albums_refresh_rows();
 
     if(albums_detail_open) {
-        focus_select(1);
+        focus_select(0);
         ui_set_hint("UP/DOWN Select   ENTER Play   7 Play/Pause");
     }
     else {
@@ -3409,13 +3604,15 @@ static void albums_create(lv_obj_t * parent)
 #define ARTISTS_LIST_H      (ARTISTS_VISIBLE_ROWS * ARTISTS_ROW_H)
 #define ARTIST_ALBUM_HEADER_H 56
 #define ARTIST_TRACK_ROW_H    56
-#define ARTIST_ALBUM_MAX      10
-#define ARTIST_TRACKS_PER_ALBUM 12
-#define ARTIST_DETAIL_MAX_ROWS  72
-#define ARTISTS_POOL          12
+#define ARTIST_ALBUM_MAX      4
+#define ARTIST_TRACKS_PER_ALBUM 6
+#define ARTIST_DETAIL_MAX_ROWS  24
+#define ARTISTS_POOL          11
 
 static int artists_selected;
 static bool artists_detail_open;
+static bool artists_detail_dirty;
+static lv_timer_t * artists_detail_timer;
 static lv_obj_t * artists_right_content;
 static lv_obj_t * artists_left_list;
 static lv_obj_t * artists_count_label;
@@ -3423,6 +3620,8 @@ static int artists_left_scroll_y;
 static lv_obj_t * artists_rows[ARTISTS_POOL];
 static lv_obj_t * artists_names[ARTISTS_POOL];
 static lv_obj_t * artists_metas[ARTISTS_POOL];
+static uint64_t artists_row_ids[ARTISTS_POOL];
+static int artists_row_indices[ARTISTS_POOL] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 static int artists_first_index = -1;
 
 static void artists_update_count(void)
@@ -3440,8 +3639,6 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive);
 static void artists_open(void * user);
 static void artists_select(int index);
 static void artists_scroll_to_selected(void);
-static void artists_refresh_rows(void);
-
 static void artists_apply_row_style(lv_obj_t * row, int index)
 {
     bool selected = (index == artists_selected);
@@ -3461,26 +3658,37 @@ static void artists_fill_row(int slot, int index)
     if(index < 0 || index >= player_artist_count() ||
        !player_artist_get(index, &artist)) {
         lv_obj_set_hidden(row, true);
+        artists_row_indices[slot] = -1;
         return;
     }
     lv_obj_set_hidden(row, false);
     lv_obj_set_pos(row, 0, index * ARTISTS_ROW_H);
     lv_obj_set_user_data(row, (void *)(intptr_t)index);
-    lv_label_set_text(artists_names[slot], artist.name);
-    char albums_text[32];
-    snprintf(albums_text, sizeof(albums_text),
-             artist.album_count == 1 ? "%u album" : "%u albums",
-             artist.album_count);
-    lv_label_set_text(artists_metas[slot], albums_text);
+    if(artists_row_ids[slot] != artist.id ||
+       artists_row_indices[slot] != index) {
+        lv_label_set_text(artists_names[slot], artist.name);
+        char albums_text[32];
+        snprintf(albums_text, sizeof(albums_text),
+                 artist.album_count == 1 ? "%u album" : "%u albums",
+                 artist.album_count);
+        lv_label_set_text(artists_metas[slot], albums_text);
+        artists_row_ids[slot] = artist.id;
+        artists_row_indices[slot] = index;
+    }
     artists_apply_row_style(row, index);
 }
 
 static void artists_refresh_rows(void)
 {
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     if(artists_left_list == NULL) return;
     int count = player_artist_count();
     if(count <= 0) {
-        for(int i = 0; i < ARTISTS_POOL; i++) lv_obj_set_hidden(artists_rows[i], true);
+        for(int i = 0; i < ARTISTS_POOL; i++) {
+            lv_obj_set_hidden(artists_rows[i], true);
+            artists_row_indices[i] = -1;
+        }
+        perf_log_us("artists_refresh", perf_t0);
         return;
     }
     int top = lv_obj_get_scroll_top(artists_left_list);
@@ -3489,9 +3697,35 @@ static void artists_refresh_rows(void)
     if(first > 0) first--;
     if(first > count - 1) first = count - 1;
     artists_first_index = first;
-    for(int i = 0; i < ARTISTS_POOL; i++) {
-        artists_fill_row(i, first + i);
+
+    int end = first + ARTISTS_POOL;
+    if(end > count) end = count;
+    for(int slot = 0; slot < ARTISTS_POOL; slot++) {
+        int index = artists_row_indices[slot];
+        if(index < first || index >= end) artists_row_indices[slot] = -1;
     }
+    for(int index = first; index < end; index++) {
+        bool present = false;
+        for(int slot = 0; slot < ARTISTS_POOL; slot++) {
+            if(artists_row_indices[slot] == index) { present = true; break; }
+        }
+        if(present) continue;
+        int free_slot = -1;
+        for(int slot = 0; slot < ARTISTS_POOL; slot++) {
+            if(artists_row_indices[slot] < 0) { free_slot = slot; break; }
+        }
+        if(free_slot < 0) break;
+        artists_fill_row(free_slot, index);
+    }
+    for(int slot = 0; slot < ARTISTS_POOL; slot++) {
+        if(artists_row_indices[slot] >= 0) {
+            artists_apply_row_style(artists_rows[slot], artists_row_indices[slot]);
+        }
+        else {
+            lv_obj_set_hidden(artists_rows[slot], true);
+        }
+    }
+    perf_log_us("artists_refresh", perf_t0);
 }
 
 static void artists_scroll_cb(lv_event_t * event)
@@ -3529,8 +3763,33 @@ static void artists_scroll_to_selected(void)
     artists_refresh_rows();
 }
 
+static void artists_detail_timer_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    if(artists_detail_dirty && artists_right_content != NULL) {
+        artists_detail_dirty = false;
+        uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
+        artists_render_detail(artists_right_content, artists_detail_open);
+        perf_log_us("artists_detail", perf_t0);
+    }
+}
+
+static void artists_schedule_detail(void)
+{
+    artists_detail_dirty = true;
+    if(artists_detail_timer == NULL) {
+        artists_detail_timer = lv_timer_create(artists_detail_timer_cb, 140,
+                                               NULL);
+        if(artists_detail_timer == NULL) return;
+        lv_timer_pause(artists_detail_timer);
+    }
+    lv_timer_reset(artists_detail_timer);
+    lv_timer_resume(artists_detail_timer);
+}
+
 static void artists_select(int index)
 {
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     int count = player_artist_count();
     if(count <= 0) return;
     if(index < 0) index = 0;
@@ -3542,10 +3801,9 @@ static void artists_select(int index)
         artists_selected = index;
         artists_update_count();
         artists_scroll_to_selected();
-        if(artists_right_content) {
-            artists_render_detail(artists_right_content, artists_detail_open);
-        }
+        if(artists_right_content) artists_schedule_detail();
     }
+    perf_log_us("artists_select", perf_t0);
 }
 
 static bool artists_key(ui_key_t key)
@@ -3583,7 +3841,7 @@ static void artists_open(void * user)
     artists_update_count();
     artists_detail_open = true;
     artists_rebuild();
-    if(g_focus_count > 0) focus_select(1);
+    if(g_focus_count > 0) focus_select(0);
 }
 
 static void artists_album_action(void * user)
@@ -3597,22 +3855,11 @@ static void artists_album_action(void * user)
 static void artists_track_action(void * user)
 {
     int track_index = (int)(intptr_t)user;
-    player_artist_t artist;
-    if(!player_artist_get(artists_selected, &artist)) return;
-
-    /* The detail rows store the global track index (for player_song_get).
-     * Convert it to the artist-relative queue position used by
-     * player_play_artist(). */
-    int queue_index = 0;
-    int songs = player_song_count();
-    for(int i = 0; i < track_index && i < songs; i++) {
-        player_track_t track;
-        if(player_song_get(i, &track) && track.artist_id == artist.id) {
-            queue_index++;
-        }
+    player_track_t track;
+    if(track_index >= 0 && track_index < player_song_count() &&
+       player_song_get(track_index, &track)) {
+        player_play_track(track.id);
     }
-    player_play_artist(artist.id);
-    player_queue_jump(queue_index);
 }
 
 static void artists_open_async(void * arg)
@@ -3654,25 +3901,6 @@ static bool artists_back(void)
         return true;
     }
     return false;
-}
-
-static void artists_back_action(void * user)
-{
-    LV_UNUSED(user);
-    artists_detail_open = false;
-    artists_rebuild();
-}
-
-static void artists_back_async(void * arg)
-{
-    LV_UNUSED(arg);
-    artists_back_action(NULL);
-}
-
-static void artists_back_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    ui_call_async(artists_back_async, NULL);
 }
 
 static void artists_same_key(void)
@@ -3721,8 +3949,11 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_style_pad_all(spacer, 0, 0);
     lv_obj_set_scrollable(spacer, false);
 
-    make_header_back(head, interactive, artists_back_action,
-                     artists_back_touch_cb, NULL);
+    if(!interactive) {
+        make_label(parent, "Press ENTER to open artist", FONT_CAPTION,
+                   COL_MUTED);
+        return;
+    }
 
     lv_obj_t * album_list = make_scroll(parent);
     /* 10 rows x 56 px = 560 px viewport. */
@@ -3852,9 +4083,16 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
 
 static void artists_create(lv_obj_t * parent)
 {
+    if(artists_detail_timer) lv_timer_pause(artists_detail_timer);
+    artists_detail_dirty = false;
     artists_right_content = NULL;
     artists_left_list = NULL;
     artists_count_label = NULL;
+    artists_first_index = -1;
+    for(int i = 0; i < ARTISTS_POOL; i++) {
+        artists_row_ids[i] = 0;
+        artists_row_indices[i] = -1;
+    }
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
@@ -3948,7 +4186,7 @@ static void artists_create(lv_obj_t * parent)
     artists_refresh_rows();
 
     if(artists_detail_open) {
-        focus_select(1);
+        focus_select(0);
         ui_set_hint("UP/DOWN Select   ENTER Play   7 Play/Pause");
     }
     else {
@@ -4332,7 +4570,7 @@ static bool context_menu_key(ui_key_t key)
 #define SONGS_ROW_H        56
 #define SONGS_VISIBLE_ROWS 10
 #define SONGS_LIST_H       (SONGS_VISIBLE_ROWS * SONGS_ROW_H)
-#define SONGS_POOL         14
+#define SONGS_POOL         12
 
 static int songs_selected;
 static lv_obj_t * songs_list;
@@ -4344,6 +4582,10 @@ static lv_obj_t * songs_artists[SONGS_POOL];
 static lv_obj_t * songs_albums[SONGS_POOL];
 static lv_obj_t * songs_lengths[SONGS_POOL];
 static int songs_start_index = -1;
+static uint64_t songs_row_ids[SONGS_POOL];
+static int songs_row_indices[SONGS_POOL] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+static bool songs_row_current[SONGS_POOL];
+static bool songs_row_selected[SONGS_POOL];
 static uint64_t songs_last_track;
 static uint32_t songs_swipe_guard;
 
@@ -4356,24 +4598,8 @@ static void songs_apply_selection(lv_obj_t * row, bool selected)
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
 }
 
-static void songs_fill_row(int slot, int index)
+static void songs_set_marker(int slot, bool current, int index)
 {
-    lv_obj_t * row = songs_rows[slot];
-    player_track_t track;
-    if(index < 0 || index >= player_song_count() ||
-       !player_song_get(index, &track)) {
-        lv_obj_set_hidden(row, true);
-        return;
-    }
-
-    lv_obj_set_hidden(row, false);
-    lv_obj_set_pos(row, 0, index * SONGS_ROW_H);
-    lv_obj_set_user_data(row, (void *)(intptr_t)index);
-
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
-    bool current = (track.id == snapshot.track.id);
-
     if(current) {
         lv_label_set_text(songs_markers[slot], ICON_PLAY);
         lv_obj_set_style_text_font(songs_markers[slot], &bootstrap_icons_24, 0);
@@ -4386,24 +4612,82 @@ static void songs_fill_row(int slot, int index)
         lv_obj_set_style_text_font(songs_markers[slot], FONT_NUM, 0);
         lv_obj_set_style_text_color(songs_markers[slot], lv_color_hex(COL_MUTED), 0);
     }
+}
 
-    lv_label_set_text(songs_titles[slot], track.title);
-    lv_obj_set_style_text_color(songs_titles[slot],
-                                lv_color_hex(current ? COL_ACCENT : COL_TEXT), 0);
-    lv_label_set_text(songs_artists[slot], track.artist);
-    lv_label_set_text(songs_albums[slot], track.album);
-    char duration[16];
-    format_time(track.duration_sec, duration, sizeof(duration));
-    lv_label_set_text(songs_lengths[slot], duration);
+static void songs_fill_row(int slot, int index,
+                           const player_snapshot_t * snapshot)
+{
+    lv_obj_t * row = songs_rows[slot];
+    player_track_t track;
+    if(index < 0 || index >= player_song_count() ||
+       !player_song_get(index, &track)) {
+        lv_obj_set_hidden(row, true);
+        songs_row_ids[slot] = 0;
+        songs_row_indices[slot] = -1;
+        return;
+    }
+
+    lv_obj_set_hidden(row, false);
+    lv_obj_set_pos(row, 0, index * SONGS_ROW_H);
+    lv_obj_set_user_data(row, (void *)(intptr_t)index);
+
+    if(songs_row_indices[slot] == index && songs_row_ids[slot] == track.id) {
+        bool current = (track.id == snapshot->track.id);
+        if(songs_row_current[slot] != current) {
+            songs_row_current[slot] = current;
+            songs_set_marker(slot, current, index);
+        }
+        songs_apply_selection(row, index == songs_selected);
+        songs_row_selected[slot] = (index == songs_selected);
+        return;
+    }
+
+    bool current = (track.id == snapshot->track.id);
+    if(true) {
+        songs_set_marker(slot, current, index);
+
+        lv_label_set_text(songs_titles[slot], track.title);
+        lv_obj_set_style_text_color(songs_titles[slot],
+                                    lv_color_hex(current ? COL_ACCENT : COL_TEXT), 0);
+        lv_label_set_text(songs_artists[slot], track.artist);
+        lv_label_set_text(songs_albums[slot], track.album);
+        char duration[16];
+        format_time(track.duration_sec, duration, sizeof(duration));
+        lv_label_set_text(songs_lengths[slot], duration);
+        songs_row_ids[slot] = track.id;
+        songs_row_indices[slot] = index;
+        songs_row_current[slot] = current;
+    }
 
     songs_apply_selection(row, index == songs_selected);
+    songs_row_selected[slot] = (index == songs_selected);
+}
+
+static void songs_update_selection(void)
+{
+    for(int i = 0; i < SONGS_POOL; i++) {
+        int index = songs_row_indices[i];
+        bool selected = (index >= 0 && index == songs_selected);
+        if(songs_row_selected[i] != selected) {
+            songs_row_selected[i] = selected;
+            songs_apply_selection(songs_rows[i], selected);
+        }
+    }
 }
 
 static void songs_refresh_rows(void)
 {
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     if(songs_list == NULL) return;
     int count = player_song_count();
-    if(count <= 0) return;
+    if(count <= 0) {
+        for(int i = 0; i < SONGS_POOL; i++) {
+            lv_obj_set_hidden(songs_rows[i], true);
+            songs_row_indices[i] = -1;
+        }
+        perf_log_us("songs_refresh", perf_t0);
+        return;
+    }
     if(songs_selected < 0) songs_selected = 0;
     if(songs_selected >= count) songs_selected = count - 1;
 
@@ -4414,9 +4698,33 @@ static void songs_refresh_rows(void)
     if(start > count - 1) start = count - 1;
     songs_start_index = start;
 
-    for(int i = 0; i < SONGS_POOL; i++) {
-        songs_fill_row(i, start + i);
+    int end = start + SONGS_POOL;
+    if(end > count) end = count;
+    for(int slot = 0; slot < SONGS_POOL; slot++) {
+        int index = songs_row_indices[slot];
+        if(index < start || index >= end) songs_row_indices[slot] = -1;
     }
+
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+    for(int index = start; index < end; index++) {
+        bool present = false;
+        for(int slot = 0; slot < SONGS_POOL; slot++) {
+            if(songs_row_indices[slot] == index) { present = true; break; }
+        }
+        if(present) continue;
+        int free_slot = -1;
+        for(int slot = 0; slot < SONGS_POOL; slot++) {
+            if(songs_row_indices[slot] < 0) { free_slot = slot; break; }
+        }
+        if(free_slot < 0) break;
+        songs_fill_row(free_slot, index, &snapshot);
+    }
+    for(int slot = 0; slot < SONGS_POOL; slot++) {
+        if(songs_row_indices[slot] < 0) lv_obj_set_hidden(songs_rows[slot], true);
+    }
+    songs_update_selection();
+    perf_log_us("songs_refresh", perf_t0);
 }
 
 static void songs_scroll_cb(lv_event_t * event)
@@ -4485,7 +4793,16 @@ static void songs_scroll_to_selected(void)
     if(new_top != top) {
         lv_obj_scroll_to_y(songs_list, new_top, LV_ANIM_OFF);
     }
-    songs_refresh_rows();
+    int actual = lv_obj_get_scroll_top(songs_list);
+    if(actual < 0) actual = 0;
+    int start = actual / SONGS_ROW_H;
+    if(start > 0) start--;
+    if(start != songs_start_index) {
+        songs_refresh_rows();
+    }
+    else {
+        songs_update_selection();
+    }
 }
 
 static void songs_update_count(void)
@@ -4504,6 +4821,7 @@ static void songs_update_count(void)
 
 static void songs_select(int index)
 {
+    uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     int count = player_song_count();
     if(count <= 0) return;
     if(index < 0) index = 0;
@@ -4511,6 +4829,7 @@ static void songs_select(int index)
     songs_selected = index;
     songs_update_count();
     songs_scroll_to_selected();
+    perf_log_us("songs_select", perf_t0);
 }
 
 static void songs_activate(void)
@@ -4660,6 +4979,12 @@ static void songs_create(lv_obj_t * parent)
 
     lv_obj_update_layout(panel);
     songs_start_index = -1;
+    for(int i = 0; i < SONGS_POOL; i++) {
+        songs_row_ids[i] = 0;
+        songs_row_indices[i] = -1;
+        songs_row_current[i] = false;
+        songs_row_selected[i] = false;
+    }
     songs_refresh_rows();
     songs_scroll_to_selected();
     songs_update_count();
@@ -4679,9 +5004,12 @@ static void songs_create(lv_obj_t * parent)
 #define PLAYLIST_TRACK_ROW_H   56
 #define PLAYLIST_TRACK_ROWS    9
 #define PLAYLIST_TRACK_LIST_H  (PLAYLIST_TRACK_ROWS * PLAYLIST_TRACK_ROW_H)
+#define PLAYLIST_DETAIL_MAX_TRACKS 24
 
 static int playlists_selected;
 static bool playlists_detail_open;
+static bool playlists_detail_dirty;
+static lv_timer_t * playlists_detail_timer;
 static lv_obj_t * playlists_left_list;
 static lv_obj_t * playlists_right_content;
 static lv_obj_t * playlists_count_label;
@@ -4701,15 +5029,37 @@ static void playlists_update_count(void)
 
 static void playlists_render_detail(lv_obj_t * parent, bool interactive);
 
+static void playlists_detail_timer_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    if(playlists_detail_dirty && playlists_right_content != NULL) {
+        playlists_detail_dirty = false;
+        uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
+        playlists_render_detail(playlists_right_content, false);
+        perf_log_us("playlists_detail", perf_t0);
+    }
+}
+
+static void playlists_schedule_detail(void)
+{
+    playlists_detail_dirty = true;
+    if(playlists_detail_timer == NULL) {
+        playlists_detail_timer = lv_timer_create(playlists_detail_timer_cb,
+                                                 140, NULL);
+        if(playlists_detail_timer == NULL) return;
+        lv_timer_pause(playlists_detail_timer);
+    }
+    lv_timer_reset(playlists_detail_timer);
+    lv_timer_resume(playlists_detail_timer);
+}
+
 static void playlists_row_focus(void * user)
 {
     int index = (int)(intptr_t)user;
     if(index == playlists_selected) return;
     playlists_selected = index;
     playlists_update_count();
-    if(playlists_right_content) {
-        playlists_render_detail(playlists_right_content, false);
-    }
+    if(playlists_right_content) playlists_schedule_detail();
 }
 
 static void playlists_rebuild(void)
@@ -4729,7 +5079,7 @@ static void playlists_open(void * user)
     playlists_update_count();
     playlists_detail_open = true;
     playlists_rebuild();
-    if(g_focus_count > 0) focus_select(1);
+    if(g_focus_count > 0) focus_select(0);
 }
 
 static void playlists_play_action(void * user)
@@ -4741,8 +5091,10 @@ static void playlists_play_action(void * user)
 static void playlists_track_action(void * user)
 {
     int index = (int)(intptr_t)user;
-    player_play_playlist(playlists_selected);
-    player_queue_jump(index);
+    player_track_t track;
+    if(player_playlist_track_get(playlists_selected, index, &track)) {
+        player_play_track(track.id);
+    }
 }
 
 static void playlists_open_async(void * arg)
@@ -4784,25 +5136,6 @@ static bool playlists_back(void)
         return true;
     }
     return false;
-}
-
-static void playlists_back_action(void * user)
-{
-    LV_UNUSED(user);
-    playlists_detail_open = false;
-    playlists_rebuild();
-}
-
-static void playlists_back_async(void * arg)
-{
-    LV_UNUSED(arg);
-    playlists_back_action(NULL);
-}
-
-static void playlists_back_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    ui_call_async(playlists_back_async, NULL);
 }
 
 static void playlists_same_key(void)
@@ -4860,8 +5193,6 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_style_pad_all(spacer, 0, 0);
     lv_obj_set_scrollable(spacer, false);
 
-    make_header_back(head, interactive, playlists_back_action,
-                     playlists_back_touch_cb, NULL);
 
     lv_obj_t * play_row = make_row(parent, 48);
     make_icon(play_row, ICON_PLAY_OUTLINE, COL_ACCENT);
@@ -4882,7 +5213,9 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
     int count = player_playlist_track_count(playlists_selected);
-    for(int i = 0; i < count; i++) {
+    int max_tracks = interactive ? PLAYLIST_DETAIL_MAX_TRACKS : 3;
+    int shown = 0;
+    for(int i = 0; i < count && shown < max_tracks; i++) {
         player_track_t track;
         if(!player_playlist_track_get(playlists_selected, i, &track)) continue;
         bool current = (track.id == snapshot.track.id);
@@ -4919,11 +5252,19 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
             touch_add_clickable(row, playlists_track_touch_cb,
                                 (void *)(intptr_t)i);
         }
+        shown++;
+    }
+    if(interactive && shown < count) {
+        lv_obj_t * more = make_label(track_list, "More tracks not shown",
+                                     FONT_CAPTION, COL_MUTED);
+        lv_obj_set_height(more, 32);
     }
 }
 
 static void playlists_create(lv_obj_t * parent)
 {
+    if(playlists_detail_timer) lv_timer_pause(playlists_detail_timer);
+    playlists_detail_dirty = false;
     playlists_right_content = NULL;
     playlists_left_list = NULL;
     playlists_count_label = NULL;
@@ -5023,7 +5364,7 @@ static void playlists_create(lv_obj_t * parent)
 
     playlists_update_count();
     if(playlists_detail_open) {
-        focus_select(1);
+        focus_select(0);
         ui_set_hint("UP/DOWN Select   ENTER Play   7 Play/Pause");
     }
     else {
@@ -5273,6 +5614,7 @@ static void ble_tick(void)
  * ------------------------------------------------------------------------- */
 enum {
     SETTING_GENERAL = 0,
+    SETTING_BLUETOOTH,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
     SETTING_DEVICE,
@@ -5295,6 +5637,8 @@ static lv_obj_t * settings_time_ampm_value;
 static bool settings_time_open;
 static bool settings_time_editing;
 static bool settings_time_blink_on;
+static bool settings_detail_dirty;
+static lv_timer_t * settings_detail_timer;
 enum {
     SETTINGS_TIME_NONE = 0,
     SETTINGS_TIME_HOUR,
@@ -5362,6 +5706,7 @@ static void settings_rebuild(void);
 
 static const char * const settings_names[SETTING_COUNT] = {
     "General",
+    "Bluetooth",
     "Theme",
     "Now Playing Background",
     "Device",
@@ -5371,21 +5716,15 @@ static const char * const settings_names[SETTING_COUNT] = {
     "About",
 };
 
-static bool settings_has_control(int index)
-{
-    return index == SETTING_GENERAL || index == SETTING_NOW_PLAYING_BG ||
-           index == SETTING_USB || index == SETTING_AFC;
-}
-
 static int settings_initial_focus(int index)
 {
     if(index == SETTING_NOW_PLAYING_BG) {
-        return 1 + (int)g_np_bg_mode;
+        return (int)g_np_bg_mode;
     }
     if(index == SETTING_USB) {
-        return 1 + (int)g_usb_mode;
+        return (int)g_usb_mode;
     }
-    return settings_has_control(index) ? 1 : 0;
+    return 0;
 }
 
 static void settings_update_count(void)
@@ -5665,14 +6004,6 @@ static void settings_time_segment_focus_cb(void * user)
     settings_time_apply_blink();
 }
 
-static void settings_time_none_focus_cb(void * user)
-{
-    LV_UNUSED(user);
-    settings_time_segment = SETTINGS_TIME_NONE;
-    settings_time_editing = false;
-    settings_time_apply_blink();
-}
-
 static void settings_time_start_edit(void * user)
 {
     settings_time_segment = (int)(intptr_t)user;
@@ -5704,7 +6035,6 @@ static void settings_time_adjust(int direction)
 static bool settings_key(ui_key_t key)
 {
     if(!settings_time_open) return false;
-    if(g_focus_index == 0) return false; /* Back row */
     if(!settings_time_editing) {
         if(key == UI_KEY_ENTER) {
             settings_time_start_edit((void *)(intptr_t)settings_time_segment);
@@ -5783,19 +6113,6 @@ static void settings_time_blink_tick(void)
     settings_time_apply_blink();
 }
 
-static void settings_time_back_action(void * user)
-{
-    LV_UNUSED(user);
-    settings_time_open = false;
-    settings_time_editing = false;
-    settings_time_segment = SETTINGS_TIME_NONE;
-    settings_time_hour_value = NULL;
-    settings_time_minute_value = NULL;
-    settings_time_ampm_value = NULL;
-    settings_rebuild();
-    if(g_focus_count > 0) focus_select(2);
-}
-
 static lv_obj_t * settings_time_touch_button(lv_obj_t * parent,
                                              const char * icon,
                                              lv_event_cb_t callback)
@@ -5839,9 +6156,6 @@ static void settings_render_time_editor(lv_obj_t * parent, bool interactive)
     lv_obj_t * title = make_label(head, "Set time", FONT_DETAIL_TITLE, COL_TEXT);
     lv_obj_set_flex_grow(title, 1);
     lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
-    int back_focus = -1;
-    make_header_back(head, true, settings_time_back_action, NULL, &back_focus);
-    if(back_focus >= 0) focus_set_on_focus(back_focus, settings_time_none_focus_cb);
     make_label(parent, "UP/DOWN select  ENTER edit/confirm  DOWN next",
                FONT_CAPTION, COL_MUTED);
 
@@ -6048,6 +6362,28 @@ static lv_obj_t * settings_make_choice_row(lv_obj_t * parent, const char * label
     return row;
 }
 
+static void settings_detail_timer_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    if(settings_detail_dirty && settings_right_content != NULL) {
+        settings_detail_dirty = false;
+        settings_render_detail(settings_right_content, false);
+    }
+}
+
+static void settings_schedule_detail(void)
+{
+    settings_detail_dirty = true;
+    if(settings_detail_timer == NULL) {
+        settings_detail_timer = lv_timer_create(settings_detail_timer_cb, 140,
+                                                NULL);
+        if(settings_detail_timer == NULL) return;
+        lv_timer_pause(settings_detail_timer);
+    }
+    lv_timer_reset(settings_detail_timer);
+    lv_timer_resume(settings_detail_timer);
+}
+
 static void settings_row_focus(void * user)
 {
     int index = (int)(intptr_t)user;
@@ -6055,9 +6391,7 @@ static void settings_row_focus(void * user)
     settings_selected = index;
     settings_time_open = false;
     settings_update_count();
-    if(settings_right_content) {
-        settings_render_detail(settings_right_content, false);
-    }
+    if(settings_right_content) settings_schedule_detail();
 }
 
 static void settings_rebuild(void)
@@ -6084,7 +6418,7 @@ static bool settings_back(void)
     if(settings_time_open) {
         settings_time_open = false;
         settings_rebuild();
-        if(g_focus_count > 0) focus_select(2);
+        if(g_focus_count > 0) focus_select(1);
         return true;
     }
     if(settings_detail_open) {
@@ -6095,20 +6429,12 @@ static bool settings_back(void)
     return false;
 }
 
-static void settings_back_action(void * user)
-{
-    LV_UNUSED(user);
-    settings_time_open = false;
-    settings_detail_open = false;
-    settings_rebuild();
-}
-
 static void settings_same_key(void)
 {
     if(settings_time_open) {
         settings_time_open = false;
         settings_rebuild();
-        if(g_focus_count > 0) focus_select(2);
+        if(g_focus_count > 0) focus_select(1);
         return;
     }
     if(settings_detail_open) {
@@ -6126,21 +6452,28 @@ static void settings_open_async(void * arg)
     settings_open(arg);
 }
 
-static void settings_back_async(void * arg)
-{
-    LV_UNUSED(arg);
-    settings_back_action(NULL);
-}
-
 static void settings_row_touch_cb(lv_event_t * event)
 {
     ui_call_async(settings_open_async, lv_event_get_user_data(event));
 }
 
-static void settings_back_touch_cb(lv_event_t * event)
+static void settings_ble_open_action(void * user)
+{
+    LV_UNUSED(user);
+    g_ble_return_screen = SCR_SETTINGS;
+    ui_show_screen(SCR_BLUETOOTH);
+}
+
+static void settings_ble_open_async(void * arg)
+{
+    LV_UNUSED(arg);
+    settings_ble_open_action(NULL);
+}
+
+static void settings_ble_open_touch_cb(lv_event_t * event)
 {
     LV_UNUSED(event);
-    ui_call_async(settings_back_async, NULL);
+    ui_call_async(settings_ble_open_async, NULL);
 }
 
 static void settings_time_format_touch_cb(lv_event_t * event)
@@ -6318,10 +6651,32 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                   FONT_DETAIL_TITLE, COL_TEXT);
     lv_obj_set_flex_grow(title, 1);
     lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
-    make_header_back(head, interactive, settings_back_action,
-                     settings_back_touch_cb, NULL);
 
     switch(index) {
+        case SETTING_BLUETOOTH: {
+            ble_remote_state_t state = BLE_REMOTE_OFF;
+            char status[64] = "Off";
+            ble_remote_status(&state, status, sizeof(status));
+            lv_obj_t * open_row = settings_make_value_row(
+                parent, "Bluetooth Remote", "Open", COL_ACCENT, 64,
+                FONT_H2, FONT_H2, NULL);
+            if(interactive) {
+                focus_add_clickable(open_row, settings_ble_open_action,
+                                    NULL, NULL, true);
+            }
+            else {
+                touch_add_clickable(open_row, settings_ble_open_touch_cb, NULL);
+            }
+            settings_make_value_row(parent, "Status", status,
+                                    state == BLE_REMOTE_CONNECTED ? COL_GREEN
+                                                                  : COL_MUTED,
+                                    52, FONT_H2, FONT_CAPTION, NULL);
+            char paired[32];
+            snprintf(paired, sizeof(paired), "%d", ble_remote_paired_count());
+            settings_make_value_row(parent, "Paired devices", paired, COL_TEXT,
+                                    52, FONT_H2, FONT_NUM, NULL);
+            break;
+        }
         case SETTING_GENERAL: {
             lv_obj_t * time_row = settings_make_value_row(
                 parent, "Time format", g_clock_12h ? "12H" : "24H",
@@ -6523,14 +6878,10 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                 break;
             }
 
-            settings_afc_action_row(parent, "Pair / Connect",
+            settings_afc_action_row(parent, "AFC mode",
                                     st.afc_mode ? "Reconnect"
                                                 : "Switch to AFC",
                                     UI_AFC_ACTION_PAIR, interactive);
-            settings_afc_action_row(parent, "Quick sync", "64 albums",
-                                    UI_AFC_ACTION_QUICK_SYNC, interactive);
-            settings_afc_action_row(parent, "Full sync", "All albums",
-                                    UI_AFC_ACTION_FULL_SYNC, interactive);
             settings_afc_action_row(parent, "Switch to iAP2",
                                     st.afc_mode ? "Reboot" : "Already iAP2",
                                     UI_AFC_ACTION_IPOD_MODE, interactive);
@@ -6564,19 +6915,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                     st.afc_mode ? "AFC (config 4)"
                                                 : "iAP2 (config 2)",
                                     st.afc_mode ? COL_ACCENT : COL_GREEN,
-                                    52, FONT_H2, FONT_CAPTION, NULL);
-
-            char sync[32];
-            if(st.job_active) {
-                snprintf(sync, sizeof(sync), "%s %s",
-                         st.job_kind == 1 ? "Quick" : "Full",
-                         st.sync_phase == 1 ? "downloading" : "converting");
-            }
-            else {
-                snprintf(sync, sizeof(sync), "Idle");
-            }
-            settings_make_value_row(parent, "Sync", sync,
-                                    st.job_active ? COL_AMBER : COL_MUTED,
                                     52, FONT_H2, FONT_CAPTION, NULL);
 
             settings_make_value_row(parent, "AFC status",

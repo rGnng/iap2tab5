@@ -147,10 +147,25 @@ static void iap2_snapshot(player_snapshot_t * out, const iap2_state_t * state)
     out->duration_sec = state->duration_ms / 1000;
     out->elapsed_sec = state->elapsed_ms / 1000;
     out->track.duration_sec = out->duration_sec;
-    int star_idx = state->track_key != 0
+    /* The UI polls the snapshot several times per tick.  Looking up the
+     * current track in the full library each time is O(N) and showed up as
+     * 14 ms per call on a large library.  Cache the index until the Now
+     * Playing identity changes; the starred flag itself is read live. */
+    static uint64_t star_key;
+    static char star_title[128];
+    static char star_album[96];
+    static int star_idx = -1;
+    if(state->track_key != star_key ||
+       strcmp(star_title, state->title) != 0 ||
+       strcmp(star_album, state->album) != 0) {
+        star_key = state->track_key;
+        snprintf(star_title, sizeof(star_title), "%s", state->title);
+        snprintf(star_album, sizeof(star_album), "%s", state->album);
+        star_idx = state->track_key != 0
                        ? track_index_by_id(state->track_key) : -1;
-    if(star_idx < 0) {
-        star_idx = track_index_by_meta(state->title, state->album);
+        if(star_idx < 0) {
+            star_idx = track_index_by_meta(state->title, state->album);
+        }
     }
     if(star_idx >= 0) out->starred = track_starred[star_idx];
     out->volume = volume;

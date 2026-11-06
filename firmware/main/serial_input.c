@@ -190,6 +190,34 @@ static void benchmark_list_scroll(void)
     bsp_display_unlock();
 }
 
+static void benchmark_focus(int screen, const char * name, int steps)
+{
+    if(!bsp_display_lock(0)) return;
+    lv_display_t * disp = lv_display_get_default();
+    ui_select_screen(screen);
+    lv_obj_update_layout(lv_screen_active());
+    lv_refr_now(NULL);
+    lvgl_port_display_wait_flush(disp, 3000);
+
+    uint32_t t0 = (uint32_t)esp_timer_get_time();
+    for(int i = 0; i < steps; i++) {
+        ui_handle_key(UI_KEY_DOWN);
+    }
+    uint32_t t1 = (uint32_t)esp_timer_get_time();
+    lv_obj_update_layout(lv_screen_active());
+    uint32_t t2 = (uint32_t)esp_timer_get_time();
+    lv_refr_now(NULL);
+    uint32_t t3 = (uint32_t)esp_timer_get_time();
+    lvgl_port_display_wait_flush(disp, 3000);
+    uint32_t t4 = (uint32_t)esp_timer_get_time();
+
+    ESP_LOGI("perf", "%s focus x%d: handle=%u layout=%u render=%u flush=%u total=%u us",
+             name, steps, (unsigned)(t1 - t0), (unsigned)(t2 - t1),
+             (unsigned)(t3 - t2), (unsigned)(t4 - t3),
+             (unsigned)(t4 - t0));
+    bsp_display_unlock();
+}
+
 static bool map_serial_key(int c, ui_key_t * key)
 {
     switch(c) {
@@ -936,6 +964,38 @@ static void serial_input_task(void * arg)
                 ESP_LOGW("power", "INA226 add device: %s",
                          esp_err_to_name(err));
             }
+            continue;
+        }
+
+        if(c == '^') {
+            benchmark_focus(1, "albums", 20);
+            continue;
+        }
+
+        if(c == '%') {
+            benchmark_focus(2, "artists", 20);
+            continue;
+        }
+
+        if(c == '_') {
+            benchmark_focus(3, "songs", 20);
+            continue;
+        }
+
+        if(c == ':') {
+            benchmark_focus(4, "playlists", 20);
+            continue;
+        }
+
+        if(c == ';') {
+            benchmark_focus(6, "settings", 20);
+            continue;
+        }
+
+        if(c == '?') {
+            static bool trace_on;
+            trace_on = !trace_on;
+            ui_debug_trace(trace_on);
             continue;
         }
 
