@@ -1,0 +1,32 @@
+From: Tab5 AFC bring-up
+Subject: [PATCH] mbedtls: accept empty X.509 Name
+
+Apple's lockdown pair records use self-signed certificates whose subject
+and issuer RDNSequence is empty. RFC 5280 permits an empty Name, but
+mbedTLS 3.6's mbedtls_x509_get_name() treats the empty SEQUENCE as
+truncated and fails with MBEDTLS_ERR_X509_INVALID_NAME +
+MBEDTLS_ERR_ASN1_OUT_OF_DATA. That prevents parsing both the host root
+certificate used as the TLS client identity and the device certificate
+sent by lockdownd.
+
+Accept an empty Name sequence by returning success before the SET loop.
+
+Apply from the ESP-IDF root:
+  git apply /home/ops/iap2tab5/tools/mbedtls-empty-name.patch
+
+diff --git a/components/mbedtls/mbedtls/library/x509.c b/components/mbedtls/mbedtls/library/x509.c
+--- a/components/mbedtls/mbedtls/library/x509.c
++++ b/components/mbedtls/mbedtls/library/x509.c
+@@ -500,6 +500,12 @@ int mbedtls_x509_get_name(unsigned char **p, const unsigned char *end,
+     const unsigned char *end_set;
+     mbedtls_x509_name *head = cur;
+ 
++    /* Apple lockdown certificates use an empty subject/issuer Name.
++     * RFC 5280 allows an empty RDNSequence. */
++    if (*p == end) {
++        return 0;
++    }
++
+     /* don't use recursion, we'd risk stack overflow if not optimized */
+     while (1) {
+         /*

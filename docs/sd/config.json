@@ -1,0 +1,15 @@
+{
+  "screen_flip": 0,
+  "wifi_mode": 0,
+  "sound_enabled": true,
+  "volume": 65,
+  "ap_ssid": "Tab5-Debug",
+  "clock_12h": false,
+  "sort_field": 0,
+  "sort_desc": true,
+  "menubar_left": true,
+  "touch_enabled": true,
+  "np_bg_mode": 2,
+  "brightness": 70,
+  "usb_mode": 0
+}
