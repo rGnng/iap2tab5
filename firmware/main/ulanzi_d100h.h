@@ -21,6 +21,10 @@ bool ulanzi_d100h_decode(const uint8_t * data, size_t len,
 bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
                              uint8_t * id, bool * down);
 
+/* Encode a plaintext vendor command into the 20-byte BLE wire format. */
+void ulanzi_d100h_encode_ble(const uint8_t * plain, size_t len,
+                             uint8_t out[20]);
+
 void ulanzi_d100h_heartbeat(uint8_t out[64]);
 
 /* Returns true when this event should be forwarded to the UI. Only press /

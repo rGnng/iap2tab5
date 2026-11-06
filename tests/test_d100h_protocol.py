@@ -38,6 +38,10 @@ class D100HProtocolTests(unittest.TestCase):
             decoder.restype = ctypes.c_bool
         cls.lib.ulanzi_d100h_heartbeat.argtypes = [ctypes.POINTER(ctypes.c_uint8)]
         cls.lib.ulanzi_d100h_heartbeat.restype = None
+        cls.lib.ulanzi_d100h_encode_ble.argtypes = [
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_uint8)]
+        cls.lib.ulanzi_d100h_encode_ble.restype = None
 
     def decode(self, name, wire):
         data = (ctypes.c_uint8 * len(wire)).from_buffer_copy(wire)
@@ -66,6 +70,24 @@ class D100HProtocolTests(unittest.TestCase):
     def test_rejects_ble_trailing_bytes(self):
         wire = bytes.fromhex('8e8f5e16ec67281e') + ZERO_BLOCK + bytes(5)
         self.assertFalse(self.decode('ulanzi_d100h_decode_ble', wire)[0])
+
+    def test_ble_heartbeat_vector(self):
+        plain = bytes.fromhex('0601230001')
+        src = (ctypes.c_uint8 * len(plain)).from_buffer_copy(plain)
+        out = (ctypes.c_uint8 * 20)()
+        self.lib.ulanzi_d100h_encode_ble(src, len(plain), out)
+        self.assertEqual(bytes(out), bytes.fromhex(
+            '24569ef228e145a1') + ZERO_BLOCK + bytes(4))
+
+    def test_ble_encode_decode_roundtrip(self):
+        for code, down in [(1, True), (7, True), (10, True), (3, False)]:
+            plain = bytes([0x8b, 0x10, code, 1 if down else 0]) + bytes(16)
+            src = (ctypes.c_uint8 * 20).from_buffer_copy(plain)
+            out = (ctypes.c_uint8 * 20)()
+            self.lib.ulanzi_d100h_encode_ble(src, 20, out)
+            self.assertEqual(
+                self.decode('ulanzi_d100h_decode_ble', bytes(out)),
+                (True, code, down))
 
     def test_wired_heartbeat_vector(self):
         packet = (ctypes.c_uint8 * 64)()

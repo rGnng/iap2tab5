@@ -1,10 +1,11 @@
 # D100H BLE remote: handover and driver-analysis brief
 
-Status: **C6 2.13.1 upgrade completed; BLE key events still blocked by an
-ESP-Hosted VHCI / NimBLE ACL-flow deadlock**. The original `ec37af9` blocker and
-the earlier candidate patch are preserved below as history. See section 12 for
-the post-upgrade evidence, the current stable state, and the recommended next
-paths.
+Status: **vendor mode working end-to-end**. Key and knob events are decoded
+and mapped to the UI. The earlier "ACL-flow deadlock" conclusion was superseded
+by section 13: the real blocker was a central-only NimBLE build with GATT server
+support disabled, which discarded every incoming ATT notification. The original
+`ec37af9` blocker and the earlier candidate patch are preserved below as
+history.
 
 Original status: **blocked on missing vendor key events**. Everything up to and including
 BLE scan, connect, pairing/bonding, GATT discovery, CCCD subscription, and the
@@ -890,6 +891,12 @@ a matching C6 image is ready, but neither that nor MITM is a proven root cause.
 
 ## 12. C6 2.13.1 upgrade and post-upgrade BLE findings (2026-11-06)
 
+> **Superseded by section 13 (2026-11-06).** The ACL-pool failures below were
+> caused by verbose per-notification logging blocking the NimBLE host task, not
+> by the heartbeat itself. The actual reason no notifications reached the UI was
+> that the host was built central-only (`MYNEWT_VAL(BLE_GATTS)=0`), so NimBLE's
+> ATT dispatch table did not include the Notification/Indication opcodes.
+
 This section records the hardware work after `ec37af9` and the driver analysis
 of Ulanzi Studio 3.4.8. It supersedes the earlier "HID 0xFB uses 64-byte
 frames" assumption for this specific D100H unit.
@@ -1090,3 +1097,131 @@ and the corrected C6 programming documentation, not the experimental code.
 
 Until one of these is done, the D100H can connect and heartbeat but key events
 will not reach the UI.
+
+
+---
+
+## 13. Root cause: GATT-server dispatch, and working vendor mode (2026-11-06)
+
+This section supersedes the blocker described in section 12. Vendor mode is now
+working on the Tab5; the D100H is no longer limited to HID-only operation.
+
+### 13.1 Why no notification ever reached `BLE_GAP_EVENT_NOTIFY_RX`
+
+The P4 NimBLE build was central-only:
+
+```text
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+# CONFIG_BT_NIMBLE_GATT_SERVER is not set
+```
+
+`esp_nimble_cfg.h` maps the missing GATT-server option to
+`MYNEWT_VAL(BLE_GATTS)=0`. In NimBLE's ATT receive dispatch table
+(`ble_att.c`), the Notification and Indication opcodes are compiled only when
+`BLE_GATTS` is enabled:
+
+```c
+#if MYNEWT_VAL(BLE_GATTS)
+    { BLE_ATT_OP_NOTIFY_REQ,   ble_att_svr_rx_notify },
+    { BLE_ATT_OP_INDICATE_REQ, ble_att_svr_rx_indicate },
+#endif
+```
+
+A central-only build therefore **silently discards every incoming ATT
+Notification (0x1b)** before it can become `BLE_GAP_EVENT_NOTIFY_RX`. This
+affected both the HID input reports and the vendor FD00 frames. The packets
+were visible in the HCI ACL trace and were drained correctly by the host task,
+but they never reached the application callback.
+
+Fix:
+
+```text
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_GATT_SERVER=y
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
+CONFIG_BT_NIMBLE_ACL_BUF_COUNT=64
+CONFIG_BT_NIMBLE_ACL_BUF_SIZE=255
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=64
+```
+
+The peripheral role/GATT server is only compiled in; the Tab5 does not
+advertise or accept connections. It exists so the ATT notification dispatch is
+present.
+
+### 13.2 The ACL-pool failures were a logging artifact
+
+The earlier `vhci_drv: Rx: alloc_acl_from_ll failed` storm was reproduced with
+very verbose notification logging: a multi-line hex dump per report at 115200
+baud blocked the NimBLE host task long enough to exhaust the ACL-from-LL pool.
+With one compact log line per event (or no per-event log), the pool drains
+normally. The 64-buffer configuration above is retained as headroom.
+
+A direct HCI ACL heartbeat was also tried earlier; it was byte-identical to
+NimBLE's packet but bypassed controller flow control and made the D100H
+disconnect with reason `0x0c`. That workaround is not used. The final firmware
+sends the heartbeat through the normal NimBLE GATT API.
+
+### 13.3 Vendor mode: verified
+
+The final firmware discovers service `0x1971`, subscribes to FD00 (value
+handle 77, CCCD 78), and sends the 20-byte TEA heartbeat once per second from
+the NimBLE host task's event queue. The D100H replies with 20-byte status
+frames and, on user input, 20-byte event frames that decrypt to:
+
+```text
+8b 10 <id> <down> 00 ...
+```
+
+`ulanzi_d100h_decode_ble()` validates the frame and
+`ulanzi_d100h_to_ui()` maps it to `ui_key_t`; the event is injected with
+`usb_hid_input_post_key()`.
+
+The D100H sends the same 20-byte event on both FD00 (handle 77) and HID report
+0xFB (handle 69). The firmware treats FD00 as canonical and ignores handle 69
+when the vendor handle is known, so a key press produces exactly one UI action.
+
+Hardware verification:
+
+```text
+520 D100H events processed
+0 alloc_acl_from_ll failures
+0 disconnects
+```
+
+### 13.4 Current mapping
+
+| Vendor ID | Physical key | UI key |
+| --- | --- | --- |
+| `0x01` | top-left | `UI_KEY_BACK` |
+| `0x02` | top-middle | `UI_KEY_7` (play/pause) |
+| `0x03` | top-right | short: `UI_KEY_CONTEXT`; long (>=600 ms): `UI_KEY_STAR` |
+| `0x04` | upper-left | `UI_KEY_SCREEN_PREV` |
+| `0x05` | upper-right | `UI_KEY_PREV_TRACK` |
+| `0x06` | lower-left | `UI_KEY_SCREEN_NEXT` |
+| `0x07` | knob click | `UI_KEY_ENTER` |
+| `0x08` | lower-right | `UI_KEY_NEXT_TRACK` |
+| `0x09` | rotate counter-clockwise | `UI_KEY_UP` |
+| `0x0A` | rotate clockwise | `UI_KEY_DOWN` |
+| `0x0B` / `0x0C` | held rotation | `UI_KEY_UP` / `UI_KEY_DOWN` |
+
+### 13.5 HID-only fallback (also verified)
+
+Before the GATT-server fix was understood, the standard HID path was verified
+as a fallback. With the D100H in default HID mode (no heartbeat, no vendor
+mode), the Tab5 receives:
+
+| Physical key | HID report |
+| --- | --- |
+| top-left | Consumer `0xB6` (Scan Previous) |
+| top-middle | Consumer `0xCD` (Play/Pause) |
+| top-right | Consumer `0xB5` (Scan Next) |
+| rotate left | Consumer `0xEA` (Volume Down) |
+| rotate right | Consumer `0xE9` (Volume Up) |
+| side buttons | Keyboard `Ctrl+C` / `Ctrl+V` / `Ctrl+Y` / `Ctrl+Z` |
+| knob click | device-profile dependent (one unit sent `Cmd+Shift+Z`) |
+
+The HID report handles observed on this unit are 50 (keyboard), 61 (consumer),
+57 (5-byte report), 29 (1-byte status), and 69 (HID 0xFB, 20-byte vendor-style
+frame). The fallback decoder is not used by the final firmware, but the raw
+captures are useful if the vendor profile is ever reset incorrectly.

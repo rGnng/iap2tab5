@@ -30,20 +30,29 @@ static const char * TAG = "ble_remote";
 #define BLE_REMOTE_NVS_NS "ble_remote"
 #define BLE_REMOTE_NVS_KEY "paired"
 
-/* Encrypted D100H keep-alive.  The vendor service uses the first 20 bytes;
- * the HID report 0xFB uses the same command plus the encrypted zero block,
- * padded to 64 bytes. */
-static const uint8_t s_hid_heartbeat[64] = {
-    0x24, 0x56, 0x9e, 0xf2, 0x28, 0xe1, 0x45, 0xa1,
-    0x38, 0x90, 0xc4, 0x99, 0xa3, 0x60, 0xaa, 0xad,
-};
+#define D100H_SERVICE_UUID16  0x1971
+#define D100H_WRITE_UUID16    0xfd01
+#define D100H_NOTIFY_UUID16   0xfd00
 
-#define HID_SERVICE_UUID16     0x1812
-#define HID_REPORT_CHR_UUID16  0x2a4d
-#define HID_REPORT_REF_UUID16  0x2908
-#define HID_REPORT_ID          0xfb
-#define HID_MAX_REPORTS        12
-#define HID_REQUIRED_ATT_MTU   (sizeof(s_hid_heartbeat) + 3u)
+/* Studio startup messages (plaintext prefixes, zero-padded to 20 bytes and
+ * TEA-encrypted).  The heartbeat is sent every second; the other messages are
+ * sent one per heartbeat tick until the list is exhausted. */
+typedef struct {
+    uint8_t len;
+    uint8_t data[8];
+} vendor_msg_t;
+
+static const vendor_msg_t s_vendor_startup[] = {
+    { 5, { 0x01, 0x01, 0x10, 0x00, 0x03 } }, /* setExpertMouseSWStatus:1 */
+    { 4, { 0x06, 0x03, 0x0a, 0x01 } },       /* getDeviceActive */
+    { 4, { 0x01, 0x01, 0x0d, 0x01 } },       /* getDeviceStandbyStatus */
+    { 4, { 0x01, 0x04, 0x04, 0x01 } },       /* getDeviceVersion */
+    { 4, { 0x01, 0x01, 0x41, 0x01 } },       /* getDeviceHardwareVersion */
+    { 4, { 0x01, 0x04, 0x0b, 0x01 } },       /* getDeviceFlashId */
+    { 4, { 0x01, 0x01, 0xfa, 0x01 } },       /* getDeviceMacAddress */
+};
+#define VENDOR_STARTUP_COUNT \
+    (sizeof(s_vendor_startup) / sizeof(s_vendor_startup[0]))
 
 static SemaphoreHandle_t s_lock;
 static ble_remote_state_t s_state = BLE_REMOTE_OFF;
@@ -70,24 +79,15 @@ static int64_t s_top_right_us;
 static bool s_reconnect;
 static int64_t s_reconnect_at;
 
-/* HID service / report 0xfb discovery state. */
-static bool s_use_hid;
-static uint16_t s_hid_start;
-static uint16_t s_hid_end;
-static uint16_t s_hid_input_handle;
-static uint16_t s_hid_output_handle;
-static uint16_t s_hid_input_cccd;
-static uint16_t s_hid_protocol_handle;
-static uint16_t s_hid_control_handle;
-static uint16_t s_hid_report_chrs[HID_MAX_REPORTS];
-static int s_hid_report_count;
-static uint16_t s_hid_cccd_chr[HID_MAX_REPORTS];
-static uint16_t s_hid_cccd_handle[HID_MAX_REPORTS];
-static int s_hid_cccd_count;
-static uint16_t s_hid_ref_dsc[HID_MAX_REPORTS * 2];
-static uint16_t s_hid_ref_chr[HID_MAX_REPORTS * 2];
-static int s_hid_ref_count;
-static int s_hid_ref_index;
+/* 0x1971 vendor service state. */
+static bool s_vendor_ready;
+static uint16_t s_vendor_start;
+static uint16_t s_vendor_end;
+static uint16_t s_vendor_notify_handle;
+static uint16_t s_vendor_write_handle;
+static uint16_t s_vendor_cccd_handle;
+static uint16_t s_vendor_startup_index;
+static struct ble_npl_callout s_hb_callout;
 
 static void lock(void)
 {
@@ -364,22 +364,18 @@ void ble_store_config_init(void);
 
 static int on_svc(uint16_t conn_handle, const struct ble_gatt_error * error,
                   const struct ble_gatt_svc * service, void * arg);
-static int on_hid_chr(uint16_t conn_handle, const struct ble_gatt_error * error,
-                      const struct ble_gatt_chr * chr, void * arg);
-static int on_hid_dsc(uint16_t conn_handle, const struct ble_gatt_error * error,
-                      uint16_t chr_val_handle,
-                      const struct ble_gatt_dsc * dsc, void * arg);
-static int on_report_ref_read(uint16_t conn_handle,
-                              const struct ble_gatt_error * error,
-                              struct ble_gatt_attr * attr, void * arg);
+static int on_chr(uint16_t conn_handle, const struct ble_gatt_error * error,
+                  const struct ble_gatt_chr * chr, void * arg);
+static int on_dsc(uint16_t conn_handle, const struct ble_gatt_error * error,
+                  uint16_t chr_val_handle,
+                  const struct ble_gatt_dsc * dsc, void * arg);
 static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
                     struct ble_gatt_attr * attr, void * arg);
-static int on_mtu(uint16_t conn_handle, const struct ble_gatt_error * error,
-                  uint16_t mtu, void * arg);
+static int on_vendor_write(uint16_t conn_handle,
+                           const struct ble_gatt_error * error,
+                           struct ble_gatt_attr * attr, void * arg);
 
-static void start_next_report_ref(void);
-
-static void hid_fail(const char * text)
+static void vendor_fail(const char * text)
 {
     ESP_LOGW(TAG, "%s", text);
     set_state(BLE_REMOTE_ERROR, text);
@@ -388,75 +384,66 @@ static void hid_fail(const char * text)
     }
 }
 
+static void vendor_send_plain(const uint8_t * plain, size_t len)
+{
+    if(!s_vendor_ready || s_vendor_write_handle == 0 ||
+       s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    uint8_t msg[20];
+    ulanzi_d100h_encode_ble(plain, len, msg);
+    int rc = ble_gattc_write_no_rsp_flat(s_conn_handle, s_vendor_write_handle,
+                                         msg, sizeof(msg));
+    if(rc != 0) {
+        ESP_LOGW(TAG, "vendor write failed: handle=%u rc=%d",
+                 s_vendor_write_handle, rc);
+    }
+}
+
+static void vendor_send_heartbeat(void)
+{
+    static const uint8_t heartbeat[] = { 0x06, 0x01, 0x23, 0x00, 0x01 };
+    vendor_send_plain(heartbeat, sizeof(heartbeat));
+}
+
+static void heartbeat_callout(struct ble_npl_event * ev)
+{
+    (void)ev;
+    if(!s_vendor_ready || s_conn_handle == BLE_HS_CONN_HANDLE_NONE ||
+       s_vendor_write_handle == 0) {
+        return;
+    }
+    vendor_send_heartbeat();
+    ble_npl_callout_reset(&s_hb_callout, portTICK_PERIOD_MS * 1000);
+}
+
+static void vendor_send_next_startup(void)
+{
+    /* Test: heartbeat only.  The D100H's replies to the Studio startup
+     * queries are suspected of exhausting the host ACL pool. */
+    return;
+    if(s_vendor_startup_index >= VENDOR_STARTUP_COUNT) return;
+    const vendor_msg_t * msg = &s_vendor_startup[s_vendor_startup_index++];
+    vendor_send_plain(msg->data, msg->len);
+}
+
 static void start_discovery(void)
 {
     if(s_discovery_started) return;
     s_discovery_started = true;
-    s_use_hid = false;
-    s_hid_start = 0;
-    s_hid_end = 0;
-    s_hid_input_handle = 0;
-    s_hid_output_handle = 0;
-    s_hid_input_cccd = 0;
-    s_hid_protocol_handle = 0;
-    s_hid_control_handle = 0;
-    s_hid_report_count = 0;
-    s_hid_cccd_count = 0;
-    s_hid_ref_count = 0;
-    s_hid_ref_index = 0;
-    s_top_right_us = 0;
+    s_vendor_ready = false;
+    s_vendor_start = 0;
+    s_vendor_end = 0;
+    s_vendor_notify_handle = 0;
+    s_vendor_write_handle = 0;
+    s_vendor_cccd_handle = 0;
+    s_vendor_startup_index = 0;
 
-    /* A 64-byte HID value needs ATT MTU >= 67. NimBLE can silently truncate
-     * write commands at MTU 23 even though its pre-transmit log says len=64. */
-    set_state(BLE_REMOTE_CONNECTING, "Negotiating HID MTU...");
-    int rc = ble_gattc_exchange_mtu(s_conn_handle, on_mtu, NULL);
-    if(rc == BLE_HS_EALREADY && ble_att_mtu(s_conn_handle) >= HID_REQUIRED_ATT_MTU) {
-        on_mtu(s_conn_handle, NULL, ble_att_mtu(s_conn_handle), NULL);
-        return;
-    }
-    if(rc != 0) {
-        ESP_LOGW(TAG, "MTU exchange start failed: rc=%d mtu=%u", rc,
-                 ble_att_mtu(s_conn_handle));
-        hid_fail("HID MTU exchange failed");
-    }
-}
-
-static int on_mtu(uint16_t conn_handle, const struct ble_gatt_error * error,
-                  uint16_t mtu, void * arg)
-{
-    (void)arg;
-    if(conn_handle != s_conn_handle) return 0;
-    int status = error != NULL ? error->status : 0;
-    ESP_LOGI(TAG, "ATT MTU exchange: status=%d mtu=%u (HID requires >=%u)",
-             status, mtu, (unsigned)HID_REQUIRED_ATT_MTU);
-    if(status != 0 || mtu < HID_REQUIRED_ATT_MTU) {
-        hid_fail("ATT MTU too small for HID");
-        return 0;
-    }
-    set_state(BLE_REMOTE_CONNECTING, "Discovering D100H...");
-    int rc = ble_gattc_disc_all_svcs(conn_handle, on_svc, NULL);
+    int rc = ble_gattc_disc_all_svcs(s_conn_handle, on_svc, NULL);
     if(rc != 0) {
         ESP_LOGW(TAG, "service discovery failed: %d", rc);
-        hid_fail("Service discovery failed");
+        vendor_fail("Service discovery failed");
     }
-    return 0;
-}
-
-static int send_hid_heartbeat(uint16_t conn_handle, uint16_t output_handle)
-{
-    uint16_t mtu = ble_att_mtu(conn_handle);
-    if(mtu < HID_REQUIRED_ATT_MTU) {
-        ESP_LOGW(TAG, "HID heartbeat blocked: mtu=%u needs >=%u", mtu,
-                 (unsigned)HID_REQUIRED_ATT_MTU);
-        return BLE_HS_EMSGSIZE;
-    }
-    int rc = ble_gattc_write_no_rsp_flat(conn_handle, output_handle,
-                                         s_hid_heartbeat, sizeof(s_hid_heartbeat));
-    if(rc != 0) {
-        ESP_LOGW(TAG, "HID heartbeat failed: handle=%u len=%u mtu=%u rc=%d",
-                 output_handle, (unsigned)sizeof(s_hid_heartbeat), mtu, rc);
-    }
-    return rc;
 }
 
 static int on_svc(uint16_t conn_handle, const struct ble_gatt_error * error,
@@ -468,200 +455,109 @@ static int on_svc(uint16_t conn_handle, const struct ble_gatt_error * error,
         ble_uuid_to_str(&service->uuid.u, uuid);
         ESP_LOGI(TAG, "service %s handles %u-%u", uuid,
                  service->start_handle, service->end_handle);
-        if(uuid_matches(&service->uuid.u, HID_SERVICE_UUID16, NULL)) {
-            s_hid_start = service->start_handle;
-            s_hid_end = service->end_handle;
+        if(uuid_matches(&service->uuid.u, D100H_SERVICE_UUID16, NULL)) {
+            s_vendor_start = service->start_handle;
+            s_vendor_end = service->end_handle;
         }
         return 0;
     }
     if(error != NULL && error->status == BLE_HS_EDONE) {
-        if(s_hid_start == 0) {
-            hid_fail("HID service not found");
+        if(s_vendor_start == 0) {
+            vendor_fail("D100H vendor service not found");
             return 0;
         }
-        int rc = ble_gattc_disc_all_chrs(conn_handle, s_hid_start, s_hid_end,
-                                         on_hid_chr, NULL);
+        ESP_LOGI(TAG, "D100H vendor service handles %u-%u",
+                 s_vendor_start, s_vendor_end);
+        int rc = ble_gattc_disc_all_chrs(conn_handle, s_vendor_start,
+                                         s_vendor_end, on_chr, NULL);
         if(rc != 0) {
-            ESP_LOGW(TAG, "HID characteristic discovery failed: %d", rc);
-            hid_fail("HID characteristic discovery failed");
+            ESP_LOGW(TAG, "characteristic discovery failed: %d", rc);
+            vendor_fail("Characteristic discovery failed");
         }
     }
     return 0;
 }
 
-static int on_hid_chr(uint16_t conn_handle, const struct ble_gatt_error * error,
-                      const struct ble_gatt_chr * chr, void * arg)
+static int on_chr(uint16_t conn_handle, const struct ble_gatt_error * error,
+                  const struct ble_gatt_chr * chr, void * arg)
 {
     (void)arg;
     if(error != NULL && error->status == 0 && chr != NULL) {
         char uuid[40];
         ble_uuid_to_str(&chr->uuid.u, uuid);
-        ESP_LOGI(TAG, "HID chr %s val=%u props=0x%x", uuid,
+        ESP_LOGI(TAG, "vendor chr %s val=%u props=0x%x", uuid,
                  chr->val_handle, chr->properties);
-        if(uuid_matches(&chr->uuid.u, HID_REPORT_CHR_UUID16, NULL)) {
-            if(s_hid_report_count < HID_MAX_REPORTS) {
-                s_hid_report_chrs[s_hid_report_count++] = chr->val_handle;
-            }
+        if(uuid_matches(&chr->uuid.u, D100H_NOTIFY_UUID16, NULL)) {
+            s_vendor_notify_handle = chr->val_handle;
         }
-        else if(uuid_matches(&chr->uuid.u, 0x2a4e, NULL)) {
-            s_hid_protocol_handle = chr->val_handle;
-        }
-        else if(uuid_matches(&chr->uuid.u, 0x2a4c, NULL)) {
-            s_hid_control_handle = chr->val_handle;
+        else if(uuid_matches(&chr->uuid.u, D100H_WRITE_UUID16, NULL)) {
+            s_vendor_write_handle = chr->val_handle;
         }
         return 0;
     }
     if(error != NULL && error->status == BLE_HS_EDONE) {
-        ESP_LOGI(TAG, "HID report characteristics: %d", s_hid_report_count);
-        int rc = ble_gattc_disc_all_dscs(conn_handle, s_hid_start, s_hid_end,
-                                         on_hid_dsc, NULL);
+        if(s_vendor_notify_handle == 0 || s_vendor_write_handle == 0) {
+            vendor_fail("D100H vendor characteristics not found");
+            return 0;
+        }
+        ESP_LOGI(TAG, "D100H notify=%u write=%u",
+                 s_vendor_notify_handle, s_vendor_write_handle);
+        int rc = ble_gattc_disc_all_dscs(conn_handle, s_vendor_notify_handle,
+                                         s_vendor_end, on_dsc, NULL);
         if(rc != 0) {
-            ESP_LOGW(TAG, "HID descriptor discovery failed: %d", rc);
-            hid_fail("HID descriptor discovery failed");
+            ESP_LOGW(TAG, "descriptor discovery failed: %d", rc);
+            vendor_fail("Descriptor discovery failed");
         }
     }
     return 0;
 }
 
-static uint16_t report_chr_owner(uint16_t handle)
+static int on_dsc(uint16_t conn_handle, const struct ble_gatt_error * error,
+                  uint16_t chr_val_handle,
+                  const struct ble_gatt_dsc * dsc, void * arg)
 {
-    uint16_t owner = 0;
-    for(int i = 0; i < s_hid_report_count; i++) {
-        if(s_hid_report_chrs[i] <= handle) owner = s_hid_report_chrs[i];
-        else break;
-    }
-    return owner;
-}
-
-static int on_hid_dsc(uint16_t conn_handle, const struct ble_gatt_error * error,
-                      uint16_t chr_val_handle,
-                      const struct ble_gatt_dsc * dsc, void * arg)
-{
-    (void)conn_handle;
     (void)arg;
     if(error != NULL && error->status == 0 && dsc != NULL) {
         char uuid[40];
         ble_uuid_to_str(&dsc->uuid.u, uuid);
-        uint16_t owner = report_chr_owner(dsc->handle);
-        ESP_LOGI(TAG, "HID dsc %s handle=%u owner=%u (cb chr=%u)", uuid,
-                 dsc->handle, owner, chr_val_handle);
-        if(owner == 0) return 0;
-        if(uuid_matches(&dsc->uuid.u, BLE_GATT_DSC_CLT_CFG_UUID16, NULL)) {
-            if(s_hid_cccd_count < HID_MAX_REPORTS) {
-                s_hid_cccd_chr[s_hid_cccd_count] = owner;
-                s_hid_cccd_handle[s_hid_cccd_count] = dsc->handle;
-                s_hid_cccd_count++;
-            }
-        }
-        else if(uuid_matches(&dsc->uuid.u, HID_REPORT_REF_UUID16, NULL)) {
-            if(s_hid_ref_count < HID_MAX_REPORTS * 2) {
-                s_hid_ref_dsc[s_hid_ref_count] = dsc->handle;
-                s_hid_ref_chr[s_hid_ref_count] = owner;
-                s_hid_ref_count++;
-            }
+        ESP_LOGI(TAG, "vendor dsc %s handle=%u cb_chr=%u", uuid,
+                 dsc->handle, chr_val_handle);
+        if(uuid_matches(&dsc->uuid.u, BLE_GATT_DSC_CLT_CFG_UUID16, NULL) &&
+           dsc->handle > s_vendor_notify_handle &&
+           (s_vendor_write_handle == 0 ||
+            dsc->handle < s_vendor_write_handle)) {
+            s_vendor_cccd_handle = dsc->handle;
         }
         return 0;
     }
     if(error != NULL && error->status == BLE_HS_EDONE) {
-        ESP_LOGI(TAG, "HID descriptors: cccd=%d report_ref=%d",
-                 s_hid_cccd_count, s_hid_ref_count);
-        if(s_hid_ref_count == 0) {
-            hid_fail("HID report reference not found");
+        if(s_vendor_cccd_handle == 0) {
+            vendor_fail("D100H notify CCCD not found");
             return 0;
         }
-        s_hid_ref_index = 0;
-        start_next_report_ref();
+        ESP_LOGI(TAG, "D100H notify CCCD=%u", s_vendor_cccd_handle);
+        uint8_t value[2] = { 1, 0 };
+        int rc = ble_gattc_write_flat(conn_handle, s_vendor_cccd_handle,
+                                      value, sizeof(value), on_write, NULL);
+        if(rc != 0) {
+            ESP_LOGW(TAG, "CCCD subscribe failed: %d", rc);
+            vendor_fail("CCCD subscribe failed");
+        }
     }
     return 0;
 }
 
-static void finish_hid_discovery(void)
-{
-    ESP_LOGI(TAG, "HID report 0x%02x: input=%u output=%u",
-             HID_REPORT_ID, s_hid_input_handle, s_hid_output_handle);
-    if(s_hid_input_handle == 0 || s_hid_output_handle == 0) {
-        hid_fail("D100H HID report 0xFB not found");
-        return;
-    }
-
-    s_hid_input_cccd = 0;
-    for(int i = 0; i < s_hid_cccd_count; i++) {
-        if(s_hid_cccd_chr[i] == s_hid_input_handle) {
-            s_hid_input_cccd = s_hid_cccd_handle[i];
-            break;
-        }
-    }
-    if(s_hid_input_cccd == 0) {
-        hid_fail("D100H HID CCCD not found");
-        return;
-    }
-
-    s_use_hid = true;
-    set_state(BLE_REMOTE_CONNECTING, "Subscribing...");
-    if(s_hid_protocol_handle != 0) {
-        uint8_t mode = 0x01; /* Report Protocol; this characteristic is WNR */
-        ble_gattc_write_no_rsp_flat(s_conn_handle, s_hid_protocol_handle,
-                                    &mode, sizeof(mode));
-    }
-    if(s_hid_control_handle != 0) {
-        uint8_t value = 0x01; /* Exit Suspend */
-        ble_gattc_write_no_rsp_flat(s_conn_handle, s_hid_control_handle,
-                                    &value, sizeof(value));
-    }
-    uint8_t value[2] = { 1, 0 };
-    int rc = ble_gattc_write_flat(s_conn_handle, s_hid_input_cccd,
-                                  value, sizeof(value), on_write, NULL);
-    if(rc != 0) {
-        ESP_LOGW(TAG, "HID subscribe failed: %d", rc);
-        hid_fail("HID subscribe failed");
-    }
-}
-
-static int on_report_ref_read(uint16_t conn_handle,
-                              const struct ble_gatt_error * error,
-                              struct ble_gatt_attr * attr, void * arg)
+static int on_vendor_write(uint16_t conn_handle,
+                           const struct ble_gatt_error * error,
+                           struct ble_gatt_attr * attr, void * arg)
 {
     (void)conn_handle;
-    uint16_t chr = (uint16_t)(uintptr_t)arg;
-    if(error != NULL && error->status == 0 && attr != NULL && attr->om != NULL) {
-        uint8_t value[2];
-        uint16_t len = OS_MBUF_PKTLEN(attr->om);
-        if(len >= 2 &&
-           os_mbuf_copydata(attr->om, 0, sizeof(value), value) == 0) {
-            ESP_LOGI(TAG, "report ref chr=%u id=0x%02x type=%u",
-                     chr, value[0], value[1]);
-            if(value[0] == HID_REPORT_ID && value[1] == 0x01) {
-                s_hid_input_handle = chr;
-            }
-            else if(value[0] == HID_REPORT_ID && value[1] == 0x02) {
-                s_hid_output_handle = chr;
-            }
-        }
+    (void)attr;
+    (void)arg;
+    if(error != NULL && error->status != 0) {
+        ESP_LOGW(TAG, "vendor write status=%d", error->status);
     }
-    else {
-        ESP_LOGW(TAG, "report ref read failed: %d",
-                 error != NULL ? error->status : -1);
-    }
-    s_hid_ref_index++;
-    start_next_report_ref();
     return 0;
-}
-
-static void start_next_report_ref(void)
-{
-    if(s_hid_ref_index >= s_hid_ref_count) {
-        finish_hid_discovery();
-        return;
-    }
-    uint16_t chr = s_hid_ref_chr[s_hid_ref_index];
-    uint16_t dsc = s_hid_ref_dsc[s_hid_ref_index];
-    int rc = ble_gattc_read(s_conn_handle, dsc, on_report_ref_read,
-                            (void *)(uintptr_t)chr);
-    if(rc != 0) {
-        ESP_LOGW(TAG, "report ref read start failed: %d", rc);
-        s_hid_ref_index++;
-        start_next_report_ref();
-    }
 }
 
 static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
@@ -671,12 +567,8 @@ static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
     (void)arg;
     if(conn_handle != s_conn_handle) return 0;
     if(error != NULL && error->status != 0) {
-        ESP_LOGW(TAG, "subscribe write failed: %d", error->status);
-        hid_fail("Subscribe write failed");
-        return 0;
-    }
-    if(send_hid_heartbeat(conn_handle, s_hid_output_handle) != 0) {
-        hid_fail("HID heartbeat send failed");
+        ESP_LOGW(TAG, "CCCD write failed: %d", error->status);
+        vendor_fail("CCCD write failed");
         return 0;
     }
 
@@ -692,9 +584,14 @@ static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
     set_state_locked(BLE_REMOTE_CONNECTED, "Connected");
     unlock();
 
+    s_vendor_ready = true;
+    s_vendor_startup_index = 0;
+    /* One heartbeat per second, from the NimBLE host task's event queue.
+     * This keeps the GATT write on the host task (no cross-task host lock);
+     * the payload is 20 bytes, so SDIO/ACL pressure is minimal. */
+    ble_npl_callout_reset(&s_hb_callout, portTICK_PERIOD_MS * 1000);
     paired_add(addr, type, name);
-    ESP_LOGI(TAG, "subscribed to %s (%s) via HID; heartbeat queued, awaiting notifications",
-             name, addr);
+    ESP_LOGI(TAG, "connected to %s (%s) via vendor service", name, addr);
     return 0;
 }
 
@@ -742,10 +639,9 @@ static int gap_event(struct ble_gap_event * event, void * arg)
             ESP_LOGI(TAG, "encryption change: status=%d", event->enc_change.status);
             if(s_conn_handle == event->enc_change.conn_handle) {
                 if(event->enc_change.status != 0) {
-                    hid_fail("Bluetooth encryption failed");
+                    vendor_fail("Bluetooth encryption failed");
                     return 0;
                 }
-                set_state(BLE_REMOTE_CONNECTING, "Discovering D100H...");
                 start_discovery();
             }
             return 0;
@@ -757,10 +653,12 @@ static int gap_event(struct ble_gap_event * event, void * arg)
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGW(TAG, "disconnect: reason=0x%x", event->disconnect.reason);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            s_use_hid = false;
-            s_hid_input_handle = 0;
-            s_hid_output_handle = 0;
-            s_hid_input_cccd = 0;
+            s_vendor_ready = false;
+            ble_npl_callout_stop(&s_hb_callout);
+            s_vendor_notify_handle = 0;
+            s_vendor_write_handle = 0;
+            s_vendor_cccd_handle = 0;
+            s_vendor_startup_index = 0;
             s_discovery_started = false;
             s_top_right_us = 0;
             lock();
@@ -772,34 +670,44 @@ static int gap_event(struct ble_gap_event * event, void * arg)
             if(retry) schedule_reconnect();
             return 0;
         case BLE_GAP_EVENT_NOTIFY_RX: {
-            if(!s_use_hid) return 0;
-            if(event->notify_rx.attr_handle != s_hid_input_handle) {
-                ESP_LOGI(TAG, "notify on handle %u (input is %u)",
-                         event->notify_rx.attr_handle, s_hid_input_handle);
-                return 0;
-            }
-            /* HOGP's report 0xFB and FD00's 20-byte vendor value are different
-             * wire formats. Preserve the HID value, including its length. */
-            uint8_t data[64];
+            uint16_t handle = event->notify_rx.attr_handle;
             uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
-            ESP_LOGI(TAG, "HID notify handle=%u len=%u mtu=%u",
-                     event->notify_rx.attr_handle, len, ble_att_mtu(s_conn_handle));
-            if(len != sizeof(data)) {
-                ESP_LOGW(TAG, "unexpected HID report size: %u (expected 64)", len);
+            /* Vendor FD00 (handle 77) and HID report 0xFB (handle 69) carry
+             * the same 20-byte encrypted event frame on this unit.  Handling
+             * both would inject every key twice, so prefer FD00 and use 69
+             * only as a fallback while the vendor handle is unknown. */
+            if(handle == 69 && s_vendor_notify_handle != 0) {
                 return 0;
             }
+            if(handle != s_vendor_notify_handle && handle != 69) {
+                return 0;
+            }
+            if(len != 20) {
+                ESP_LOGW(TAG, "vendor frame h=%u len=%u (expected 20)",
+                         handle, len);
+                return 0;
+            }
+            uint8_t data[20];
             if(os_mbuf_copydata(event->notify_rx.om, 0, len, data) != 0) {
                 return 0;
             }
-            ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
             uint8_t id = 0;
             bool down = false;
-            if(!ulanzi_d100h_decode(data, len, &id, &down)) {
-                ESP_LOGI(TAG, "HID notify is not a control frame");
+            if(!ulanzi_d100h_decode_ble(data, len, &id, &down)) {
+                /* The device replies to every heartbeat with a 20-byte
+                 * status frame on both handles.  It is not a key event;
+                 * keep the log to one line per 10 s. */
+                static uint32_t status_frames;
+                status_frames++;
+                if((status_frames % 20) == 1) {
+                    ESP_LOGI(TAG, "vendor status frames=%lu",
+                             (unsigned long)status_frames);
+                }
                 return 0;
             }
             ESP_LOGI(TAG, "D100H event id=0x%02x down=%d", id, (int)down);
             if(id == 0x03) {
+                /* Top-right: short press = context, long press = star. */
                 if(down) {
                     s_top_right_us = esp_timer_get_time();
                 }
@@ -893,9 +801,9 @@ static void heartbeat_task(void * arg)
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         lock();
-        bool connected = s_state == BLE_REMOTE_CONNECTED && s_use_hid;
+        bool connected = s_state == BLE_REMOTE_CONNECTED && s_vendor_ready;
         uint16_t conn = s_conn_handle;
-        uint16_t handle = s_hid_output_handle;
+        uint16_t handle = s_vendor_write_handle;
         bool retry = s_reconnect && s_nimble_ready &&
                      s_state == BLE_REMOTE_IDLE && s_paired_count > 0 &&
                      esp_timer_get_time() >= s_reconnect_at;
@@ -915,9 +823,6 @@ static void heartbeat_task(void * arg)
         }
         unlock();
 
-        if(connected && conn != BLE_HS_CONN_HANDLE_NONE && handle != 0) {
-            send_hid_heartbeat(conn, handle);
-        }
         if(have_addr) {
             int rc = ble_gap_connect(s_own_addr_type, &addr, 15000, NULL,
                                      gap_event, NULL);
@@ -966,12 +871,9 @@ void ble_remote_start(void)
         return;
     }
     ESP_LOGI(TAG, "nimble_port_init ok");
-    int mtu_rc = ble_att_set_preferred_mtu(247);
-    if(mtu_rc != 0) {
-        ESP_LOGE(TAG, "preferred ATT MTU failed: %d", mtu_rc);
-        set_state(BLE_REMOTE_ERROR, "ATT MTU setup failed");
-        return;
-    }
+    ble_npl_callout_init(&s_hb_callout, nimble_port_get_dflt_eventq(),
+                         heartbeat_callout, NULL);
+
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
