@@ -7,11 +7,8 @@ dependencies:
     override_path: "../components/esp_lvgl_port"
   espressif/usb_host_hid: ^1.2.0
   lvgl/lvgl: 9.6.0
-  # Use the USB host library shipped with ESP-IDF 5.4. The registry's
-  # espressif/usb >=1.0 uses HAL FIFO APIs that only exist in IDF 5.5,
-  # despite declaring IDF >=5.4.
-  espressif/usb:
-    version: '*'
-    override_path: ../components/usb
+  # IDF 5.5 provides the USB host stack and the FS/HS OTG controllers.
+  # Let the component manager resolve the matching espressif/usb version.
+  espressif/usb: '*'
   espressif/esp_hosted: ==2.13.1
   espressif/esp_wifi_remote: ==1.6.3

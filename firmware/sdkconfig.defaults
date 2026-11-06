@@ -9,8 +9,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# This Tab5 unit reports ESP32-P4 revision v1.3. ESP-IDF 5.4 supports the
-# pre-3.0 hardware natively; IDF 5.5's rev<3 mode does not link reliably.
+# This Tab5 unit reports ESP32-P4 revision v1.3.  IDF 5.4 supports the
+# pre-3.0 hardware natively.  IDF 5.5 requires the explicit rev<3 mode;
+# without it the image is built for rev3.x and the ROM refuses to flash it.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_1=y
 
 # PSRAM / cache, following the M5Stack Tab5 defaults.

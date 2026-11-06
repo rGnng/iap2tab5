@@ -1191,17 +1191,17 @@ static void ui_mini_update(void)
         const char * artist = snapshot.track.artist;
         const char * album_text = snapshot.track.album;
         char second_line[192] = "";
-        if(artist[0] != ' ' && album_text[0] != ' ') {
+        if(artist[0] != '\0' && album_text[0] != '\0') {
             snprintf(second_line, sizeof(second_line), "%s  |  %s",
                      artist, album_text);
         }
-        else if(artist[0] != ' ') {
+        else if(artist[0] != '\0') {
             snprintf(second_line, sizeof(second_line), "%s", artist);
         }
-        else if(album_text[0] != ' ') {
+        else if(album_text[0] != '\0') {
             snprintf(second_line, sizeof(second_line), "%s", album_text);
         }
-        if(second_line[0] != ' ') {
+        if(second_line[0] != '\0') {
             lv_label_set_text(g_mini_artist, second_line);
             lv_obj_set_hidden(g_mini_artist, false);
         }
@@ -2060,23 +2060,23 @@ static void np_refresh_ui(void)
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
 
-    bool has_track = snapshot.track.title[0] != ' ';
+    bool has_track = snapshot.track.title[0] != '\0';
     lv_label_set_text(np_title, has_track ? snapshot.track.title : "No track");
     char meta_text[192] = "";
     if(has_track) {
         const char * artist = snapshot.track.artist;
         const char * album = snapshot.track.album;
-        if(artist[0] != ' ' && album[0] != ' ') {
+        if(artist[0] != '\0' && album[0] != '\0') {
             snprintf(meta_text, sizeof(meta_text), "%s - %s", artist, album);
         }
-        else if(artist[0] != ' ') {
+        else if(artist[0] != '\0') {
             snprintf(meta_text, sizeof(meta_text), "%s", artist);
         }
-        else if(album[0] != ' ') {
+        else if(album[0] != '\0') {
             snprintf(meta_text, sizeof(meta_text), "%s", album);
         }
     }
-    if(meta_text[0] != ' ') {
+    if(meta_text[0] != '\0') {
         lv_label_set_text(np_meta, meta_text);
         lv_obj_set_hidden(np_meta, false);
     }
@@ -5654,8 +5654,6 @@ static lv_obj_t * settings_detail_order_value;
 static lv_obj_t * settings_detail_np_bg_theme_check;
 static lv_obj_t * settings_detail_np_bg_blur_check;
 static lv_obj_t * settings_detail_np_bg_mesh_check;
-static lv_obj_t * settings_detail_usb_host_check;
-static lv_obj_t * settings_detail_usb_otg_check;
 static lv_obj_t * settings_detail_screen_value;
 static lv_obj_t * settings_detail_wifi_mode_value;
 static lv_obj_t * settings_detail_wifi_status_value;
@@ -5938,26 +5936,6 @@ static void settings_np_bg_action(void * user)
     g_np_bg_mode = (np_bg_mode_t)mode;
     settings_update_np_bg_checks();
     settings_system_changed();
-}
-
-static void settings_update_usb_checks(void)
-{
-    if(settings_detail_usb_host_check) {
-        lv_label_set_text(settings_detail_usb_host_check,
-                          g_usb_mode == USB_MODE_HOST ? ICON_CHECK : "");
-    }
-    if(settings_detail_usb_otg_check) {
-        lv_label_set_text(settings_detail_usb_otg_check,
-                          g_usb_mode == USB_MODE_OTG ? ICON_CHECK : "");
-    }
-}
-
-static void settings_usb_action(void * user)
-{
-    int mode = (int)(intptr_t)user;
-    if(mode != USB_MODE_HOST && mode != USB_MODE_OTG) return;
-    g_usb_mode = (usb_mode_t)mode;
-    settings_update_usb_checks();
 }
 
 static const char * settings_sort_field_text(void)
@@ -6529,11 +6507,6 @@ static void settings_np_bg_touch_cb(lv_event_t * event)
     settings_np_bg_action(lv_event_get_user_data(event));
 }
 
-static void settings_usb_touch_cb(lv_event_t * event)
-{
-    settings_usb_action(lv_event_get_user_data(event));
-}
-
 static void settings_sort_field_touch_cb(lv_event_t * event)
 {
     LV_UNUSED(event);
@@ -6626,8 +6599,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_np_bg_theme_check = NULL;
     settings_detail_np_bg_blur_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
-    settings_detail_usb_host_check = NULL;
-    settings_detail_usb_otg_check = NULL;
 
     if(settings_time_open) {
         settings_render_time_editor(parent, interactive);
@@ -6924,29 +6895,15 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             break;
         }
         case SETTING_USB: {
-            lv_obj_t * host_row = settings_make_choice_row(
-                parent, "USB Host (OTG)", g_usb_mode == USB_MODE_HOST,
-                &settings_detail_usb_host_check);
-            if(interactive) {
-                focus_add_clickable(host_row, settings_usb_action, NULL,
-                                    (void *)(intptr_t)USB_MODE_HOST, true);
-            }
-            else {
-                touch_add_clickable(host_row, settings_usb_touch_cb,
-                                    (void *)(intptr_t)USB_MODE_HOST);
-            }
-
-            lv_obj_t * otg_row = settings_make_choice_row(
-                parent, "USB Device", g_usb_mode == USB_MODE_OTG,
-                &settings_detail_usb_otg_check);
-            if(interactive) {
-                focus_add_clickable(otg_row, settings_usb_action, NULL,
-                                    (void *)(intptr_t)USB_MODE_OTG, true);
-            }
-            else {
-                touch_add_clickable(otg_row, settings_usb_touch_cb,
-                                    (void *)(intptr_t)USB_MODE_OTG);
-            }
+            settings_make_value_row(parent, "USB-A host", "Active (HS)",
+                                    COL_GREEN, 52, FONT_H2, FONT_CAPTION, NULL);
+            settings_make_value_row(parent, "USB-C data", "Device / console",
+                                    COL_TEXT, 52, FONT_H2, FONT_CAPTION, NULL);
+            settings_make_value_row(parent, "USB-C OTG host",
+                                    "Requires board rework", COL_MUTED,
+                                    52, FONT_H2, FONT_CAPTION, NULL);
+            settings_make_value_row(parent, "Console", "USB Serial/JTAG",
+                                    COL_TEXT, 52, FONT_H2, FONT_CAPTION, NULL);
             break;
         }
         case SETTING_DEVICE: {
@@ -7020,8 +6977,6 @@ static void settings_create(lv_obj_t * parent)
     settings_detail_np_bg_theme_check = NULL;
     settings_detail_np_bg_blur_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
-    settings_detail_usb_host_check = NULL;
-    settings_detail_usb_otg_check = NULL;
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));

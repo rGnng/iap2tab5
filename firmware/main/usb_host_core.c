@@ -17,10 +17,16 @@ static const char * TAG = "usb_core";
 #define IPOD_USBMUX_CONFIG  4
 
 static uint8_t s_apple_config = IPOD_USBMUX_CONFIG;
+static unsigned s_peripheral_map = 1u << 0;
 
 void usb_host_core_set_apple_config(uint8_t config_value)
 {
     s_apple_config = config_value;
+}
+
+void usb_host_core_set_peripheral_map(unsigned peripheral_map)
+{
+    s_peripheral_map = peripheral_map != 0 ? peripheral_map : (1u << 0);
 }
 
 static bool apple_enum_filter(const usb_device_desc_t * dev_desc,
@@ -55,16 +61,26 @@ static void usb_lib_task(void * arg)
 
 esp_err_t usb_host_core_start(void)
 {
-    esp_err_t err = bsp_feature_enable(BSP_FEATURE_USB, true);
-    if(err != ESP_OK) {
-        ESP_LOGE(TAG, "USB power enable failed: %s", esp_err_to_name(err));
-        return err;
+    esp_err_t err;
+    /* The BSP switch powers the USB-A connector.  The USB-C OTG port is
+     * powered from its own VBUS, so leave the USB-A switch off when the
+     * full-speed/USB-C controller is selected. */
+    if(s_peripheral_map & (1u << 0)) {
+        err = bsp_feature_enable(BSP_FEATURE_USB, true);
+        if(err != ESP_OK) {
+            ESP_LOGE(TAG, "USB power enable failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
+
+    ESP_LOGI(TAG, "USB host peripheral_map=0x%x (%s)", s_peripheral_map,
+             (s_peripheral_map & (1u << 1)) ? "USB-C OTG FS" : "USB-A HS");
 
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LOWMED,
         .enum_filter_cb = apple_enum_filter,
+        .peripheral_map = s_peripheral_map,
     };
 
     err = usb_host_install(&host_config);

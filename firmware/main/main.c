@@ -538,6 +538,8 @@ void app_main(void)
     serial_input_start();
 
     usb_host_core_set_apple_config(g_app_config.iap2_mode ? 2 : 4);
+    usb_host_core_set_peripheral_map(g_app_config.usb_mode ? (1u << 1)
+                                                           : (1u << 0));
     if(usb_host_core_start() == ESP_OK) {
         /* The HID class driver runs in both modes. It skips the iPod's own
          * HID interface and only owns the Ulanzi D100H / normal keyboards. */

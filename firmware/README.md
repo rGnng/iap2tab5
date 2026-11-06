@@ -5,25 +5,56 @@ ESP-IDF firmware for the M5Stack Tab5 (ESP32-P4). It reuses the same
 
 ## Toolchain
 
-- ESP-IDF **v5.4.2** (tested)
+- ESP-IDF **v5.5.6** (tested)
 - Python 3.12 (ESP-IDF's install script creates its own virtualenv)
 - Target: `esp32p4`, chip revision v1.x
 
-This Tab5 reports an ESP32-P4 **v1.3**. ESP-IDF 5.5+ defaults to the v3.x
-(ECO5) memory map and its rev<3 compatibility mode does not link reliably,
-so the project stays on IDF 5.4.
+This Tab5 reports an ESP32-P4 **v1.3**. IDF 5.5 defaults to the v3.x (ECO5)
+memory map, so the project explicitly selects the rev<3 mode:
 
-The registry's `espressif/usb` component uses HAL FIFO APIs that only exist
-in IDF 5.5, despite declaring IDF >=5.4. `components/usb` is a copy of the
-USB host library shipped with IDF 5.4.2 and is selected through
-`override_path` in `main/idf_component.yml`.
+```text
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_1=y
+```
 
-On this machine ESP-IDF is installed at `/home/ops/esp/esp-idf`:
+Without those options the bootloader is built for rev3.x and the ROM rejects
+it when flashing. The registry `espressif/usb` component (currently 1.6.0)
+provides the USB host stack and the HS/FS OTG controller selection; the old
+vendored `components/usb` copy from IDF 5.4 has been removed.
+
+On this machine ESP-IDF is installed at `/home/ops/esp/esp-idf-5.5.6`:
 
 ```bash
 export PATH="/home/ops/.local/share/uv/python/cpython-3.12-linux-aarch64-gnu/bin:$PATH"
-. /home/ops/esp/esp-idf/export.sh
+. /home/ops/esp/esp-idf-5.5.6/export.sh
 ```
+
+## USB ports and USB-C OTG
+
+The Tab5 has two USB connectors, but on this board revision they are not
+equivalent:
+
+| Port | P4 connection | Role |
+| --- | --- | --- |
+| USB-A (J10) | `USB2_OTG` high-speed pins 49/50 | USB host (iPod, HID keyboard) |
+| USB-C (J8) | P4 USB device / USB Serial/JTAG via R94/R95 0R | Console, flashing, device mode |
+
+The USB-C data lines are stuffed to the **device** path by default. The
+optional host/UART path (R96/R97 to the CH9102F, which is not populated) is
+not a USB host. The P4 full-speed OTG host pins (GPIO24/25) are not routed to
+USB-C on this revision.
+
+Consequently, the `usb_mode = 1` (USB-C FS host) setting can only work after
+a board rework that moves the USB-C data path to a P4 host controller. The
+firmware keeps `peripheral_map = BIT1` support for such a reworked board and
+for R&D, but the Settings UI reports USB-C OTG as "Requires board rework" and
+does not offer a switch that would leave the console unreachable. The serial
+debug commands `(` / `)` select USB-C FS / USB-A HS and reboot, for use only
+on a reworked board.
+
+The P4 host stack can only run one of its two OTG controllers as host at a
+time, so USB-A and USB-C cannot both be hosts simultaneously even after a
+rework.
 
 ## Build
 
@@ -101,7 +132,7 @@ live in `../docs/sd/`. Two files are used:
 - `wifi_mode`: `0` station, `1` open AP
 - `np_bg_mode`: `0` theme, `1` blurred cover, `2` cover gradient
 - `sort_field`: `0` add date, `1` name, `2` year
-- `usb_mode`: `0` host, `1` OTG (currently label only)
+- `usb_mode`: `0` USB-A HS host (default), `1` USB-C FS host (needs board rework)
 
 Missing or invalid files fall back to built-in defaults. The firmware writes
 the file back after every settings change (one write per second at most while

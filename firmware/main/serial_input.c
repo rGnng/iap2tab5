@@ -30,6 +30,7 @@
  *   i          dump all USB configuration descriptors (iAP2 bring-up)
  *   x          run the embedded MFi P-256 signing self-test
  *   J          toggle iAP2 (USB config 2) / AFC (config 4) and reboot
+ *   ( / )      select USB-C OTG FS / USB-A HS host and reboot
  *   S          remount the SD card and print the AFC file sizes
  *   T / W      dump MLDB.SQL / MLDB.WAL as base64 over the console
  *   Q          upload /sdcard/library.bin as base64, end with EOF
@@ -815,6 +816,17 @@ static void serial_input_task(void * arg)
                     }
                 }
             }
+            continue;
+        }
+
+        if(c == '(' || c == ')') {
+            g_app_config.usb_mode = (c == '(') ? 1 : 0;
+            app_config_save();
+            ESP_LOGI("usb", "host peripheral -> %s; rebooting",
+                     g_app_config.usb_mode ? "USB-C OTG FS"
+                                           : "USB-A HS");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
             continue;
         }
 

@@ -5,8 +5,11 @@ build-*/
 
 # ESP-IDF firmware build output
 firmware/build/
+firmware/build55/
 firmware/managed_components/
 firmware/sdkconfig
+firmware/sdkconfig55
+firmware/sdkconfig55.old
 firmware/sdkconfig.old
 
 # MFi identity: contains the Apple Accessories private key. Generate it

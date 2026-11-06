@@ -173,11 +173,11 @@ python3 tools/gen_mock_library.py
 
 ## 之后怎么放到 Tab5 上
 
-仓库里的 `firmware/` 是一版可烧录的 **Tab5 真机预览固件**：ESP-IDF 5.4.2 + esp-bsp `m5stack_tab5` + esp_lvgl_port + 共享的 `app/ui`。真机媒体库来自 SD 卡上的 `library.bin`，播放状态和封面来自 iAP2；`assets/mock` 只用于桌面模拟器。
+仓库里的 `firmware/` 是一版可烧录的 **Tab5 真机预览固件**：ESP-IDF 5.5.6 + esp-bsp `m5stack_tab5` + esp_lvgl_port + 共享的 `app/ui`。真机媒体库来自 SD 卡上的 `library.bin`，播放状态和封面来自 iAP2；`assets/mock` 只用于桌面模拟器。
 
 ```bash
 export PATH="/home/ops/.local/share/uv/python/cpython-3.12-linux-aarch64-gnu/bin:$PATH"
-. /home/ops/esp/esp-idf/export.sh
+. /home/ops/esp/esp-idf-5.5.6/export.sh
 cd firmware
 python3 ../tools/gen_iap2_identity.py   # MFi 私钥不提交，需本地生成
 idf.py build

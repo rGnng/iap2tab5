@@ -6,7 +6,7 @@ USB configuration and protocol stack.
 
 ## What is already in place
 
-- ESP-IDF 5.4.2, USB Host stack and the USB-A port (`bsp_usb_host_start`).
+- ESP-IDF 5.5.6, USB Host stack and the USB-A port (`bsp_usb_host_start`).
 - USB HID keyboard/knob on the USB-A port.
 - microSD mount (`/sdcard`) and JSON config.
 - Wi-Fi AP + HTTP server, which can drive an AFC pull later.

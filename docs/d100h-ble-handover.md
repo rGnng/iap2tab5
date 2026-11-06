@@ -1,6 +1,8 @@
 # D100H BLE remote: handover and driver-analysis brief
 
-Status: **vendor mode working end-to-end**. Key and knob events are decoded
+Status: **vendor mode working end-to-end**. The current firmware uses
+ESP-IDF 5.5.6; the 5.4.2 references in the historical sections below describe
+the original bring-up. Key and knob events are decoded
 and mapped to the UI. The earlier "ACL-flow deadlock" conclusion was superseded
 by section 13: the real blocker was a central-only NimBLE build with GATT server
 support disabled, which discarded every incoming ATT notification. The original
