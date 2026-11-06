@@ -9,6 +9,9 @@
 #
 #   esptool.py -p /dev/ttyACM0 --before default_reset --after no_reset run
 #
+# C6_ISP J1: 1=3V3 (leave open) 2=TXD 3=RXD 4=RST/EN 5=IO9/BOOT 6=GND
+# DTR goes to IO9, RTS goes to EN.  CTS is unused.
+#
 set -euo pipefail
 
 PORT="${1:-}"

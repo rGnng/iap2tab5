@@ -1,8 +1,10 @@
 # D100H BLE remote: handover and driver-analysis brief
 
-Status: **candidate fixes prepared; hardware retest pending**. The following
-opening description records the original `ec37af9` runtime blocker; see section 0
-for the driver-analysis findings and current local patch.
+Status: **C6 2.13.1 upgrade completed; BLE key events still blocked by an
+ESP-Hosted VHCI / NimBLE ACL-flow deadlock**. The original `ec37af9` blocker and
+the earlier candidate patch are preserved below as history. See section 12 for
+the post-upgrade evidence, the current stable state, and the recommended next
+paths.
 
 Original status: **blocked on missing vendor key events**. Everything up to and including
 BLE scan, connect, pairing/bonding, GATT discovery, CCCD subscription, and the
@@ -883,3 +885,208 @@ If corrected HID framing still yields no notifications, collect CCCD readback,
 all-input notifications and a known-good BLE capture from the same unit. The
 C6 1.4.1 versus host 2.13.1 mismatch remains an independent unresolved issue;
 a matching C6 image is ready, but neither that nor MITM is a proven root cause.
+
+---
+
+## 12. C6 2.13.1 upgrade and post-upgrade BLE findings (2026-11-06)
+
+This section records the hardware work after `ec37af9` and the driver analysis
+of Ulanzi Studio 3.4.8. It supersedes the earlier "HID 0xFB uses 64-byte
+frames" assumption for this specific D100H unit.
+
+### 12.1 C6 firmware upgrade completed
+
+The factory C6 (ESP-Hosted 1.4.1) was replaced with the matching ESP-Hosted
+2.13.1 slave firmware from `tools/c6_firmware/`:
+
+- `bootloader.bin` at `0x0`
+- `partition-table.bin` at `0x8000`
+- `ota_data_initial.bin` at `0xd000`
+- `network_adapter.bin` at `0x10000`
+
+The internal `J1 / C6_ISP` header is the only programming interface. **The boot
+strap is IO9, not IO0**:
+
+| J1 pin | Net | Programmer |
+| --- | --- | --- |
+| 1 | `WLAN_3.3V` | do not connect (Tab5 supplies power) |
+| 2 | `RF_C6_TXD` | adapter RX |
+| 3 | `RF_C6_RXD` | adapter TX |
+| 4 | `RF_C6_RST` / EN | adapter RTS (or manual reset) |
+| 5 | `RF_C6_IO9` / BOOT | adapter DTR (or manual GND) |
+| 6 | GND | adapter GND |
+
+The C6 UART is not routed to the P4; there is no P4 UART bridge. The P4 can
+control C6 EN through GPIO15 but cannot control IO9. A one-time wired flash is
+therefore required for the 1.4.1 -> 2.13.1 step. `tools/c6_firmware/README.md`
+and `flash_c6.sh` now document IO9 and the J1 pinout.
+
+The successful flash was done with:
+
+```bash
+python -m esptool --chip esp32c6 -p /dev/ttyUSB0 -b 115200 \
+  --before no_reset --after no_reset \
+  write_flash --flash_mode dio --flash_size 4MB --flash_freq 40m \
+  0x10000 tools/c6_firmware/network_adapter.bin
+```
+
+The bootloader/partition-table/ota_data had already been written and verified.
+The practical workaround for the CH340's weak 3.3V and the P4 reset line was:
+power the C6 from the programmer's 3.3V with the Tab5 fully off, or keep the P4
+in bootloader; any reset during the large app write aborts the transfer.
+
+Post-upgrade boot log:
+
+```text
+transport: Identified slave [esp32c6]
+transport: got co-processor transport size: 1536
+transport: co-processor transport size matches host transport size: 1536
+transport: Base transport is set-up, TRANSPORT_TX_ACTIVE
+```
+
+There is no `Version mismatch` warning and the BT controller init/enable RPCs
+now succeed. NimBLE initializes (`nimble_port_init ok`, `NimBLE host synced`).
+
+### 12.2 Ulanzi Studio driver: the vendor-service path is the Studio path
+
+Disassembly of `Ulanzi_Studio.dylib` from the Ulanzi Studio 3.4.8 macOS package
+(SHA-256 `482f4827...`) confirms:
+
+- `BleDevice` uses service **0x1971**, notify **FD00**, write **FD01**.
+- It subscribes to FD00 with `setNotifyValue:YES` and writes to FD01 with
+  `writeValue:forCharacteristic:type:` where type = 1 (write without response).
+- For FD01 it takes the first 20 bytes of the message and calls
+  `+[MessageHelper encodeMessage:]` (TEA), then writes the 20-byte value.
+- `KehwinDevice` starts a background thread and sends
+  `+[MessageHelper deviceHeartbeatMessage]` every ~1 second. The plaintext is
+  `06 01 23 00 01` + zeros; the encrypted 20-byte heartbeat is
+  `24569ef228e145a13890c499a360aaad00000000`.
+- The driver also builds optional startup queries/settings (`setExpertMouseSWStatus`,
+  `getDeviceActive`, `getDeviceStandbyStatus`, `getDeviceVersion`,
+  `getDeviceHardwareVersion`, `getDeviceFlashId`, `getDeviceMacAddress`,
+  `setDeviceDialMiniLedHeartbeat`). The independent protocol test showed the
+  heartbeat alone is sufficient on firmware 1.3.8.1, but this unit may send
+  HID reports until vendor mode is established.
+
+The Studio does **not** use HID report 0xFB for the D100H custom events. The
+`ftl/hamdial` HID report 0xFB route is an alternative client path, not the
+Studio path.
+
+### 12.3 The unit sends 20-byte notifications on both channels
+
+With the vendor service and HID service both discovered, the unit emits
+20-byte ATT notifications on:
+
+- **HID report 0xFB input, value handle 69** (CCCD 70)
+- **vendor FD00, value handle 77** (CCCD 78)
+
+The ACL-level trace (HCI ACL, L2CAP CID 0x0004, ATT opcode 0x1b) showed:
+
+```text
+att=69 len=32   (20-byte payload)
+att=77 len=32   (20-byte payload)
+```
+
+It also sends standard HID reports on handles 50/61/29 during the initial
+HID-mode burst. The HID 0xFB notification is therefore **20 bytes**, not the
+64-byte frame assumed by the earlier branch patch. `ulanzi_d100h_decode_ble()`
+(which requires exactly 20 bytes) is the correct decoder for both channels.
+The branch's HID path was subscribing to CCCD 70 but rejecting everything
+because it required 64 bytes.
+
+### 12.4 The remaining blocker: ACL pool exhaustion / host-task starvation
+
+After the C6 upgrade, the failure changes shape but remains:
+
+```text
+vhci_drv: Rx: alloc_acl_from_ll failed
+```
+
+ACL failures appear only after the heartbeat is sent. With the heartbeat
+disabled, failures are zero. With the heartbeat active, the D100H sends a
+burst of 20-byte HID/vendor notifications plus standard HID reports; the host
+ACL pool fills and the GATT notifications never reach
+`BLE_GAP_EVENT_NOTIFY_RX`.
+
+A NimBLE `ble_npl_callout` (`host alive`) confirmed that the host task itself
+continues to run, but the ACL receive queue is not drained. The likely
+mechanism is:
+
+- a NimBLE GATT heartbeat write from a separate FreeRTOS task holds the NimBLE
+  host lock while `esp_hosted_tx()` waits on the shared SDIO bus;
+- the NimBLE host task needs the same lock (or is otherwise blocked) to process
+  the incoming ACL queue;
+- the queue fills, `ble_transport_alloc_acl_from_ll()` fails, and the
+  notifications are dropped.
+
+Things that did **not** fix it:
+
+| Experiment | Result |
+| --- | --- |
+| Stop Wi-Fi after ESP-Hosted init | no improvement; heartbeat still fills ACL |
+| Move heartbeat to a NimBLE callout (host task) | host task sends, but ACL still fills |
+| Subscribe to HID 0xFB CCCD 70 | subscription succeeds; no notifications dispatched |
+| Increase `CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT` to 64 | failures delayed, not eliminated |
+| Increase host task stack to 8192 | no improvement |
+| 256 transport ACL buffers | `nimble_port_init` fails with `ESP_FAIL` (memory) |
+| Direct HCI ACL heartbeat via `esp_hosted_tx()` | packet bytes match NimBLE exactly, but bypassing controller flow control makes the D100H disconnect with reason `0x0c` |
+
+The direct HCI packet was byte-identical at the HCI/L2CAP/ATT level:
+
+```text
+02 00 00 1b 00 17 00 04 00 52 50 00 ...
+```
+
+It still failed because it bypassed the host/controller ACL flow-control
+accounting; the controller/C6 rejected it with HCI `0x0c` (Command Disallowed)
+when the ACL buffers were not credited.
+
+### 12.5 Current stable state
+
+The currently flashed P4 build is stable and does not reboot:
+
+- Wi-Fi manager starts normally (ESP-Hosted transport is initialized).
+- C6 2.13.1 is identified; transport size 1536; no version mismatch.
+- D100H `Ulanzi Dial` connects, encrypts, discovers service 0x1971/FD00/FD01,
+  and the HID 0xFB CCCD (handle 70) is subscribed.
+- NimBLE heartbeat is sent once per second from the heartbeat task.
+- The ACL pool still shows occasional `alloc_acl_from_ll failed` under D100H
+  notification load, and no key events reach the UI.
+
+Do not disable Wi-Fi before `ble_remote_start()`: that leaves ESP-Hosted
+uninitialized, the P4 resets the C6 via GPIO15, SDIO init fails, and the board
+appears to reboot in a loop. If Wi-Fi must be disabled for a BLE-only test,
+start Wi-Fi first, then stop it (or keep the transport initialized).
+
+The test code used for the post-upgrade experiments (20-byte HID decode,
+hardcoded HID CCCD 70, heartbeat task, host stack 8192, transport ACL 64) is
+**uncommitted** in the worktree. This handover commit contains the conclusions
+and the corrected C6 programming documentation, not the experimental code.
+
+### 12.6 Recommended next paths
+
+1. **Dedicated BLE module (recommended)**  
+   Use an ESP32-C3/S3 (or similar) as the BLE central for the D100H, with a
+   UART/USB bridge into the P4. This removes the C6/Wi-Fi/BLE SDIO coexistence
+   and host-lock problem entirely. The D100H protocol is already known
+   (0x1971/FD00/FD01, 20-byte TEA heartbeat), so the bridge firmware is small.
+
+2. **Upgrade IDF to 5.5 + ESP-Hosted 3.x**  
+   OrcSDR runs a Tab5 P4 at IDF 5.5.4 with C6 3.0.6 and reports normal Wi-Fi
+   operation. A newer ESP-Hosted VHCI/NimBLE may fix the blocking TX / ACL
+   flow-control behavior. This is a larger migration; the P4 rev<3 memory map
+   must be configured explicitly.
+
+3. **Patch the VHCI TX path for non-blocking/flow-controlled ACL sends**  
+   The current `vhci_drv` calls `esp_hosted_tx()` while the NimBLE host lock is
+   held. A flow-control-aware, non-blocking TX queue would allow the host task
+   to drain RX. This is the most direct software fix but needs careful testing
+   to avoid dropping heartbeat packets.
+
+4. **BLE-only C6 mode**  
+   Start Wi-Fi to initialize ESP-Hosted, then stop Wi-Fi and use a
+   flow-controlled heartbeat. The current tests did not achieve reliable
+   notifications even with Wi-Fi stopped, so this still depends on (2) or (3).
+
+Until one of these is done, the D100H can connect and heartbeat but key events
+will not reach the UI.

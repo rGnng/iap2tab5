@@ -42,18 +42,24 @@ The SHA-256 sums are in `SHA256SUMS`.
 ## Hardware connection
 
 Remove the Tab5 back cover. The C6 programming header is on the PCB (the
-silkscreen is inside the cover). Connect a **3.3 V USB-UART adapter**:
+silkscreen is inside the cover). It is the 6-pin `J1` / `C6_ISP` header:
 
-| Adapter | C6 pad |
-| --- | --- |
-| TX | RXD |
-| RX | TXD |
-| DTR | IO0 |
-| RTS | EN |
-| GND | GND |
-| 3V3 | **leave open** (Tab5 supplies C6 power) |
+| J1 pin | Net | Connect to |
+| --- | --- | --- |
+| 1 | `WLAN_3.3V` | **leave open** (Tab5 supplies C6 power) |
+| 2 | `RF_C6_TXD` | adapter **RX** |
+| 3 | `RF_C6_RXD` | adapter **TX** |
+| 4 | `RF_C6_RST` / EN | adapter **RTS** |
+| 5 | `RF_C6_IO9` / BOOT | adapter **DTR** (or manual boot strap) |
+| 6 | GND | adapter **GND** |
 
-Do not connect the adapter's 3V3 while the Tab5 is powered.
+The boot strap on the Tab5 C6 is **IO9**, not IO0. The adapter's CTS pin is not
+used. Do not connect the adapter's 3V3 while the Tab5 is powered.
+
+If the adapter has only RTS/CTS and no DTR, leave CTS open, use RTS for the
+reset line (or reset manually), and pull **IO9** to GND while resetting to enter
+download mode. There is no P4 UART path to the C6 on the Tab5; the `C6_ISP`
+header is the only programming interface.
 
 ## Flashing
 
@@ -74,8 +80,11 @@ Do not connect the adapter's 3V3 while the Tab5 is powered.
    tools/c6_firmware/flash_c6.sh /dev/ttyUSB0
    ```
 
-   If the adapter does not support DTR/RTS auto-reset, hold the C6 `IO0` pad
-   low, tap `EN` to GND, release `IO0`, then run the command.
+   If the adapter does not support DTR/RTS auto-reset, hold the C6 `IO9` pad
+   low, tap `EN` to GND, release `IO9`, then run the command with
+   `--before no_reset` instead of `default_reset`.
+
+   The boot strap is `IO9`; do not use `IO0`.
 4. Power-cycle the Tab5 (or reset the P4). The P4 boot log should now show
    `ESP-Hosted C6 FW: 2.13.1` (or at least a 2.13.x version) and no
    `Version mismatch` warning. `ble_remote` should no longer log
