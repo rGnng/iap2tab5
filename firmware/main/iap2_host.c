@@ -1548,117 +1548,6 @@ static void ft_send(uint8_t file_id, uint8_t op)
     tx_queue(FT_SESSION, datagram, sizeof(datagram));
 }
 
-static void art_cache_path(const char * name, char * out, size_t out_len)
-{
-    snprintf(out, out_len, "%s/%s", app_config_library_dir(), name);
-}
-
-static void art_cache_remove(void)
-{
-    static const char * const names[] = { "np.raw", "np.txt", "np.tmp", "nm.tmp" };
-    char path[160];
-    for(size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        art_cache_path(names[i], path, sizeof(path));
-        remove(path);
-    }
-}
-
-static bool art_cache_write(const uint8_t * cover, const char * album,
-                            const char * artist, uint64_t key)
-{
-    if(cover == NULL || album == NULL || album[0] == '\0') return false;
-
-    char raw[160], raw_tmp[160], meta[160], meta_tmp[160];
-    art_cache_path("np.raw", raw, sizeof(raw));
-    art_cache_path("np.tmp", raw_tmp, sizeof(raw_tmp));
-    art_cache_path("np.txt", meta, sizeof(meta));
-    art_cache_path("nm.tmp", meta_tmp, sizeof(meta_tmp));
-
-    FILE * f = fopen(raw_tmp, "wb");
-    if(f == NULL) return false;
-    size_t n = fwrite(cover, 1, ART_BYTES, f);
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
-    if(n != ART_BYTES) {
-        remove(raw_tmp);
-        return false;
-    }
-    remove(raw);
-    if(rename(raw_tmp, raw) != 0) {
-        remove(raw_tmp);
-        return false;
-    }
-
-    f = fopen(meta_tmp, "w");
-    if(f == NULL) return false;
-    fprintf(f, "%s\n%s\n%016llX\n", album,
-            artist != NULL ? artist : "",
-            (unsigned long long)key);
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
-    remove(meta);
-    if(rename(meta_tmp, meta) != 0) {
-        remove(meta_tmp);
-        return false;
-    }
-    return true;
-}
-
-static uint8_t * art_cache_load(char * album, size_t album_len,
-                                char * artist, size_t artist_len,
-                                uint64_t * key)
-{
-    char meta[160], raw[160], raw_tmp[160];
-    art_cache_path("np.txt", meta, sizeof(meta));
-    art_cache_path("np.raw", raw, sizeof(raw));
-    art_cache_path("np.tmp", raw_tmp, sizeof(raw_tmp));
-
-    FILE * f = fopen(meta, "r");
-    if(f == NULL) return NULL;
-    char line[160];
-    if(fgets(line, sizeof(line), f) == NULL) {
-        fclose(f);
-        return NULL;
-    }
-    line[strcspn(line, "\r\n")] = '\0';
-    if(album_len > 0) {
-        snprintf(album, album_len, "%.*s", (int)(album_len - 1), line);
-    }
-    if(fgets(line, sizeof(line), f) == NULL) {
-        fclose(f);
-        return NULL;
-    }
-    line[strcspn(line, "\r\n")] = '\0';
-    if(artist_len > 0) {
-        snprintf(artist, artist_len, "%.*s", (int)(artist_len - 1), line);
-    }
-    unsigned long long cached_key = 0;
-    if(fgets(line, sizeof(line), f) != NULL) {
-        sscanf(line, "%llx", &cached_key);
-    }
-    fclose(f);
-    if(album[0] == '\0') return NULL;
-
-    f = fopen(raw, "rb");
-    if(f == NULL) f = fopen(raw_tmp, "rb");
-    if(f == NULL) return NULL;
-    uint8_t * cover = heap_caps_malloc(ART_BYTES, MALLOC_CAP_SPIRAM);
-    if(cover == NULL) {
-        fclose(f);
-        return NULL;
-    }
-    size_t n = fread(cover, 1, ART_BYTES, f);
-    fclose(f);
-    if(n != ART_BYTES) {
-        free(cover);
-        return NULL;
-    }
-    *key = (uint64_t)cached_key;
-    return cover;
-}
-
 static bool artwork_album_matches(const char * album)
 {
     if(album == NULL || album[0] == '\0' || s_art_lock == NULL) return true;
@@ -1763,7 +1652,6 @@ static void ft_feed(const uint8_t * payload, size_t len)
         ft_send(id, 0x01); /* Start: the device waits for this */
         if(expected == 0 && type == 2) {
             artwork_clear_cover();
-            art_cache_remove();
         }
         return;
     }
@@ -1823,7 +1711,6 @@ static void ft_feed(const uint8_t * payload, size_t len)
         if(t->type == 2) {
             if(t->len == 0) {
                 artwork_clear_cover();
-                art_cache_remove();
             }
             else {
                 ft_publish_artwork(t->data, t->len);
@@ -1896,8 +1783,7 @@ static void artwork_decode_task(void * arg)
                      artist);
             s_art_cached_key = key;
             xSemaphoreGive(s_art_lock);
-            art_cache_write(cover, album, artist, key);
-            ESP_LOGI(TAG, "artwork decoded (%u bytes, cached)", (unsigned)len);
+            ESP_LOGI(TAG, "artwork decoded (%u bytes)", (unsigned)len);
         }
         else {
             free(cover);
@@ -2201,8 +2087,25 @@ static void iap2_task(void * arg)
     }
 }
 
+/* Older firmware kept one last cover in np.raw/np.txt and published it
+ * before the current track was known, which made the Now Playing page flash
+ * a stale cover and then go grey.  The UI now has a track-ID cache under
+ * <library>/np/; remove the legacy files once. */
+static void art_cache_remove_legacy(void)
+{
+    static const char * const names[] = { "np.raw", "np.txt", "np.tmp",
+                                          "nm.tmp" };
+    char path[160];
+    for(size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", app_config_library_dir(),
+                 names[i]);
+        remove(path);
+    }
+}
+
 esp_err_t iap2_host_start(void)
 {
+    art_cache_remove_legacy();
     s_rx_stream = xStreamBufferCreateWithCaps(RX_STREAM_SIZE, 0,
                                               MALLOC_CAP_SPIRAM);
     s_link_buf = heap_caps_malloc(LINK_BUF_SIZE, MALLOC_CAP_SPIRAM);
@@ -2225,25 +2128,6 @@ esp_err_t iap2_host_start(void)
                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGW(TAG, "artwork decode task creation failed");
         s_art_task = NULL;
-    }
-    else {
-        char album[128];
-        char artist[128];
-        uint64_t key = 0;
-        uint8_t * cached = art_cache_load(album, sizeof(album),
-                                          artist, sizeof(artist), &key);
-        if(cached != NULL) {
-            s_art_cover = cached;
-            s_art_valid = true;
-            s_art_rev = 1;
-            snprintf(s_art_cached_album, sizeof(s_art_cached_album), "%s",
-                     album);
-            snprintf(s_art_cached_artist, sizeof(s_art_cached_artist), "%s",
-                     artist);
-            s_art_cached_key = key;
-            ESP_LOGI(TAG, "artwork cache loaded: album='%s' artist='%s'",
-                     album, artist);
-        }
     }
 
     s_enabled = true;
