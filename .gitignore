@@ -24,3 +24,7 @@ screenshots/
 
 # C6 slave firmware build workspace
 tools/c6_firmware/build/
+
+# Host codec test bytecode
+__pycache__/
+*.py[cod]

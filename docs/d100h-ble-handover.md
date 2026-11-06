@@ -1,6 +1,10 @@
 # D100H BLE remote: handover and driver-analysis brief
 
-Status: **blocked on missing vendor key events**. Everything up to and including
+Status: **candidate fixes prepared; hardware retest pending**. The following
+opening description records the original `ec37af9` runtime blocker; see section 0
+for the driver-analysis findings and current local patch.
+
+Original status: **blocked on missing vendor key events**. Everything up to and including
 BLE scan, connect, pairing/bonding, GATT discovery, CCCD subscription, and the
 encrypted keep-alive works. The D100H never sends a vendor notification on either
 of the two known channels, so no button or knob events reach the UI.
@@ -9,6 +13,128 @@ This document is written for a driver/protocol analysis session. It records the
 hardware, the code paths, the exact GATT layout of the test unit, the protocol
 references, the experiments already run, the current hypotheses, and the next
 captures that should settle the question.
+
+---
+
+## 0. Driver-analysis findings after `ec37af9`
+
+The local candidate patch addresses concrete framing/observability defects before
+changing pairing policy or flashing the C6. It has **not** been built with
+ESP-IDF or tested on a Tab5 in the analysis environment. The original logs and
+experiments below are preserved as historical evidence, not proof of current
+wire traffic or of the candidate fix working.
+
+### 0.1 A logged 64-byte write may have been truncated to 20 bytes
+
+The current HID keep-alive is 64 bytes, but `ec37af9` never requests an ATT MTU
+exchange. A 64-byte ATT value requires MTU **at least 67** (three bytes for the
+write/notification opcode and handle). The default ATT MTU is 23.
+
+This is especially important with the **actual ESP-IDF 5.4.2 NimBLE revision**,
+`0225775e49669cd4f070400908f73718bddce83b`:
+
+- `ble_gattc_write_no_rsp()` logs the requested buffer length before ATT send.
+- `ble_att_tx_with_conn()` then calls `ble_att_truncate_to_mtu()`.
+- That function removes bytes past the negotiated MTU. With MTU 23, a requested
+  64-byte value becomes a 20-byte value, without making the original `len=64`
+  log a wire-level confirmation.
+
+Sources (pinned to the IDF submodule, rather than a moving NimBLE branch):
+
+- [IDF v5.4.2 NimBLE submodule](https://github.com/espressif/esp-idf/tree/v5.4.2/components/bt/host/nimble)
+- [GATT logging before transmit](https://github.com/espressif/esp-nimble/blob/0225775e49669cd4f070400908f73718bddce83b/nimble/host/src/ble_gattc.c)
+- [ATT send/truncation call](https://github.com/espressif/esp-nimble/blob/0225775e49669cd4f070400908f73718bddce83b/nimble/host/src/ble_att_cmd.c)
+- [MTU truncation and default MTU selection](https://github.com/espressif/esp-nimble/blob/0225775e49669cd4f070400908f73718bddce83b/nimble/host/src/ble_att.c)
+
+**Inference:** the HID trial may have sent only 20 of its required 64 bytes.
+There is no negotiated-MTU measurement or wire capture in the supplied logs, so
+this is a concrete missing precondition and plausible activation blocker, not a
+proven explanation for every failed experiment. In particular, it does not
+explain the earlier, already-20-byte FD01 trial by itself.
+
+The candidate patch sets preferred MTU 247, exchanges MTU before HID discovery,
+requires the actual result to be >=67, checks the size again before every HID
+heartbeat, and logs failed sends. It does not split 64-byte commands into
+multiple independent GATT writes or add a HID report ID to a characteristic
+value. Neither would reproduce a single 64-byte HID report.
+
+### 0.2 The HID notification decoder used the wrong framing
+
+The `ec37af9` notification handler copies at most 20 bytes, overwrites the length
+with that truncated length, and calls `ulanzi_d100h_decode_ble()`.
+That function decrypts two blocks but leaves bytes 16..19 unchanged and demands
+that they be zero. This is valid for the **20-byte FD00 vendor channel**, not a
+general HID report 0xFB. If those bytes belong to another encrypted block or an
+opaque tail in the 64-byte HID report, a valid control event is rejected.
+
+The candidate patch preserves the full 64-byte value and routes it to the
+existing `ulanzi_d100h_decode()`, which checks the control prefix and first
+block padding without treating the unrelated HID tail as BLE padding. The BLE
+vendor decoder now requires exactly 20 bytes to prevent accidental reuse with
+larger frames. Full notification length and hex are logged before decoding.
+
+This fixes a downstream decode defect. It cannot, by itself, explain the
+complete absence of `BLE_GAP_EVENT_NOTIFY_RX` reported in the original log.
+
+### 0.3 The current code does not implement the FD00/FD01 path
+
+Despite the historical trials described below, `ec37af9` only discovers service
+`1812` and report `FB`. The occurrence of `1971` in its advertising filter is not
+vendor-service discovery. It contains no FD00 notification subscription or FD01
+write handle. The two public documents describe two channels, not necessarily
+contradictory protocols. The 20-byte vendor route needs a separate implementation
+or separate experiment; changing only the payload length on the HID handle is
+not equivalent.
+
+### 0.4 Additional corrections and limits
+
+- The old immediate and periodic heartbeat calls ignore their return values;
+  the candidate patch logs failures and does not mark a failed initial send as
+  connected. A successful write-without-response still is not a device
+  acknowledgment. The connection log now says it is awaiting notifications.
+- Discovery previously started even on failed encryption-change events. The
+  patch stops that path and clears top-right hold timing across disconnects.
+- The literal HID keep-alive contains the documented first 16 ciphertext bytes
+  and a zero tail. It matches the `hamdial` HOGP recipe. Do not replace it with
+  the fully encrypted USB heartbeat just because the USB path worked: transport
+  equivalence has not been established by a BLE capture from this exact unit.
+- User-run macOS **USB** tests confirmed the same dial family's `FFF1:00DE`,
+  page `FFFE`, unnumbered 64-byte USB interface and decoded controls. They do
+  not validate BLE notification delivery, Just Works/MITM requirements, or the
+  Tab5's hosted controller. The D100H should not be assumed to have a screen
+  or display a passkey; security changes require actual evidence.
+- The C6 host/slave version mismatch remains real and unresolved. Do not call
+  it the proven source of missing vendor events while the above host defects
+  remain untested.
+
+### 0.5 Validation and next hardware run
+
+Host-only regression command:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+The four tests compile the production C codec using the host C compiler with
+`-Wall -Wextra -Werror`. They cover captured BLE vectors, an assembled 64-byte
+HID frame with different tails, the old truncation/decoder failure, strict BLE
+length checking, and the wired heartbeat vector. Assembled HID fixtures are not
+represented as raw captures from this BLE unit. These tests do not compile or
+exercise the ESP-platform NimBLE backend.
+
+For the next Tab5 build/run, expect:
+
+1. `ATT MTU exchange: status=0 mtu=... (HID requires >=67)` before discovery.
+2. Report `FB` selection and a successful CCCD write.
+3. `heartbeat queued, awaiting notifications`; no heartbeat send errors.
+4. `HID notify handle=... len=64 mtu=...`, then decoded controls or raw
+   non-control packets (heartbeat replies are not key frames).
+
+If MTU <67, stop diagnosing firmware locks: the HID value cannot fit that link.
+If MTU >=67 but no notifications arrive, add all-input CCCD subscription/readback
+and implement the independently specified `1971/FD00/FD01` route. A known-good
+BLE capture from the same dial remains the best discriminator for that earlier
+vendor-channel failure. The C6 firmware upgrade is a separate controlled step.
 
 ---
 
@@ -147,8 +273,9 @@ is Star, otherwise Context.
 
 ## 3. Protocol background
 
-Two independent reverse-engineering documents cover the D100H. They disagree
-about which GATT channel carries vendor events, which is central to this bug.
+Two independent reverse-engineering documents cover distinct D100H GATT
+channels. Their payload lengths and padding rules must be kept separate; the
+original investigation treated channel choice as a possible source of the bug.
 
 ### 3.1 `kriomant/ulanzi-d100h` — vendor service 0x1971
 
@@ -446,10 +573,11 @@ ble_hs_cfg.sm_mitm = 1;
 ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY; // or KEYBOARD_ONLY
 ```
 
-The D100H has a screen and a device-switch button; it may display a passkey.
-Implement a serial-console passkey entry and `ble_sm_inject_io()` /
-`ble_gap_passkey_reply()` if needed. This is a strong candidate because the
-vendor channel may be deliberately protected while standard HID is not.
+This is an unverified security hypothesis, not evidence that MITM is needed.
+Do not assume the D100H can display a passkey. Inspect the actual peer pairing
+request and negotiated security state before changing IO capabilities or
+implementing passkey entry. Host framing defects in section 0 should be tested
+first.
 
 ### H4. C6 1.4.1 / VHCI notification delivery
 
@@ -741,17 +869,17 @@ docs/d100h-ble-handover.md
 
 ## 11. One-paragraph summary for a driver model
 
-The Tab5's P4 runs NimBLE as a BLE central over ESP-Hosted VHCI to the on-board
-C6. It scans, connects, Just-Works bonds, and discovers the D100H's GATT table.
-The D100H exposes both the documented vendor service 0x1971 (20-byte encrypted
-frames on FD00/FD01) and a HID service 0x1812 with report 0xFB input/output
-(64-byte encrypted frames). The host subscribes to the notify CCCD, writes the
-correct TEA-encrypted keep-alive (20 bytes to FD01, or 64 bytes to report 0xFB
-output), and sends it every second. The link is encrypted, the CCCD write
-succeeds, the keep-alive write succeeds, but the device never sends any
-notification on either channel — not even the expected heartbeat reply. The
-factory C6 firmware is 1.4.1 and does not implement the 2.x BT controller RPC,
-so a matching 2.13.1 C6 image is ready for a one-time wired flash. The next
-diagnostic is to subscribe to all HID input reports (0x01/0x02/0x03/0xFC/0xFB)
-and capture a known-good Ulanzi Studio session to see the exact vendor-mode
-handshake, then test MITM/passkey and the C6 upgrade.
+At `ec37af9` the Tab5 connects and bonds with the D100H but receives no vendor
+notifications in the supplied log. The checked-in path selects HOGP report FB,
+requests 64-byte writes without an MTU exchange, and truncates received HID
+values to 20 bytes before using an FD00 decoder. ESP-IDF 5.4.2's NimBLE can
+truncate writes to MTU-3 after logging the original length, so those logs do not
+establish a successful 64-byte wire write. The local candidate patch negotiates
+and requires MTU >=67, logs send errors, preserves 64-byte HID notifications,
+and uses the HID decoder. Host codec tests pass; full ESP-IDF build and hardware
+retest are pending. The earlier failed 20-byte FD01 trial is not explained by
+the HID MTU defect, and that vendor-service path is absent from this commit.
+If corrected HID framing still yields no notifications, collect CCCD readback,
+all-input notifications and a known-good BLE capture from the same unit. The
+C6 1.4.1 versus host 2.13.1 mismatch remains an independent unresolved issue;
+a matching C6 image is ready, but neither that nor MITM is a proven root cause.

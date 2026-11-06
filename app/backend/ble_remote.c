@@ -43,6 +43,7 @@ static const uint8_t s_hid_heartbeat[64] = {
 #define HID_REPORT_REF_UUID16  0x2908
 #define HID_REPORT_ID          0xfb
 #define HID_MAX_REPORTS        12
+#define HID_REQUIRED_ATT_MTU   (sizeof(s_hid_heartbeat) + 3u)
 
 static SemaphoreHandle_t s_lock;
 static ble_remote_state_t s_state = BLE_REMOTE_OFF;
@@ -373,6 +374,8 @@ static int on_report_ref_read(uint16_t conn_handle,
                               struct ble_gatt_attr * attr, void * arg);
 static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
                     struct ble_gatt_attr * attr, void * arg);
+static int on_mtu(uint16_t conn_handle, const struct ble_gatt_error * error,
+                  uint16_t mtu, void * arg);
 
 static void start_next_report_ref(void);
 
@@ -401,12 +404,59 @@ static void start_discovery(void)
     s_hid_cccd_count = 0;
     s_hid_ref_count = 0;
     s_hid_ref_index = 0;
+    s_top_right_us = 0;
 
-    int rc = ble_gattc_disc_all_svcs(s_conn_handle, on_svc, NULL);
+    /* A 64-byte HID value needs ATT MTU >= 67. NimBLE can silently truncate
+     * write commands at MTU 23 even though its pre-transmit log says len=64. */
+    set_state(BLE_REMOTE_CONNECTING, "Negotiating HID MTU...");
+    int rc = ble_gattc_exchange_mtu(s_conn_handle, on_mtu, NULL);
+    if(rc == BLE_HS_EALREADY && ble_att_mtu(s_conn_handle) >= HID_REQUIRED_ATT_MTU) {
+        on_mtu(s_conn_handle, NULL, ble_att_mtu(s_conn_handle), NULL);
+        return;
+    }
+    if(rc != 0) {
+        ESP_LOGW(TAG, "MTU exchange start failed: rc=%d mtu=%u", rc,
+                 ble_att_mtu(s_conn_handle));
+        hid_fail("HID MTU exchange failed");
+    }
+}
+
+static int on_mtu(uint16_t conn_handle, const struct ble_gatt_error * error,
+                  uint16_t mtu, void * arg)
+{
+    (void)arg;
+    if(conn_handle != s_conn_handle) return 0;
+    int status = error != NULL ? error->status : 0;
+    ESP_LOGI(TAG, "ATT MTU exchange: status=%d mtu=%u (HID requires >=%u)",
+             status, mtu, (unsigned)HID_REQUIRED_ATT_MTU);
+    if(status != 0 || mtu < HID_REQUIRED_ATT_MTU) {
+        hid_fail("ATT MTU too small for HID");
+        return 0;
+    }
+    set_state(BLE_REMOTE_CONNECTING, "Discovering D100H...");
+    int rc = ble_gattc_disc_all_svcs(conn_handle, on_svc, NULL);
     if(rc != 0) {
         ESP_LOGW(TAG, "service discovery failed: %d", rc);
         hid_fail("Service discovery failed");
     }
+    return 0;
+}
+
+static int send_hid_heartbeat(uint16_t conn_handle, uint16_t output_handle)
+{
+    uint16_t mtu = ble_att_mtu(conn_handle);
+    if(mtu < HID_REQUIRED_ATT_MTU) {
+        ESP_LOGW(TAG, "HID heartbeat blocked: mtu=%u needs >=%u", mtu,
+                 (unsigned)HID_REQUIRED_ATT_MTU);
+        return BLE_HS_EMSGSIZE;
+    }
+    int rc = ble_gattc_write_no_rsp_flat(conn_handle, output_handle,
+                                         s_hid_heartbeat, sizeof(s_hid_heartbeat));
+    if(rc != 0) {
+        ESP_LOGW(TAG, "HID heartbeat failed: handle=%u len=%u mtu=%u rc=%d",
+                 output_handle, (unsigned)sizeof(s_hid_heartbeat), mtu, rc);
+    }
+    return rc;
 }
 
 static int on_svc(uint16_t conn_handle, const struct ble_gatt_error * error,
@@ -619,9 +669,14 @@ static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
 {
     (void)attr;
     (void)arg;
+    if(conn_handle != s_conn_handle) return 0;
     if(error != NULL && error->status != 0) {
         ESP_LOGW(TAG, "subscribe write failed: %d", error->status);
         hid_fail("Subscribe write failed");
+        return 0;
+    }
+    if(send_hid_heartbeat(conn_handle, s_hid_output_handle) != 0) {
+        hid_fail("HID heartbeat send failed");
         return 0;
     }
 
@@ -638,10 +693,8 @@ static int on_write(uint16_t conn_handle, const struct ble_gatt_error * error,
     unlock();
 
     paired_add(addr, type, name);
-    ble_gattc_write_no_rsp_flat(conn_handle, s_hid_output_handle,
-                                (uint8_t *)s_hid_heartbeat,
-                                sizeof(s_hid_heartbeat));
-    ESP_LOGI(TAG, "connected to %s (%s) via HID", name, addr);
+    ESP_LOGI(TAG, "subscribed to %s (%s) via HID; heartbeat queued, awaiting notifications",
+             name, addr);
     return 0;
 }
 
@@ -688,6 +741,10 @@ static int gap_event(struct ble_gap_event * event, void * arg)
         case BLE_GAP_EVENT_ENC_CHANGE:
             ESP_LOGI(TAG, "encryption change: status=%d", event->enc_change.status);
             if(s_conn_handle == event->enc_change.conn_handle) {
+                if(event->enc_change.status != 0) {
+                    hid_fail("Bluetooth encryption failed");
+                    return 0;
+                }
                 set_state(BLE_REMOTE_CONNECTING, "Discovering D100H...");
                 start_discovery();
             }
@@ -705,6 +762,7 @@ static int gap_event(struct ble_gap_event * event, void * arg)
             s_hid_output_handle = 0;
             s_hid_input_cccd = 0;
             s_discovery_started = false;
+            s_top_right_us = 0;
             lock();
             s_current[0] = '\0';
             s_current_addr[0] = '\0';
@@ -720,18 +778,23 @@ static int gap_event(struct ble_gap_event * event, void * arg)
                          event->notify_rx.attr_handle, s_hid_input_handle);
                 return 0;
             }
-            uint8_t data[20];
+            /* HOGP's report 0xFB and FD00's 20-byte vendor value are different
+             * wire formats. Preserve the HID value, including its length. */
+            uint8_t data[64];
             uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
-            if(len > sizeof(data)) len = sizeof(data);
-            if(len < sizeof(data)) return 0;
+            ESP_LOGI(TAG, "HID notify handle=%u len=%u mtu=%u",
+                     event->notify_rx.attr_handle, len, ble_att_mtu(s_conn_handle));
+            if(len != sizeof(data)) {
+                ESP_LOGW(TAG, "unexpected HID report size: %u (expected 64)", len);
+                return 0;
+            }
             if(os_mbuf_copydata(event->notify_rx.om, 0, len, data) != 0) {
                 return 0;
             }
-            ESP_LOGI(TAG, "HID notify len=%u", (unsigned)len);
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
             uint8_t id = 0;
             bool down = false;
-            if(!ulanzi_d100h_decode_ble(data, len, &id, &down)) {
+            if(!ulanzi_d100h_decode(data, len, &id, &down)) {
                 ESP_LOGI(TAG, "HID notify is not a control frame");
                 return 0;
             }
@@ -853,9 +916,7 @@ static void heartbeat_task(void * arg)
         unlock();
 
         if(connected && conn != BLE_HS_CONN_HANDLE_NONE && handle != 0) {
-            ble_gattc_write_no_rsp_flat(conn, handle,
-                                        (uint8_t *)s_hid_heartbeat,
-                                        sizeof(s_hid_heartbeat));
+            send_hid_heartbeat(conn, handle);
         }
         if(have_addr) {
             int rc = ble_gap_connect(s_own_addr_type, &addr, 15000, NULL,
@@ -905,6 +966,12 @@ void ble_remote_start(void)
         return;
     }
     ESP_LOGI(TAG, "nimble_port_init ok");
+    int mtu_rc = ble_att_set_preferred_mtu(247);
+    if(mtu_rc != 0) {
+        ESP_LOGE(TAG, "preferred ATT MTU failed: %d", mtu_rc);
+        set_state(BLE_REMOTE_ERROR, "ATT MTU setup failed");
+        return;
+    }
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;

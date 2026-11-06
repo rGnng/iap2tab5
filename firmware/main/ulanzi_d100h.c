@@ -103,7 +103,7 @@ bool ulanzi_d100h_decode(const uint8_t * data, size_t len,
 bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
                              uint8_t * id, bool * down)
 {
-    if(data == NULL || id == NULL || down == NULL || len < 20) return false;
+    if(data == NULL || id == NULL || down == NULL || len != 20) return false;
 
     uint8_t p[20];
     memcpy(p, data, 20);
