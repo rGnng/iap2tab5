@@ -821,6 +821,17 @@ bool player_album_get(int index, player_album_t * out)
     return true;
 }
 
+bool player_album_for_track(uint64_t track_id, const char * title,
+                            const char * album, uint64_t * album_id)
+{
+    if(album_id == NULL) return false;
+    int idx = track_id != 0 ? track_index_by_id(track_id) : -1;
+    if(idx < 0) idx = track_index_by_meta(title, album);
+    if(idx < 0 || tracks[idx].album_id == 0) return false;
+    *album_id = tracks[idx].album_id;
+    return true;
+}
+
 bool player_artwork_remote(uint64_t album_id, char * out, size_t out_len)
 {
     if(out == NULL || out_len == 0) return false;

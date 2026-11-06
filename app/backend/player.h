@@ -106,6 +106,11 @@ bool player_artwork_copy(uint8_t * dst, size_t len);
 
 /* Remote AFC artwork path for an album ID (real imported library only). */
 bool player_artwork_remote(uint64_t album_id, char * out, size_t out_len);
+
+/* Resolve the local album ID for Now Playing artwork caching.  Tries the
+ * iAP2 persistent track ID first, then a title+album metadata match. */
+bool player_album_for_track(uint64_t track_id, const char * title,
+                            const char * album, uint64_t * album_id);
 bool player_album_get(int index, player_album_t *out);
 int player_artist_count(void);
 bool player_artist_get(int index, player_artist_t *out);
