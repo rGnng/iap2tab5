@@ -209,6 +209,17 @@ static esp_err_t status_get(httpd_req_t * req)
     cJSON_AddStringToObject(root, "iap2", iap2_host_status());
     cJSON_AddBoolToObject(root, "iap2_identified",
                           iap2_host_is_identified());
+    iap2_state_t iap2;
+    if(iap2_host_get_state(&iap2)) {
+        cJSON_AddNumberToObject(root, "device_battery", iap2.battery);
+        cJSON_AddBoolToObject(root, "device_charging", iap2.charging);
+        cJSON_AddNumberToObject(root, "device_charging_state",
+                                iap2.charging_state);
+        cJSON_AddBoolToObject(root, "device_external_charger",
+                              iap2.external_charger);
+        cJSON_AddNumberToObject(root, "device_max_current_ma",
+                                iap2.max_current_ma);
+    }
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     const esp_partition_t * ota = esp_ota_get_next_update_partition(NULL);

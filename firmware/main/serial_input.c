@@ -44,6 +44,9 @@
  *   $          clear all local stars and delete stars.csv (debug)
  *   o          iAP2 play / pause toggle
  *   , / .      iAP2 previous / next track
+ *   P          re-send the Apple USB power-capability vendor request
+ *   *          print the USB-A power switch / IO-expander state
+ *   &          print the INA226 battery bus voltage/current
  */
 
 #include "serial_input.h"
@@ -66,6 +69,8 @@
 #include "esp_system.h"
 #include "web_server.h"
 
+#include "driver/i2c_master.h"
+#include "esp_io_expander.h"
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -841,19 +846,96 @@ static void serial_input_task(void * arg)
             ESP_LOGI("iap2", "status: %s (connected=%d identified=%d)",
                      iap2_host_status(), (int)iap2_host_is_connected(),
                      (int)iap2_host_is_identified());
+            iap2_state_t st;
+            if(iap2_host_get_state(&st)) {
+                ESP_LOGI("iap2", "power: battery=%d charging=%d state=%u "
+                         "ext=%d will=%d max=%dmA mode=%u",
+                         st.battery, (int)st.charging,
+                         (unsigned)st.charging_state,
+                         (int)st.external_charger,
+                         (int)st.device_will_charge, st.max_current_ma,
+                         (unsigned)st.accessory_power_mode);
+            }
             player_snapshot_t snap;
             player_get_snapshot(&snap);
             ESP_LOGI("ui", "snapshot: real=%d status=%d title='%s' artist='%s' "
-                     "album='%s' elapsed=%u dur=%u queue=%d/%d bat=%d dev='%s' key=%016llx",
+                     "album='%s' elapsed=%u dur=%u queue=%d/%d bat=%d chg=%d dev='%s' key=%016llx",
                      (int)snap.real_device, (int)snap.status, snap.track.title,
                      snap.track.artist, snap.track.album,
                      (unsigned)snap.elapsed_sec, (unsigned)snap.duration_sec,
                      player_queue_index(), player_queue_count(), snap.battery,
-                     snap.device_name, (unsigned long long)snap.track.id);
+                     (int)snap.charging, snap.device_name,
+                     (unsigned long long)snap.track.id);
             ESP_LOGI("heap", "internal=%u largest_dma=%u psram=%u",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            continue;
+        }
+
+        if(c == 'P') {
+            esp_err_t err = iap2_host_request_charging();
+            ESP_LOGI("iap2", "charging request: %s", esp_err_to_name(err));
+            continue;
+        }
+
+        if(c == '*') {
+            esp_err_t en = bsp_feature_enable(BSP_FEATURE_USB, true);
+            esp_io_expander_handle_t io = bsp_io_expander1_init();
+            uint32_t level = 0, out = 0, dir = 0;
+            esp_err_t rd = io ? esp_io_expander_get_level(
+                io, IO_EXPANDER_PIN_NUM_3 | IO_EXPANDER_PIN_NUM_5 |
+                    IO_EXPANDER_PIN_NUM_6 | IO_EXPANDER_PIN_NUM_7,
+                &level) : ESP_ERR_INVALID_STATE;
+            if(io && io->read_output_reg) io->read_output_reg(io, &out);
+            if(io && io->read_direction_reg) io->read_direction_reg(io, &dir);
+            ESP_LOGI("power", "usb enable=%s read=%s in=0x%02x out=0x%02x "
+                     "dir=0x%02x usb5v_en=%d nchg_qc_en=%d chg_stat=%d chg_en=%d",
+                     esp_err_to_name(en), esp_err_to_name(rd), (unsigned)level,
+                     (unsigned)out, (unsigned)dir,
+                     (out & IO_EXPANDER_PIN_NUM_3) != 0,
+                     (out & IO_EXPANDER_PIN_NUM_5) != 0,
+                     (level & IO_EXPANDER_PIN_NUM_6) != 0,
+                     (out & IO_EXPANDER_PIN_NUM_7) != 0);
+            continue;
+        }
+
+        if(c == '&') {
+            i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+            i2c_device_config_t dev_cfg = {
+                .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                .device_address = 0x41,
+                .scl_speed_hz = 100000,
+            };
+            i2c_master_dev_handle_t dev = NULL;
+            esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
+            if(err == ESP_OK) {
+                uint8_t reg;
+                uint8_t raw[2];
+                uint16_t bus_mv = 0, shunt_uv = 0, mid = 0, did = 0;
+                reg = 0x02;
+                if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK)
+                    bus_mv = (uint16_t)((raw[0] << 8) | raw[1]);
+                reg = 0x01;
+                if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK)
+                    shunt_uv = (uint16_t)((raw[0] << 8) | raw[1]);
+                reg = 0xFE;
+                if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK)
+                    mid = (uint16_t)((raw[0] << 8) | raw[1]);
+                reg = 0xFF;
+                if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK)
+                    did = (uint16_t)((raw[0] << 8) | raw[1]);
+                i2c_master_bus_rm_device(dev);
+                ESP_LOGI("power", "INA226 mid=0x%04x did=0x%04x "
+                         "bus=%umV shunt_raw=%d current=%dmA",
+                         mid, did, (unsigned)(bus_mv * 5 / 4),
+                         (int)(int16_t)shunt_uv,
+                         (int)((int16_t)shunt_uv * 5 / 10));
+            }
+            else {
+                ESP_LOGW("power", "INA226 add device: %s",
+                         esp_err_to_name(err));
+            }
             continue;
         }
 

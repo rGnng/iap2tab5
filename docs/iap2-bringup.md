@@ -98,6 +98,29 @@ device -> 0x1D02 IdentificationAccepted
 The firmware then requests Now Playing (0x5000), media library information
 (0x4C00), power updates (0xAE00) and starts the HID component (0x6800).
 
+### Power and charging
+
+The Tab5 is a USB host and provides VBUS to the iPod. The iAP2
+identification therefore declares `PowerProvidingCapability = Advanced (2)`
+and `MaximumCurrentDrawnFromDevice = 0`. `StartPowerUpdates` requests
+parameters 0, 1, 4, 5 and 6; parameter 2 (`AccessoryPowerMode`) is omitted
+because the accessory does not draw power from the device.
+
+Immediately after identification the firmware sends
+`PowerSourceUpdate (0xAE03)` with:
+
+- param 0 `AvailableCurrentForDevice` = 1000 mA (one of the spec's allowed
+  values; the Tab5 USB-A switch is limited to ~1.3 A)
+- param 1 `DeviceBatteryShouldChargeIfPowerIsPresent` = true
+
+The first version declared `PowerProvidingCapability = None` and
+`MaximumCurrentDrawnFromDevice = 20`, so the iPod treated the Tab5 as a
+load, reported `AccessoryPowerMode = Low Power`, and did not charge. It now
+reports `IsExternalChargerConnected = true` and `BatteryChargingState =
+Charging` (`0xAE01` params 4 and 5). The firmware also sends Apple's USB
+power-capability vendor request (0x40/0x40, 500/500 = 1000 mA) after
+enumeration as a fallback for non-iAP2 power negotiation.
+
 Verified on the connected iPod:
 
 ```text

@@ -90,6 +90,7 @@ static StreamBufferHandle_t s_rx_stream;
 static TaskHandle_t s_task;
 
 static volatile bool s_connected;
+static volatile bool s_charge_request_pending;
 static volatile enum link_state s_state = LINK_IDLE;
 static uint8_t s_sent_psn;
 static uint8_t s_last_recv_psn;
@@ -144,6 +145,11 @@ static bool s_shuffle;
 static uint8_t s_repeat;
 static int s_battery = -1;
 static bool s_charging;
+static int s_max_current_ma = -1;
+static bool s_device_will_charge;
+static uint8_t s_accessory_power_mode;
+static bool s_external_charger;
+static uint8_t s_charging_state;
 static uint8_t s_play_status;
 static uint32_t s_revision;
 
@@ -559,6 +565,12 @@ static void open_device(uint8_t address)
     ESP_LOGI(TAG, "iPod config %u HID if=%u ep_in=0x%02x",
              (unsigned)cfg->bConfigurationValue, s_interface, s_ep_in);
 
+    /* The Apple USB power-capability vendor request must be sent after
+     * enumeration but from a task other than the USB client event task;
+     * blocking the client task here prevents the transfer completion from
+     * being dispatched. iap2_task sends it before the detection marker. */
+    s_charge_request_pending = true;
+
     err = usb_host_transfer_alloc(IN_XFER_SIZE, 0, &s_in_xfer);
     if(err != ESP_OK) {
         ESP_LOGE(TAG, "IN transfer alloc failed: %s", esp_err_to_name(err));
@@ -596,6 +608,7 @@ static void open_device(uint8_t address)
 static void close_device(void)
 {
     s_connected = false;
+    s_charge_request_pending = false;
     s_identified = false;
     s_hid_ready = false;
     s_state = LINK_IDLE;
@@ -612,6 +625,13 @@ static void close_device(void)
         s_elapsed_ms = s_duration_ms = 0;
         s_queue_index = -1;
         s_queue_count = 0;
+        s_battery = -1;
+        s_charging = false;
+        s_max_current_ma = -1;
+        s_device_will_charge = false;
+        s_accessory_power_mode = 0;
+        s_external_charger = false;
+        s_charging_state = 0;
         s_revision++;
         xSemaphoreGive(s_state_lock);
     }
@@ -908,7 +928,7 @@ static void send_identification(void)
     static const uint16_t sent[] = {
         0xAA01, 0xAA03, 0x5000, 0x5002, 0x5003,
         0x4C00, 0x4C02, 0x4C03, 0x4C05, 0x4C06, 0x4C07, 0x4C08, 0x4C09,
-        0x6800, 0x6802, 0x6803, 0xAE00, 0xAE02,
+        0x6800, 0x6802, 0x6803, 0xAE00, 0xAE02, 0xAE03,
     };
     static const uint16_t received[] = {
         0xAA00, 0xAA02, 0xAA04, 0xAA05,
@@ -919,8 +939,12 @@ static void send_identification(void)
     };
     pb_u16_list(&b, 6, sent, sizeof(sent) / sizeof(sent[0]));
     pb_u16_list(&b, 7, received, sizeof(received) / sizeof(received[0]));
-    pb_u8(&b, 8, 0);
-    pb_u16(&b, 9, 20);
+    /* PowerProvidingCapability: Advanced (2). The Tab5 is a USB host and
+     * provides VBUS to the iPod; it does not draw Accessory Power. The
+     * previous None/20 values made the iPod think it was the power source
+     * (PowerUpdate AccessoryPowerMode=Low Power) and refuse to charge. */
+    pb_u8(&b, 8, 2);
+    pb_u16(&b, 9, 0);
     pb_str(&b, 12, "en");
     pb_param(&b, 13, "en\0", 3);
 
@@ -1005,11 +1029,32 @@ static void send_library_updates_request(void)
     ESP_LOGI(TAG, "subscribed to media library updates: %s", s_library_id);
 }
 
+static void send_power_source_update(void)
+{
+    /* PowerSourceUpdate (0xAE03): tell the device how much current the
+     * accessory can provide. Without this an iPod touch can keep
+     * external_charger=0 / charging_state=0 even though USB-A VBUS is on.
+     * The Tab5 USB-A switch (MT9700, 5.1k SET) limits at ~1.3 A, so declare
+     * 1000 mA. */
+    uint8_t buf[16];
+    pb_t b = { buf, 0, sizeof(buf) };
+    pb_u16(&b, 0, 1000);
+    /* DeviceBatteryShouldChargeIfPowerIsPresent must be true for the
+     * device UI to show charging; the first PowerSourceUpdate after
+     * identification must contain both parameters. */
+    pb_u8(&b, 1, 1);
+    csm_send(0xAE03, &b);
+}
+
 static void send_power_updates_request(void)
 {
     uint8_t buf[64];
     pb_t b = { buf, 0, sizeof(buf) };
-    static const uint16_t ids[] = { 0, 1, 2, 4, 5, 6 };
+    /* Do not request AccessoryPowerMode (2): the spec says it must be
+     * present if and only if the accessory draws power from the device.
+     * The Tab5 provides power, so requesting it made the iPod report
+     * AccessoryPowerMode=Low Power and treat the accessory as a load. */
+    static const uint16_t ids[] = { 0, 1, 4, 5, 6 };
     for(size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
         pb_void(&b, ids[i]);
     }
@@ -1237,6 +1282,7 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
             s_identified = true;
             ESP_LOGI(TAG, "identification accepted");
             set_status("iAP2 identified");
+            send_power_source_update();
             send_now_playing_request();
             send_library_request();
             send_power_updates_request();
@@ -1332,17 +1378,34 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
                 for(size_t i = 0; i < value_len && i < 4; i++) {
                     v = (v << 8) | value[i];
                 }
-                if((pid == 0 || pid == 6) && value_len >= 1 && v <= 100) {
-                    s_battery = (int)v;
+                /* R29 Table 97-143: 0 max current (u16), 1 device will
+                 * charge (bool), 2 accessory power mode (u8), 4 external
+                 * charger (bool), 5 charging state (0 none, 1 charging,
+                 * 2 charged), 6 battery level (u16). The device sends one
+                 * PowerUpdate message per requested parameter. */
+                switch(pid) {
+                    case 0: s_max_current_ma = (int)v; break;
+                    case 1: s_device_will_charge = (v != 0); break;
+                    case 2: s_accessory_power_mode = (uint8_t)v; break;
+                    case 4: s_external_charger = (v != 0); break;
+                    case 5: s_charging_state = (uint8_t)v; break;
+                    case 6:
+                        if(value_len >= 1 && v <= 100) s_battery = (int)v;
+                        break;
+                    default: break;
                 }
-                else if(pid == 1 && value_len >= 1) {
-                    s_charging = (v == 1 || v == 2);
-                }
+                ESP_LOGI(TAG, "power param %u len=%u value=%u",
+                         (unsigned)pid, (unsigned)value_len, v);
             }
+            s_charging = (s_charging_state == 1 || s_charging_state == 2 ||
+                          s_external_charger);
             s_revision++;
             xSemaphoreGive(s_state_lock);
-            ESP_LOGI(TAG, "power update battery=%d charging=%d",
-                     s_battery, (int)s_charging);
+            ESP_LOGI(TAG, "power update battery=%d charging=%d state=%u "
+                     "ext=%d will=%d max=%dmA mode=%u",
+                     s_battery, (int)s_charging, (unsigned)s_charging_state,
+                     (int)s_external_charger, (int)s_device_will_charge,
+                     s_max_current_ma, (unsigned)s_accessory_power_mode);
             break;
         }
         case 0x4E09: {
@@ -2092,6 +2155,11 @@ static void iap2_task(void * arg)
         }
 
         if(!setup_done) {
+            if(s_charge_request_pending) {
+                s_charge_request_pending = false;
+                iap2_host_request_charging();
+            }
+
             uint8_t desc[256];
             esp_err_t derr = ctrl_get_descriptor(0x22, 0, desc, sizeof(desc));
             if((int)derr > 0) {
@@ -2247,9 +2315,23 @@ bool iap2_host_get_state(iap2_state_t * out)
     out->repeat = s_repeat;
     out->battery = s_battery;
     out->charging = s_charging;
+    out->max_current_ma = s_max_current_ma;
+    out->device_will_charge = s_device_will_charge;
+    out->accessory_power_mode = s_accessory_power_mode;
+    out->external_charger = s_external_charger;
+    out->charging_state = s_charging_state;
     out->revision = s_revision;
     xSemaphoreGive(s_state_lock);
     return true;
+}
+
+esp_err_t iap2_host_request_charging(void)
+{
+    if(s_dev == NULL || s_ctrl_xfer == NULL) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = ctrl_request(0x40, 0x40, 500, 500, NULL, 0);
+    ESP_LOGI(TAG, "Apple charging request (500/500 mA): %s",
+             esp_err_to_name(err));
+    return err;
 }
 
 bool iap2_host_is_identified(void)

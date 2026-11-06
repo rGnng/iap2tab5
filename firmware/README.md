@@ -171,6 +171,9 @@ accepts single-key commands:
 | `x` | run the embedded MFi P-256 signing self-test |
 | `o` | iAP2 play/pause |
 | `,` / `.` | iAP2 previous / next track |
+| `P` | re-send the Apple USB power-capability vendor request |
+| `*` | print the USB-A power switch / IO-expander state |
+| `&` | print the INA226 battery bus voltage/current |
 
 The same mapping is used by a USB HID keyboard/knob on the USB-A port. The
 HID listener also accepts keypad `8/2/5` and keyboard volume up/down as
