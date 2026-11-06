@@ -16,6 +16,11 @@ extern "C" {
 bool ulanzi_d100h_decode(const uint8_t * data, size_t len,
                          uint8_t * id, bool * down);
 
+/* BLE vendor notifications are 20 bytes (two encrypted TEA blocks plus four
+ * trailing bytes). */
+bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
+                             uint8_t * id, bool * down);
+
 void ulanzi_d100h_heartbeat(uint8_t out[64]);
 
 /* Returns true when this event should be forwarded to the UI. Only press /

@@ -100,6 +100,29 @@ bool ulanzi_d100h_decode(const uint8_t * data, size_t len,
     return true;
 }
 
+bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
+                             uint8_t * id, bool * down)
+{
+    if(data == NULL || id == NULL || down == NULL || len < 20) return false;
+
+    uint8_t p[20];
+    memcpy(p, data, 20);
+    tea_decrypt_block(p);
+    tea_decrypt_block(p + 8);
+
+    if(p[0] != 0x8b || p[1] != 0x10) return false;
+    if(p[2] < 1 || p[2] > 12) return false;
+    if(p[3] > 1) return false;
+    for(size_t i = 4; i < 20; i++) {
+        if(p[i] != 0) return false;
+    }
+    if(p[2] >= 9 && p[3] != 1) return false;
+
+    *id = p[2];
+    *down = p[3] != 0;
+    return true;
+}
+
 bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key)
 {
     if(key == NULL || !down) return false;

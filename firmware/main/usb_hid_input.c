@@ -384,6 +384,13 @@ static void key_dispatch_task(void * arg)
     }
 }
 
+void usb_hid_input_post_key(ui_key_t key)
+{
+    if(s_key_events != NULL) {
+        xQueueSend(s_key_events, &key, 0);
+    }
+}
+
 void usb_hid_input_start(void)
 {
     s_device_events = xQueueCreate(8, sizeof(hid_device_event_t));

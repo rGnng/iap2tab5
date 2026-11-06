@@ -36,3 +36,4 @@ brightness-high        U+F1D2
 clock                  U+F293
 music-note-beamed      U+F49E
 circle-fill            U+F287
+bluetooth              U+F682

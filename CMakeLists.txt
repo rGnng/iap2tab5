@@ -47,6 +47,7 @@ endif()
 # -----------------------------------------------------------------------------
 set(UI_SOURCES
     app/backend/mock_player.c
+    app/backend/ble_remote.c
     app/ui/boot.c
     app/ui/ui.c
     app/ui/fonts/bootstrap_icons_24.c

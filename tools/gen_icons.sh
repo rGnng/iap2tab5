@@ -43,6 +43,7 @@ RANGES=(
   0xF633 # check-lg
   0xF659 # x-lg
   0xF61C # wifi
+  0xF682 # bluetooth
   0xF61B # wifi-off
   0xF586 # star-fill
   0xF588 # star

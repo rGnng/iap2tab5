@@ -3,6 +3,7 @@
 #include "icons.h"
 #include "fonts/inter_fonts.h"
 #include "player.h"
+#include "ble_remote.h"
 #include "thumb_cache_format.h"
 
 #include "lvgl.h"
@@ -187,6 +188,7 @@ typedef enum {
     SCR_ARTISTS,
     SCR_SONGS,
     SCR_PLAYLISTS,
+    SCR_BLUETOOTH,
     SCR_SETTINGS,
     SCR_COUNT,
 } screen_id_t;
@@ -1112,11 +1114,11 @@ static void ui_mini_update(void)
         }
         if(second_line[0] != ' ') {
             lv_label_set_text(g_mini_artist, second_line);
-            lv_obj_remove_flag(g_mini_artist, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_hidden(g_mini_artist, false);
         }
         else {
             lv_label_set_text(g_mini_artist, "");
-            lv_obj_add_flag(g_mini_artist, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_hidden(g_mini_artist, true);
         }
 
         player_album_t now_album;
@@ -1328,23 +1330,24 @@ static void build_menubar(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(menu_area, false);
 
-    static const int menu_order[6] = {
+    static const int menu_order[7] = {
         SCR_NOW_PLAYING, SCR_ALBUMS, SCR_ARTISTS, SCR_SONGS,
-        SCR_PLAYLISTS, SCR_SETTINGS,
+        SCR_PLAYLISTS, SCR_BLUETOOTH, SCR_SETTINGS,
     };
-    static const char * const icons[6] = {
+    static const char * const icons[7] = {
         ICON_PLAY,
         ICON_DISC,
         ICON_PERSON,
         ICON_MUSIC_LIST,
         ICON_LIST,
+        ICON_BLUETOOTH,
         ICON_SETTINGS,
     };
 
-    for(int slot = 0; slot < 6; slot++) {
+    for(int slot = 0; slot < 7; slot++) {
         int screen = menu_order[slot];
         lv_obj_t * item = lv_obj_create(menu_area);
-        lv_obj_set_size(item, MENUBAR_W, MENUBAR_W);
+        lv_obj_set_size(item, MENUBAR_W, 80);
         lv_obj_set_style_radius(item, 0, 0);
         lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(item, 0, 0);
@@ -1720,6 +1723,11 @@ void ui_handle_key(ui_key_t key)
         return;
     }
     if(key == UI_KEY_CONTEXT) {
+        /* The Bluetooth page uses CONTEXT to unpair the focused device. */
+        if(g_current_screen < SCR_COUNT && g_pages[g_current_screen].key &&
+           g_pages[g_current_screen].key(key)) {
+            return;
+        }
         context_menu_open();
         return;
     }
@@ -1946,11 +1954,11 @@ static void np_refresh_ui(void)
     }
     if(meta_text[0] != ' ') {
         lv_label_set_text(np_meta, meta_text);
-        lv_obj_remove_flag(np_meta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_hidden(np_meta, false);
     }
     else {
         lv_label_set_text(np_meta, "");
-        lv_obj_add_flag(np_meta, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_hidden(np_meta, true);
     }
 
     /* iAP2 artwork arrives after the metadata. Refresh only the cover when
@@ -5025,6 +5033,242 @@ static void playlists_create(lv_obj_t * parent)
 }
 
 /* -------------------------------------------------------------------------
+ * Bluetooth Remote
+ * ------------------------------------------------------------------------- */
+static uint32_t ble_ui_rev;
+static int ble_restore_focus = -1;
+static int ble_long_code = -1;
+
+static void ble_rebuild(void)
+{
+    ui_rebuild_page();
+}
+
+static void ble_pair_action(void * user)
+{
+    LV_UNUSED(user);
+    ble_remote_state_t state = BLE_REMOTE_OFF;
+    ble_remote_status(&state, NULL, 0);
+    if(state == BLE_REMOTE_SCANNING) {
+        ble_remote_scan_stop();
+    }
+    else {
+        ble_remote_scan_start();
+    }
+    ble_remote_status(&state, NULL, 0);
+    LV_LOG_USER("BLE pair action: state=%d", (int)state);
+    ble_rebuild();
+}
+
+static void ble_row_action(void * user)
+{
+    int code = (int)(intptr_t)user;
+    LV_LOG_USER("BLE row action: code=%d", code);
+    if(ble_long_code >= 0 && code == ble_long_code) {
+        ble_long_code = -1;
+        return;
+    }
+    if(code == 0) {
+        ble_pair_action(NULL);
+        return;
+    }
+
+    ble_remote_device_t dev;
+    bool ok = false;
+    if(code >= 2000) {
+        ok = ble_remote_paired_get(code - 2000, &dev);
+    }
+    else if(code >= 1000) {
+        ok = ble_remote_scan_get(code - 1000, &dev);
+    }
+    if(ok) ble_remote_connect(dev.addr);
+    ble_rebuild();
+}
+
+static void ble_long_async(void * arg)
+{
+    int code = (int)(intptr_t)arg;
+    if(code < 2000) return;
+    ble_remote_device_t dev;
+    if(ble_remote_paired_get(code - 2000, &dev)) {
+        ble_long_code = code;
+        ble_remote_unpair(dev.addr);
+        ble_restore_focus = g_focus_index;
+        ui_rebuild_page();
+    }
+}
+
+static void ble_long_cb(lv_event_t * event)
+{
+    ui_call_async(ble_long_async, lv_event_get_user_data(event));
+}
+
+static void ble_create(lv_obj_t * parent)
+{
+    ble_ui_rev = ble_remote_revision();
+    ble_long_code = -1;
+
+    ble_remote_state_t state = BLE_REMOTE_OFF;
+    char status[96];
+    ble_remote_status(&state, status, sizeof(status));
+    bool scanning = state == BLE_REMOTE_SCANNING;
+
+    lv_obj_t * root = make_panel(parent);
+    lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_pad_all(root, 22, 0);
+    lv_obj_set_style_pad_row(root, 12, 0);
+
+    lv_obj_t * head = lv_obj_create(root);
+    lv_obj_set_size(head, LV_PCT(100), 48);
+    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(head, 0, 0);
+    lv_obj_set_style_pad_all(head, 0, 0);
+    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(head, false);
+    make_label(head, "Bluetooth Remote", FONT_PAGE_TITLE, COL_TEXT);
+    make_label(head, status, FONT_H2, scanning ? COL_ACCENT : COL_MUTED);
+
+    lv_obj_t * list = make_scroll(root);
+    lv_obj_set_style_pad_row(list, 4, 0);
+
+    lv_obj_t * pair_row = make_row(list, 64);
+    make_label(pair_row, ICON_BLUETOOTH, &bootstrap_icons_32, COL_ACCENT);
+    make_label(pair_row, scanning ? "Stop Scan" : "Pair New Devices",
+               FONT_H2, COL_TEXT);
+    lv_obj_t * pair_spacer = lv_obj_create(pair_row);
+    lv_obj_set_size(pair_spacer, 1, 1);
+    lv_obj_set_flex_grow(pair_spacer, 1);
+    lv_obj_set_style_bg_opa(pair_spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(pair_spacer, 0, 0);
+    lv_obj_set_style_pad_all(pair_spacer, 0, 0);
+    lv_obj_set_scrollable(pair_spacer, false);
+    make_label(pair_row, scanning ? "Scanning..." : "Scan",
+               FONT_CAPTION, COL_MUTED);
+    focus_add_clickable(pair_row, ble_row_action, NULL, (void *)0, true);
+
+    make_label(list, scanning ? "Nearby Devices" : "Paired Devices",
+               FONT_CAPTION, COL_MUTED);
+
+    int count = scanning ? ble_remote_scan_count()
+                         : ble_remote_paired_count();
+    if(count <= 0) {
+        make_label(list,
+                   scanning ? "Searching for D100H..." :
+                              "No paired devices. Use Pair New Devices.",
+                   FONT_H2, COL_MUTED);
+    }
+
+    for(int i = 0; i < count; i++) {
+        ble_remote_device_t dev;
+        bool ok = scanning ? ble_remote_scan_get(i, &dev)
+                           : ble_remote_paired_get(i, &dev);
+        if(!ok) continue;
+
+        lv_obj_t * row = make_row(list, 64);
+        make_label(row, ICON_BLUETOOTH, &bootstrap_icons_24,
+                   scanning ? COL_MUTED : COL_ACCENT);
+
+        lv_obj_t * text = lv_obj_create(row);
+        lv_obj_set_height(text, 52);
+        lv_obj_set_flex_grow(text, 1);
+        lv_obj_set_style_bg_opa(text, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(text, 0, 0);
+        lv_obj_set_style_pad_all(text, 0, 0);
+        lv_obj_set_style_pad_row(text, 1, 0);
+        lv_obj_set_flex_flow(text, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(text, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_set_scrollable(text, false);
+        make_label(text, dev.name[0] ? dev.name : dev.addr,
+                   FONT_H2, COL_TEXT);
+        make_label(text, dev.addr, FONT_CAPTION, COL_MUTED);
+
+        if(scanning) {
+            focus_add_clickable(row, ble_row_action, NULL,
+                                (void *)(intptr_t)(1000 + i), true);
+        }
+        else {
+            focus_add_clickable(row, ble_row_action, NULL,
+                                (void *)(intptr_t)(2000 + i), true);
+            lv_obj_add_event_cb(row, ble_long_cb, LV_EVENT_LONG_PRESSED,
+                                (void *)(intptr_t)(2000 + i));
+        }
+    }
+
+    ui_set_hint(scanning ? "ENTER Connect   CONTEXT Stop Scan" :
+                           "ENTER Connect   Long-press Unpair");
+
+    if(ble_restore_focus >= 0 && ble_restore_focus < g_focus_count) {
+        focus_select(ble_restore_focus);
+    }
+    else {
+        focus_select(0);
+    }
+    ble_restore_focus = -1;
+}
+
+static bool ble_key(ui_key_t key)
+{
+    ble_remote_state_t state = BLE_REMOTE_OFF;
+    ble_remote_status(&state, NULL, 0);
+
+    if(key == UI_KEY_CONTEXT) {
+        if(state == BLE_REMOTE_SCANNING) {
+            ble_remote_scan_stop();
+            ble_restore_focus = g_focus_index;
+            ui_rebuild_page();
+            return true;
+        }
+        if(g_focus_index > 0) {
+            ble_remote_device_t dev;
+            if(ble_remote_paired_get(g_focus_index - 1, &dev)) {
+                ble_remote_unpair(dev.addr);
+                ble_restore_focus = g_focus_index;
+                ui_rebuild_page();
+                return true;
+            }
+        }
+    }
+    else if(key == UI_KEY_BACK && state == BLE_REMOTE_SCANNING) {
+        ble_remote_scan_stop();
+        ble_restore_focus = g_focus_index;
+        ui_rebuild_page();
+        return true;
+    }
+    return false;
+}
+
+static bool ble_back(void)
+{
+    ble_remote_state_t state = BLE_REMOTE_OFF;
+    ble_remote_status(&state, NULL, 0);
+    if(state == BLE_REMOTE_SCANNING) {
+        ble_remote_scan_stop();
+        ble_restore_focus = g_focus_index;
+        ui_rebuild_page();
+        return true;
+    }
+    return false;
+}
+
+static void ble_same_key(void)
+{
+    if(g_focus_count > 0) focus_select(0);
+}
+
+static void ble_tick(void)
+{
+    uint32_t rev = ble_remote_revision();
+    if(rev != ble_ui_rev) {
+        ble_ui_rev = rev;
+        ble_restore_focus = g_focus_index;
+        ui_rebuild_page();
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Settings
  * ------------------------------------------------------------------------- */
 enum {
@@ -6560,6 +6804,13 @@ static const page_t g_pages[SCR_COUNT] = {
         .tick = NULL,
         .back = playlists_back,
         .same_key = playlists_same_key,
+    },
+    [SCR_BLUETOOTH] = {
+        .create = ble_create,
+        .tick = ble_tick,
+        .back = ble_back,
+        .same_key = ble_same_key,
+        .key = ble_key,
     },
     [SCR_SETTINGS] = {
         .create = settings_create,

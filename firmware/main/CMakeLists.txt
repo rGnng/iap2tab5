@@ -21,6 +21,7 @@ idf_component_register(
         "iap2_host.c"
         "lvgl_ppa_idf_compat.c"
         "../../app/backend/mock_player.c"
+        "../../app/backend/ble_remote.c"
         "../../app/ui/ui.c"
         ${UI_FONT_SRCS}
     INCLUDE_DIRS
@@ -29,6 +30,8 @@ idf_component_register(
         "../../app/ui"
         "../managed_components/lvgl__lvgl/src/libs/tjpgd"
     REQUIRES
+        bt
+        esp_hosted
         json
         spiffs
         esp_codec_dev

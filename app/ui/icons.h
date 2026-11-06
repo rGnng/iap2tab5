@@ -40,6 +40,7 @@ LV_FONT_DECLARE(bootstrap_icons_48);
 #define ICON_CHECK           "\xEF\x98\xB3" /* U+F633 */
 #define ICON_CLOSE           "\xEF\x99\x99" /* U+F659 */
 #define ICON_WIFI            "\xEF\x98\x9C" /* U+F61C */
+#define ICON_BLUETOOTH       "\xEF\x9A\x82" /* U+F682 */
 #define ICON_WIFI_OFF        "\xEF\x98\x9B" /* U+F61B */
 #define ICON_EYE             "\xEF\x8D\x81" /* U+F341 */
 #define ICON_DISPLAY         "\xEF\x8C\x82" /* U+F302 */

@@ -6,6 +6,7 @@
  */
 
 #include "app_config.h"
+#include "ble_remote.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -570,6 +571,10 @@ void app_main(void)
         ESP_LOGW(TAG, "WiFi unavailable: %s", esp_err_to_name(wifi_err));
         ui_set_network_status("WiFi unavailable", "--");
     }
+
+    /* BLE is on the C6 via ESP-Hosted as well. Start it after the hosted
+     * transport is up from Wi-Fi initialization. */
+    ble_remote_start();
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
