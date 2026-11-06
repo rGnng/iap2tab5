@@ -65,6 +65,12 @@ python3 ../tools/gen_iap2_identity.py   # MFi key is not committed
 idf.py build
 ```
 
+After switching from IDF 5.4 to 5.5, run `idf.py fullclean` once (or use a
+fresh build directory); the old CMake cache is not compatible. Do a full
+`idf.py flash` once after the major upgrade as well, because the 5.5
+bootloader/partition images differ from 5.4. Later code-only updates can use
+`app-flash` again.
+
 The mock library under `assets/mock` is **not** part of the hardware image.
 The Tab5 loads its media library from `/sdcard/library.bin`; Now Playing
 metadata and artwork come from iAP2. The desktop simulator is the only build
