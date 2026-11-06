@@ -26,7 +26,11 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
+#include "dirent.h"
+#include "sys/stat.h"
+#include "unistd.h"
 #define UI_PERF_LOG(...) ESP_LOGI("uiperf", __VA_ARGS__)
 #else
 #define UI_PERF_LOG(...) fprintf(stderr, __VA_ARGS__)
@@ -964,37 +968,233 @@ static lv_obj_t * make_cover(lv_obj_t * parent, const void * src,
 }
 
 /* iAP2 Now Playing artwork is decoded by the firmware into a 360x360 RGB565
- * buffer. Keep one UI copy here so the LVGL image descriptor stays valid. */
+ * buffer.  Keep one UI copy here so the LVGL image descriptor stays valid.
+ *
+ * This is a Now Playing cache keyed by the iAP2 song ID (track_key), stored
+ * separately from the album-artwork cache used by the library pages:
+ *   <library>/np/<8-hex-hash>.cov  (8-byte ID header + RGB565 image)
+ * A hash is used for the file name because the SD card is mounted with FAT
+ * 8.3 names; the full track ID is verified from the file header. */
 #define NP_ART_SIZE 360
+#define NP_ART_BYTES ((size_t)NP_ART_SIZE * NP_ART_SIZE * 2)
+#define NP_CACHE_MAX_FILES 64
+
 static uint8_t * g_iap2_cover_buf;
 static lv_image_dsc_t g_iap2_cover_dsc;
 static uint32_t g_iap2_cover_rev;
+static uint64_t g_iap2_cover_track_id;
 static bool g_iap2_cover_ready;
 
-static const lv_image_dsc_t * iap2_cover_src(void)
+static char s_np_cache_dir[160] = "/sdcard/np";
+
+static uint32_t np_cache_hash(uint64_t id)
 {
-    uint32_t rev = player_artwork_revision();
-    if(rev == 0) {
-        g_iap2_cover_ready = false;
-        return NULL;
+    uint32_t h = (uint32_t)(id ^ (id >> 32));
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+static void np_cache_path(uint64_t id, char * path, size_t len, bool tmp)
+{
+    snprintf(path, len, "%s/%08x.%s", s_np_cache_dir,
+             (unsigned)np_cache_hash(id), tmp ? "tmp" : "cov");
+}
+
+static void np_cover_dsc_init(void)
+{
+    lv_memzero(&g_iap2_cover_dsc, sizeof(g_iap2_cover_dsc));
+    g_iap2_cover_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    g_iap2_cover_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    g_iap2_cover_dsc.header.w = NP_ART_SIZE;
+    g_iap2_cover_dsc.header.h = NP_ART_SIZE;
+    g_iap2_cover_dsc.header.stride = NP_ART_SIZE * 2;
+    g_iap2_cover_dsc.data_size = NP_ART_BYTES;
+    g_iap2_cover_dsc.data = g_iap2_cover_buf;
+}
+
+static bool np_cache_load(uint64_t track_id, uint8_t * dst)
+{
+#if defined(ESP_PLATFORM)
+    if(track_id == 0 || dst == NULL) return false;
+    char path[192];
+    np_cache_path(track_id, path, sizeof(path), false);
+    FILE * f = fopen(path, "rb");
+    if(f == NULL) return false;
+    uint64_t stored = 0;
+    bool ok = fread(&stored, 1, sizeof(stored), f) == sizeof(stored) &&
+              stored == track_id &&
+              fread(dst, 1, NP_ART_BYTES, f) == NP_ART_BYTES;
+    fclose(f);
+    return ok;
+#else
+    (void)track_id;
+    (void)dst;
+    return false;
+#endif
+}
+
+#if defined(ESP_PLATFORM)
+typedef struct {
+    uint64_t id;
+    uint8_t * data;
+} np_cache_job_t;
+
+static QueueHandle_t s_np_cache_queue;
+
+static void np_cache_ensure_dir(void)
+{
+    mkdir(s_np_cache_dir, 0777);
+}
+
+typedef struct {
+    char path[192];
+    time_t mtime;
+} np_cache_entry_t;
+
+static int np_cache_entry_cmp(const void * a, const void * b)
+{
+    const np_cache_entry_t * ea = a;
+    const np_cache_entry_t * eb = b;
+    return (ea->mtime > eb->mtime) - (ea->mtime < eb->mtime);
+}
+
+static void np_cache_prune(void)
+{
+    DIR * dir = opendir(s_np_cache_dir);
+    if(dir == NULL) return;
+
+    /* 128 entries x ~200 bytes would overflow the small cache task stack.
+     * Keep the directory listing in PSRAM instead. */
+    const int max_entries = NP_CACHE_MAX_FILES * 2;
+    np_cache_entry_t * entries = heap_caps_malloc(
+        (size_t)max_entries * sizeof(*entries),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(entries == NULL) {
+        closedir(dir);
+        return;
     }
+    int count = 0;
+
+    struct dirent * ent;
+    while((ent = readdir(dir)) != NULL && count < max_entries) {
+        size_t n = strlen(ent->d_name);
+        if(n < 4 || strcmp(ent->d_name + n - 4, ".cov") != 0) continue;
+        np_cache_entry_t * e = &entries[count];
+        snprintf(e->path, sizeof(e->path), "%s/%s", s_np_cache_dir,
+                 ent->d_name);
+        struct stat st;
+        e->mtime = stat(e->path, &st) == 0 ? st.st_mtime : 0;
+        count++;
+    }
+    closedir(dir);
+
+    if(count > NP_CACHE_MAX_FILES) {
+        qsort(entries, count, sizeof(entries[0]), np_cache_entry_cmp);
+        for(int i = 0; i < count - NP_CACHE_MAX_FILES; i++) {
+            unlink(entries[i].path);
+        }
+    }
+    free(entries);
+}
+
+static void np_cache_task(void * arg)
+{
+    (void)arg;
+    np_cache_job_t job;
+    for(;;) {
+        if(xQueueReceive(s_np_cache_queue, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        np_cache_ensure_dir();
+        char path[192];
+        char tmp[192];
+        np_cache_path(job.id, path, sizeof(path), false);
+        np_cache_path(job.id, tmp, sizeof(tmp), true);
+        FILE * f = fopen(tmp, "wb");
+        if(f != NULL) {
+            bool ok = fwrite(&job.id, 1, sizeof(job.id), f) == sizeof(job.id) &&
+                      fwrite(job.data, 1, NP_ART_BYTES, f) == NP_ART_BYTES;
+            fclose(f);
+            if(ok) {
+                rename(tmp, path);
+                np_cache_prune();
+            }
+            else {
+                unlink(tmp);
+            }
+        }
+        free(job.data);
+    }
+}
+#endif
+
+void ui_set_np_cache_dir(const char * dir)
+{
+    if(dir == NULL || dir[0] == '\0') return;
+    snprintf(s_np_cache_dir, sizeof(s_np_cache_dir), "%s", dir);
+#if defined(ESP_PLATFORM)
+    np_cache_ensure_dir();
+    if(s_np_cache_queue == NULL) {
+        s_np_cache_queue = xQueueCreate(2, sizeof(np_cache_job_t));
+        if(s_np_cache_queue != NULL) {
+            xTaskCreate(np_cache_task, "np_cache", 12288, NULL, 2, NULL);
+        }
+    }
+#endif
+}
+
+static void np_cache_save_async(uint64_t track_id, const uint8_t * src)
+{
+#if defined(ESP_PLATFORM)
+    if(track_id == 0 || src == NULL || s_np_cache_queue == NULL) return;
+    uint8_t * copy = ui_alloc_aligned(NP_ART_BYTES);
+    if(copy == NULL) return;
+    memcpy(copy, src, NP_ART_BYTES);
+    np_cache_job_t job = { .id = track_id, .data = copy };
+    if(xQueueSend(s_np_cache_queue, &job, 0) != pdTRUE) {
+        free(copy);
+    }
+#else
+    (void)track_id;
+    (void)src;
+#endif
+}
+
+static const lv_image_dsc_t * iap2_cover_src(uint64_t track_id)
+{
+    if(g_iap2_cover_buf == NULL) {
+        g_iap2_cover_buf = ui_alloc_aligned(NP_ART_BYTES);
+    }
+
+    if(track_id != g_iap2_cover_track_id) {
+        g_iap2_cover_track_id = track_id;
+        g_iap2_cover_rev = 0xffffffffu;
+        g_iap2_cover_ready = false;
+        if(track_id != 0 && g_iap2_cover_buf != NULL &&
+           np_cache_load(track_id, g_iap2_cover_buf)) {
+            g_iap2_cover_ready = true;
+            np_cover_dsc_init();
+            UI_PERF_LOG("np_art track=%016llx source=cache",
+                        (unsigned long long)track_id);
+        }
+    }
+
+    uint32_t rev = player_artwork_revision();
     if(rev != g_iap2_cover_rev) {
         g_iap2_cover_rev = rev;
-        size_t bytes = (size_t)NP_ART_SIZE * NP_ART_SIZE * 2;
-        if(g_iap2_cover_buf == NULL) {
-            g_iap2_cover_buf = ui_alloc_aligned(bytes);
-        }
-        g_iap2_cover_ready = g_iap2_cover_buf != NULL &&
-                             player_artwork_copy(g_iap2_cover_buf, bytes);
-        if(g_iap2_cover_ready) {
-            lv_memzero(&g_iap2_cover_dsc, sizeof(g_iap2_cover_dsc));
-            g_iap2_cover_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-            g_iap2_cover_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-            g_iap2_cover_dsc.header.w = NP_ART_SIZE;
-            g_iap2_cover_dsc.header.h = NP_ART_SIZE;
-            g_iap2_cover_dsc.header.stride = NP_ART_SIZE * 2;
-            g_iap2_cover_dsc.data_size = bytes;
-            g_iap2_cover_dsc.data = g_iap2_cover_buf;
+        if(g_iap2_cover_buf != NULL &&
+           player_artwork_copy(g_iap2_cover_buf, NP_ART_BYTES)) {
+            g_iap2_cover_ready = true;
+            np_cover_dsc_init();
+            UI_PERF_LOG("np_art track=%016llx source=iap2",
+                        (unsigned long long)track_id);
+            if(track_id != 0) {
+                np_cache_save_async(track_id, g_iap2_cover_buf);
+            }
         }
     }
     return g_iap2_cover_ready ? &g_iap2_cover_dsc : NULL;
@@ -1007,9 +1207,6 @@ static void format_time(uint32_t seconds, char * buffer, size_t size)
 }
 
 static bool find_album(uint64_t album_id, player_album_t * out);
-static bool np_resolve_current_album(const player_snapshot_t * snapshot,
-                                     player_album_t * album,
-                                     uint64_t * album_id);
 
 static const char * battery_icon_for(int level, bool charging)
 {
@@ -1213,13 +1410,12 @@ static void ui_mini_update(void)
             lv_obj_set_hidden(g_mini_artist, true);
         }
 
-        player_album_t now_album;
-        uint64_t now_album_id = 0;
-        bool has_now_album = np_resolve_current_album(&snapshot, &now_album,
-                                                      &now_album_id);
         const lv_image_dsc_t * art =
             snapshot.real_device && snapshot.track.title[0] != '\0'
-                ? iap2_cover_src() : NULL;
+                ? iap2_cover_src(snapshot.track.id) : NULL;
+        player_album_t now_album;
+        bool has_now_album = !snapshot.real_device &&
+                             find_album(snapshot.track.album_id, &now_album);
         if(art != NULL) {
             lv_image_set_src(g_mini_cover, art);
             lv_obj_set_style_bg_color(g_mini_cover, lv_color_hex(COL_PANEL), 0);
@@ -1947,7 +2143,6 @@ static lv_obj_t * np_star_icon;
 static lv_obj_t * np_cover_widget;
 static uint32_t g_np_cover_rev;
 static uint64_t g_np_cover_track_id;
-static uint64_t g_np_cover_album_id;
 #define NP_QUEUE_ROW_H        54
 #define NP_QUEUE_VISIBLE_ROWS  11
 #define NP_QUEUE_LIST_H       (NP_QUEUE_VISIBLE_ROWS * NP_QUEUE_ROW_H + \
@@ -2091,37 +2286,21 @@ static void np_refresh_ui(void)
         lv_obj_set_hidden(np_meta, true);
     }
 
-    /* iAP2 artwork arrives after the metadata.  If the album is already in
-     * the AFC library, show its cached .cov immediately; when the live iAP2
-     * image arrives, replace it.  A track change to another album must also
-     * invalidate the previous cover even if the art revision has not moved. */
+    /* The NP cache is keyed by the iAP2 song ID (track_key).  A track
+     * change or a new iAP2 artwork revision refreshes the cover; the album
+     * artwork cache used by the library pages is deliberately not involved. */
     if(snapshot.real_device && np_cover_widget != NULL) {
         uint32_t art_rev = player_artwork_revision();
         bool track_changed = (snapshot.track.id != g_np_cover_track_id);
         if(art_rev != g_np_cover_rev || track_changed) {
             g_np_cover_rev = art_rev;
             g_np_cover_track_id = snapshot.track.id;
-            player_album_t album;
-            uint64_t album_id = 0;
-            bool has_album = np_resolve_current_album(&snapshot, &album,
-                                                       &album_id);
-            g_np_cover_album_id = album_id;
-            const void * src = iap2_cover_src();
-            bool from_cache = false;
-            if(src == NULL && has_album) {
-                src = album_cover_src(&album);
-                from_cache = src != NULL;
-            }
+            const void * src = iap2_cover_src(snapshot.track.id);
             lv_image_set_src(np_cover_widget, src);
             lv_obj_set_style_bg_color(np_cover_widget,
-                lv_color_hex(src ? (from_cache ? album.color : COL_PANEL)
-                                 : COL_PANEL_ALT), 0);
+                lv_color_hex(src ? COL_PANEL : COL_PANEL_ALT), 0);
             lv_obj_set_style_bg_opa(np_cover_widget,
                                     src ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
-            UI_PERF_LOG("np_art update track=%016llx album=%llu iap2=%d cache=%d",
-                        (unsigned long long)snapshot.track.id,
-                        (unsigned long long)album_id,
-                        src != NULL && !from_cache, from_cache);
         }
     }
 
@@ -2256,32 +2435,6 @@ static bool find_album(uint64_t album_id, player_album_t * out)
 {
     for(int i = 0; i < player_album_count(); i++) {
         if(player_album_get(i, out) && out->id == album_id) return true;
-    }
-    return false;
-}
-
-/* Resolve the local album for the current iAP2 track.  The normal path is
- * the album id computed from the iAP2 album/artist tags.  If that fails, use
- * the iAP2 track id (or title+album metadata) to find the local track and
- * take its album id.  This is only called when the track or artwork changes. */
-static bool np_resolve_current_album(const player_snapshot_t * snapshot,
-                                     player_album_t * album,
-                                     uint64_t * album_id)
-{
-    if(snapshot == NULL || album == NULL) return false;
-    if(album_id) *album_id = 0;
-
-    uint64_t id = snapshot->track.album_id;
-    if(id != 0 && find_album(id, album)) {
-        if(album_id) *album_id = id;
-        return true;
-    }
-
-    if(player_album_for_track(snapshot->track.id, snapshot->track.title,
-                              snapshot->track.album, &id) &&
-       find_album(id, album)) {
-        if(album_id) *album_id = id;
-        return true;
     }
     return false;
 }
@@ -2701,25 +2854,23 @@ static void np_create(lv_obj_t * parent)
     lv_obj_set_scrollable(root, false);
 
     player_album_t now_album;
-    uint64_t now_album_id = 0;
-    bool has_now_album = np_resolve_current_album(&snapshot, &now_album,
-                                                  &now_album_id);
+    bool has_now_album = !snapshot.real_device &&
+                         find_album(snapshot.track.album_id, &now_album);
     const lv_image_dsc_t * iap2_cover =
         (snapshot.real_device && snapshot.track.title[0] != '\0')
-            ? iap2_cover_src() : NULL;
-    const void * cached_cover =
-        has_now_album ? album_cover_src(&now_album) : NULL;
+            ? iap2_cover_src(snapshot.track.id) : NULL;
+    const void * album_cover = (!snapshot.real_device && has_now_album)
+                                   ? album_cover_src(&now_album) : NULL;
     const void * now_cover =
-        iap2_cover != NULL ? (const void *)iap2_cover : cached_cover;
-    bool real_cover = iap2_cover != NULL || cached_cover != NULL;
+        iap2_cover != NULL ? (const void *)iap2_cover : album_cover;
+    bool real_cover = iap2_cover != NULL ||
+                      (!snapshot.real_device && has_now_album &&
+                       now_album.cover_index >= PLAYER_REAL_COVER_BASE);
     bool has_cover = now_cover != NULL;
-    uint32_t cover_color = now_cover
-                               ? (has_now_album ? now_album.color : COL_PANEL)
-                               : COL_PANEL_ALT;
-    UI_PERF_LOG("np_art create track=%016llx album=%llu iap2=%d cache=%d",
-                (unsigned long long)snapshot.track.id,
-                (unsigned long long)now_album_id,
-                iap2_cover != NULL, cached_cover != NULL);
+    uint32_t cover_color = iap2_cover != NULL
+                               ? COL_PANEL
+                               : (album_cover != NULL ? now_album.color
+                                                      : COL_PANEL_ALT);
 
     /* The mesh/backdrop variants decode the cover at arbitrary scales.  Keep
      * them for the bundled PNG library; real covers are raw RGB565 and are
@@ -2996,7 +3147,6 @@ static void np_create(lv_obj_t * parent)
     if(np_queue_visible && g_focus_count > 0) focus_select(np_queue_focus_start);
     g_np_cover_rev = player_artwork_revision();
     g_np_cover_track_id = snapshot.track.id;
-    g_np_cover_album_id = now_album_id;
     np_refresh_ui();
     ui_set_hint("UP/DOWN Select   ENTER Play/Jump   7 Play/Pause");
 }

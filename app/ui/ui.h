@@ -160,6 +160,8 @@ enum {
 void ui_set_artwork_dir(const char * dir);
 void ui_set_thumb_pack_dir(const char * dir);
 void ui_set_thumb_pack_path(const char * path, int album_count);
+/* Separate Now Playing artwork cache keyed by the iAP2 song ID. */
+void ui_set_np_cache_dir(const char * dir);
 
 void ui_set_afc_status_cb(void (*cb)(ui_afc_status_t * out));
 void ui_set_afc_action_cb(void (*cb)(int action));

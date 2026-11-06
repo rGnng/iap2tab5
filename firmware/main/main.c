@@ -520,6 +520,10 @@ void app_main(void)
     ui_set_afc_sync_mode(!g_app_config.iap2_mode);
     ui_set_artwork_dir(app_config_artwork_dir());
     ui_set_thumb_pack_dir(app_config_library_dir());
+    char np_cache_dir[160];
+    snprintf(np_cache_dir, sizeof(np_cache_dir), "%s/np",
+             app_config_library_dir());
+    ui_set_np_cache_dir(np_cache_dir);
     ui_init();
     if(player_library_album_count() > 0) {
         thumb_cache_open((uint32_t)player_library_album_count());
