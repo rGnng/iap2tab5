@@ -57,35 +57,35 @@ static void * ui_alloc_aligned(size_t size)
  * ------------------------------------------------------------------------- */
 /* Section colors: four distinct gray zones.
  * Tune these values first when moving to the final in-car theme. */
-#define COL_MENU_TOP_BG   0x2A2A2A
+#define COL_MENU_TOP_BG   0x282828
 #define COL_MENU_TOP_FG   0xFFFFFF
-#define COL_MENU_BODY_BG  0x0A0A0A
+#define COL_MENU_BODY_BG  0x080808
 #define COL_MENU_BODY_FG  0xC8C8C8
 #define COL_MENU_BATT_BG  0x202020
-#define COL_MINI_BG       0x333333
+#define COL_MINI_BG       0x303030
 #define COL_MINI_FG       0xFFFFFF
 #define COL_MINI_MUTED    0xD0D0D0
 #define COL_MINI_DIM      0xA0A0A0
-#define COL_MAIN_BG       0x050505
+#define COL_MAIN_BG       0x080808
 #define COL_MAIN_FG       0xF0F0F0
 
 #define LIST_ROW_GAP      4
 
-#define COL_BG          0x050505
+#define COL_BG          0x080808
 #define COL_STATUS      0x080808
 #define COL_SURFACE     0x101010
-#define COL_PANEL       0x141414
-#define COL_PANEL_ALT   0x1E1E1E
-#define COL_BORDER      0x2A2A2A
+#define COL_PANEL       0x101010
+#define COL_PANEL_ALT   0x202020
+#define COL_BORDER      0x282828
 #define COL_TEXT        COL_MAIN_FG
-#define COL_MUTED       0x9A9A9A
-#define COL_DIM         0x666666
+#define COL_MUTED       0x989898
+#define COL_DIM         0x686868
 #define COL_ACCENT      0xC8C8C8
-#define COL_ACCENT_DARK 0x262626
+#define COL_ACCENT_DARK 0x282828
 #define COL_FOCUS       0x303030
 #define COL_GREEN       0xB8B8B8
 #define COL_AMBER       0xC8C8C8
-#define COL_RED         0xE6E6E6
+#define COL_RED         0xE8E8E8
 #define COL_PURPLE      0xA8A8A8
 #define COL_CYAN        0xB8B8B8
 
@@ -4423,9 +4423,9 @@ static void artists_create(lv_obj_t * parent)
 #define CTX_MENU_ROW_H      64
 #define CTX_MENU_MAX_ITEMS  8
 
-#define COL_CTX_PANEL       0x242424
-#define COL_CTX_GROUP       0x1B1B1B
-#define COL_CTX_BORDER      0x4A4A4A
+#define COL_CTX_PANEL       0x202020
+#define COL_CTX_GROUP       0x181818
+#define COL_CTX_BORDER      0x484848
 
 typedef struct {
     lv_obj_t * row;

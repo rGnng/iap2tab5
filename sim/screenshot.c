@@ -12,7 +12,7 @@
 bool sim_screenshot(const char * path)
 {
     lv_draw_buf_t * snapshot = lv_snapshot_take(lv_screen_active(),
-                                               LV_COLOR_FORMAT_ARGB8888);
+                                               LV_COLOR_FORMAT_RGB565);
     if(snapshot == NULL) {
         fprintf(stderr, "[screenshot] lv_snapshot_take() failed\n");
         return false;
@@ -23,7 +23,8 @@ bool sim_screenshot(const char * path)
     const uint32_t stride = snapshot->header.stride;
     const uint8_t * src = snapshot->data;
 
-    /* LVGL stores ARGB8888 as BGRA on little-endian targets. stb expects RGBA. */
+    /* Expand RGB565 to 8 bits per channel the same way the firmware
+     * screenshot does, so the PNG shows what the Tab5 panel gets. */
     uint8_t * rgba = malloc((size_t)width * height * 4);
     if(rgba == NULL) {
         fprintf(stderr, "[screenshot] out of memory\n");
@@ -32,13 +33,17 @@ bool sim_screenshot(const char * path)
     }
 
     for(uint32_t y = 0; y < height; y++) {
-        const uint8_t * row = src + (size_t)y * stride;
+        const uint16_t * row = (const uint16_t *)(src + (size_t)y * stride);
         uint8_t * dst = rgba + (size_t)y * width * 4;
         for(uint32_t x = 0; x < width; x++) {
-            dst[x * 4 + 0] = row[x * 4 + 2]; /* R */
-            dst[x * 4 + 1] = row[x * 4 + 1]; /* G */
-            dst[x * 4 + 2] = row[x * 4 + 0]; /* B */
-            dst[x * 4 + 3] = 0xFF;           /* opaque */
+            const uint16_t px = row[x];
+            const uint32_t r5 = (px >> 11) & 0x1F;
+            const uint32_t g6 = (px >> 5) & 0x3F;
+            const uint32_t b5 = px & 0x1F;
+            dst[x * 4 + 0] = (uint8_t)((r5 << 3) | (r5 >> 2));
+            dst[x * 4 + 1] = (uint8_t)((g6 << 2) | (g6 >> 4));
+            dst[x * 4 + 2] = (uint8_t)((b5 << 3) | (b5 >> 2));
+            dst[x * 4 + 3] = 0xFF;
         }
     }
 
