@@ -43,6 +43,7 @@ static void write_tone(uint16_t frequency, uint16_t duration_ms)
         }
         s_codec_open = true;
     }
+    esp_codec_dev_set_out_mute(s_codec, false);
 
     uint32_t total = (uint32_t)FEEDBACK_SAMPLE_RATE * duration_ms / 1000;
     if(total > FEEDBACK_MAX_SAMPLES) total = FEEDBACK_MAX_SAMPLES;

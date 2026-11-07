@@ -6732,7 +6732,6 @@ static lv_obj_t * settings_detail_np_bg_mesh_check;
 static lv_obj_t * settings_detail_screen_value;
 static lv_obj_t * settings_detail_wifi_mode_value;
 static lv_obj_t * settings_detail_wifi_status_value;
-static lv_obj_t * settings_detail_sound_value;
 static lv_obj_t * settings_detail_volume_value;
 static lv_obj_t * settings_detail_sound_touch_check;
 static lv_obj_t * settings_detail_sound_both_check;
@@ -6957,10 +6956,6 @@ static void settings_update_system_labels(void)
                  g_system_config.wifi_ip);
         lv_label_set_text(settings_detail_wifi_status_value, text);
     }
-    if(settings_detail_sound_value) {
-        lv_label_set_text(settings_detail_sound_value,
-                          g_system_config.sound_enabled ? "On" : "Off");
-    }
     if(settings_detail_volume_value) {
         char text[8];
         snprintf(text, sizeof(text), "%d%%", g_system_config.volume);
@@ -6996,13 +6991,6 @@ static void settings_wifi_mode_action(void * user)
 {
     (void)user;
     g_system_config.wifi_mode = g_system_config.wifi_mode == 1 ? 0 : 1;
-    settings_system_changed();
-}
-
-static void settings_sound_action(void * user)
-{
-    (void)user;
-    g_system_config.sound_enabled = !g_system_config.sound_enabled;
     settings_system_changed();
 }
 
@@ -7049,6 +7037,10 @@ static void settings_key_sound_action(void * user)
      * Touch + Key and None. */
     if(g_focus_count > 0) {
         focus_select(mode == 1 ? 1 : (mode == 2 ? 2 : 3));
+    }
+    /* Audible confirmation of the selected mode. */
+    if(mode != 0) {
+        ui_feedback_emit(UI_FEEDBACK_ACTIVATE, mode == 2);
     }
 }
 
@@ -7870,7 +7862,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_screen_value = NULL;
     settings_detail_wifi_mode_value = NULL;
     settings_detail_wifi_status_value = NULL;
-    settings_detail_sound_value = NULL;
     settings_detail_volume_value = NULL;
     settings_detail_sound_touch_check = NULL;
     settings_detail_sound_both_check = NULL;

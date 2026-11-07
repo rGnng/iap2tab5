@@ -513,6 +513,9 @@ Queue 显示时的左栏：
   - 声音只在真实操作时发出：触屏点击控件、旋钮/按键确认、返回。
   - 列表滚动（触摸拖动、滚轮/上下键移动）不发声。
   - 保存到 `sound_mode`（0 none / 1 touch / 2 touch+key），同时同步旧的 `sound_enabled` 字段。
+  - **当前状态（未解决）**：设备上仍无可听见的提示音。已确认的部分：UI 事件 → `feedback_play` → 队列 → `esp_codec_dev_write` 全链路返回成功；I2S 以 16 kHz 单声道打开；ES8388 `DACPOWER=0x3c`、`DACCONTROL21=0x80`、LOUT1/ROUT1 音量 `0x1e` 正常；扬声器功放使能脚（扩展器 0，第 1 位）输出寄存器为 1、方向为输出。已修复：DAC 静音位（`DACCONTROL3` `0x19` bit 2）在诊断时为 1，`feedback.c` 每次写入前调用 `esp_codec_dev_set_out_mute(false)`，寄存器读回变为 `0x00`，但仍未听到声音。
+  - 注意：扩展器输入寄存器读回不可靠（输出为 1 的引脚如 `BSP_TOUCH_EN` 也读回 0），不能用来判断功放使能状态。
+  - 下一步：检查功放本身或其供电/使能电路（用万用表量功放使能脚电压），并确认 I2S 数据是否到达 DAC（例如测 BCLK/LRCK/DOUT）。
 - **USB Options**：`USB-A HighSpeed Only`（`usb_mode 0`，默认）和 `USB-A HS & USB-C OTG`（`usb_mode 2`）；启动生效，需重启，详见 [`usb-modes.md`](usb-modes.md)。
 - **Boot Screen**：`OFF`（默认）和 `KCN4M1`；选中后保存到 `boot_screen`，下次启动生效。KCN4M1 是启动动画，设备上播放约 5 秒，模拟器需 `--boot` 才会播放。
 - **Now Playing Background**：Theme / Blurred cover / Cover gradient，默认 Cover gradient，切换后返回 Now Playing 生效。
