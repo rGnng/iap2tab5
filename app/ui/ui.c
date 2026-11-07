@@ -28,6 +28,7 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "dirent.h"
 #include "sys/stat.h"
 #include "unistd.h"
@@ -90,8 +91,8 @@ static void * ui_alloc_aligned(size_t size)
 
 #define SCREEN_W   1280
 #define SCREEN_H   720
-/* The menubar is 112 px wide. Five 112 px square menu tiles fill 560 px,
- * leaving 80 px strips for the clock and battery at the top/bottom. */
+/* The menubar is 96 px wide. Six 96 px square menu tiles fill 576 px,
+ * leaving 72 px strips for the clock and battery at the top/bottom. */
 #define MENUBAR_TIME_H     72
 #define MENUBAR_BATTERY_H  72
 #define MENUBAR_W          96
@@ -734,8 +735,9 @@ void ui_set_thumb_pack_path(const char * path, int album_count)
     if(arg != NULL) {
         snprintf(arg->path, sizeof(arg->path), "%s", s_thumb_pack_path);
         arg->albums = album_count;
-        if(xTaskCreate(thumb_pack_load_task, "thumb_load", 6144, arg, 1,
-                       NULL) != pdPASS) {
+        if(xTaskCreateWithCaps(thumb_pack_load_task, "thumb_load", 6144, arg,
+                               1, NULL, MALLOC_CAP_SPIRAM |
+                                        MALLOC_CAP_8BIT) != pdPASS) {
             free(arg);
         }
     }
@@ -749,20 +751,26 @@ static bool real_thumb_read(uint16_t id, uint8_t * dst)
     const size_t one = (size_t)REAL_THUMB_SIZE * REAL_THUMB_SIZE * 2;
     if(id == 0) return false;
 
-    if(s_thumb_pack_ready && id <= s_thumb_pack_count) {
+    /* The packed thumbnail set is the only source used once it is ready.
+     * Falling back to individual <id>.thm files caused a burst of SD reads
+     * while the album list was being built; on IDF 5.5 the internal DMA pool
+     * cannot service that burst and SDMMC allocation fails.  Albums without
+     * a packed thumbnail simply show the placeholder. */
+    if(s_thumb_pack_ready) {
+        if(id > s_thumb_pack_count) return false;
         uint32_t n = (uint32_t)id - 1;
-        if((s_thumb_valid[n >> 3] & (1u << (n & 7))) != 0) {
-            size_t off = (size_t)thumb_cache_slot_offset(id);
-            if(s_thumb_pack_ram_ready && off + one <= s_thumb_pack_ram_size) {
-                memcpy(dst, s_thumb_pack_ram + off, one);
-                return true;
-            }
-            if(s_thumb_pack_file != NULL &&
-               fseek(s_thumb_pack_file, (long)off, SEEK_SET) == 0 &&
-               fread(dst, 1, one, s_thumb_pack_file) == one) {
-                return true;
-            }
+        if((s_thumb_valid[n >> 3] & (1u << (n & 7))) == 0) return false;
+        size_t off = (size_t)thumb_cache_slot_offset(id);
+        if(s_thumb_pack_ram_ready && off + one <= s_thumb_pack_ram_size) {
+            memcpy(dst, s_thumb_pack_ram + off, one);
+            return true;
         }
+        if(s_thumb_pack_file != NULL &&
+           fseek(s_thumb_pack_file, (long)off, SEEK_SET) == 0 &&
+           fread(dst, 1, one, s_thumb_pack_file) == one) {
+            return true;
+        }
+        return false;
     }
 
     char path[128];
@@ -1141,7 +1149,9 @@ void ui_set_np_cache_dir(const char * dir)
     if(s_np_cache_queue == NULL) {
         s_np_cache_queue = xQueueCreate(2, sizeof(np_cache_job_t));
         if(s_np_cache_queue != NULL) {
-            xTaskCreate(np_cache_task, "np_cache", 12288, NULL, 2, NULL);
+            xTaskCreateWithCaps(np_cache_task, "np_cache", 12288, NULL, 2,
+                                NULL, MALLOC_CAP_SPIRAM |
+                                      MALLOC_CAP_8BIT);
         }
     }
 #endif
@@ -1330,7 +1340,7 @@ static void ui_menu_update(void)
         if(g_menu_items[i] == NULL || g_menu_icons[i] == NULL) continue;
         bool active = (i == (int)g_current_screen) ||
                       (i == SCR_SETTINGS && g_current_screen == SCR_BLUETOOTH);
-        /* The selected tile is a solid square: the full 112 x 112 touch area
+        /* The selected tile is a solid square: the full 96 x 96 touch area
          * uses the focus grey fill, with a white icon and no edge strip. */
         lv_obj_set_style_bg_color(g_menu_items[i],
                                   lv_color_hex(active ? COL_FOCUS : COL_BG), 0);
@@ -1633,7 +1643,7 @@ static void build_menubar(lv_obj_t * parent)
     for(int slot = 0; slot < 6; slot++) {
         int screen = menu_order[slot];
         lv_obj_t * item = lv_obj_create(menu_area);
-        lv_obj_set_size(item, MENUBAR_W, 80);
+        lv_obj_set_size(item, MENUBAR_W, MENUBAR_W);
         lv_obj_set_style_radius(item, 0, 0);
         lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(item, 0, 0);

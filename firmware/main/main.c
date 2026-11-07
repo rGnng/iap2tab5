@@ -487,6 +487,11 @@ void app_main(void)
         },
     };
     display_cfg.lvgl_port_cfg.task_stack = 32 * 1024;
+    /* IDF 5.5 leaves very little internal DMA-capable RAM.  Keep the large
+     * LVGL stack in PSRAM so SDMMC thumbnail reads can still allocate DMA
+     * buffers. */
+    display_cfg.lvgl_port_cfg.task_stack_caps =
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 
     lv_display_t * display = bsp_display_start_with_config(&display_cfg);
     if(display == NULL) {
