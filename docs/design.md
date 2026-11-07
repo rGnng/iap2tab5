@@ -404,6 +404,7 @@ Queue 显示时的左栏：
 - 两侧面板不再加遮罩；选中专辑行保留 `#262626` 选中底色，浅色条只在旋钮焦点位于左栏时显示；上下移动左栏选中项时右侧内容实时跟随；
 - Enter 打开右侧详情并把焦点移到 `Play` 图标；左侧选中行保留选中底色但不显示浅色条；两侧内容始终可以直接触摸操作；左栏滚动位置保持不变；
 - 右侧详情曲目列表固定 9 行：9 × 56 px = 504 px，行间无间隔；顶部 108 px 用于封面、标题和 Shuffle/Play 图标，合计 612 px，正好填满右栏可视高度；
+- 未打开详情时右侧预览最多 15 首曲目；Enter 打开详情后显示整张专辑的全部曲目，列表可滚动；
 - 曲目列表触摸滚动结束时按 56 px 行高吸附（`LV_EVENT_SCROLL_END` 自定义吸附），**不要**使用 `LV_SCROLL_SNAP_START`，否则旋钮焦点会被强制贴在列表顶部；
 - 右侧详情顶部的封面/标题右侧是 `Shuffle` 和 `Play` 两个纯图标按钮，与封面垂直居中对齐；Backspace 返回专辑列表并恢复左栏焦点；
 - 在曲目列表 Enter = 播放该曲；Back = 回专辑列表；
@@ -428,7 +429,7 @@ Queue 显示时的左栏：
 ```
 
 - 标题右侧显示 `当前选中序号/总数`（如 `1/24`），使用 Inter tabular 18 px；
-- 右侧始终显示左侧当前选中的艺术家和完整专辑/曲目预览，不再显示占位提示文字；
+- 右侧始终显示左侧当前选中的艺术家；未打开详情时预览最多 15 首曲目，Enter 打开详情后显示该艺术家的全部专辑和曲目，不再显示占位提示文字；
 - 顶部压缩为 52 px：艺术家名和 `songs | albums` 统计同一行，右侧是 48 px 的纯图标 Shuffle / Play 按钮；Play 播放该艺术家的全部歌曲；
 - 下方列表 10 × 56 px = 560 px，整数行吸附；专辑和曲目共用这个滚动区域；
 - 每张专辑是单行 56 px：34×34 封面、专辑名、年份 + 曲目数、右侧播放图标；
@@ -508,6 +509,10 @@ Queue 显示时的左栏：
 - 菜单项统一规格：所有可选、只读、带右侧值的菜单项都是 64 px 高、16 px 左内边距、FONT_H2 字号；颜色按语义保留（On 为绿色，Off 与次要信息为灰色，强调项为 accent 色）。
 - 说明性文字不随菜单字号：分组标题（如 `Paired Devices`、`Search Devices`）及其右侧提示、`Reboot to apply`、`No paired devices`、`Searching...` 保持原小字号；说明文字与菜单标签左对齐（16 px 内边距）。
 - **Bluetooth**：第一行是 Bluetooth On/Off。下方是 Paired Devices（Connected / Disconnected，长按 Enter 忘记设备）。页面底部是 **Search Devices** 分组（`PRESS: PAIR`）：打开页面即开始扫描，新发现的设备出现在该分组下方，选中即配对。已移除顶部的 Search 行。
+- **Key Sound**：`Volume` 行（Enter 进入调节，Up/Down ±5%，Enter 确认）；中间留 14 px inset；下方 `Play sound on` 提供 `Touch`、`Touch + Key`、`None` 三个带勾选项，默认 `Touch + Key`。
+  - 声音只在真实操作时发出：触屏点击控件、旋钮/按键确认、返回。
+  - 列表滚动（触摸拖动、滚轮/上下键移动）不发声。
+  - 保存到 `sound_mode`（0 none / 1 touch / 2 touch+key），同时同步旧的 `sound_enabled` 字段。
 - **USB Options**：`USB-A HighSpeed Only`（`usb_mode 0`，默认）和 `USB-A HS & USB-C OTG`（`usb_mode 2`）；启动生效，需重启，详见 [`usb-modes.md`](usb-modes.md)。
 - **Boot Screen**：`OFF`（默认）和 `KCN4M1`；选中后保存到 `boot_screen`，下次启动生效。KCN4M1 是启动动画，设备上播放约 5 秒，模拟器需 `--boot` 才会播放。
 - **Now Playing Background**：Theme / Blurred cover / Cover gradient，默认 Cover gradient，切换后返回 Now Playing 生效。

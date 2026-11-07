@@ -40,6 +40,7 @@ app_config_t g_app_config = {
     .screen_flip = 0,
     .wifi_mode = 0,
     .sound_enabled = true,
+    .sound_mode = 2,
     .volume = 65,
     .ap_ssid = "Tab5-Debug",
     .clock_12h = false,
@@ -457,6 +458,7 @@ static void set_defaults(void)
     g_app_config.screen_flip = 0;
     g_app_config.wifi_mode = 0;
     g_app_config.sound_enabled = true;
+    g_app_config.sound_mode = 2;
     g_app_config.volume = 65;
     snprintf(g_app_config.ap_ssid, sizeof(g_app_config.ap_ssid), "Tab5-Debug");
     g_app_config.clock_12h = false;
@@ -499,6 +501,16 @@ static void load_from_json(const char * text)
     if(cJSON_IsBool(item)) {
         g_app_config.sound_enabled = cJSON_IsTrue(item);
     }
+    item = cJSON_GetObjectItemCaseSensitive(root, "sound_mode");
+    if(cJSON_IsNumber(item)) {
+        int mode = item->valueint;
+        g_app_config.sound_mode = (uint8_t)(mode < 0 ? 0 : (mode > 2 ? 2 : mode));
+    }
+    else {
+        /* Older configs only had the on/off flag. */
+        g_app_config.sound_mode = g_app_config.sound_enabled ? 2 : 0;
+    }
+    g_app_config.sound_enabled = g_app_config.sound_mode != 0;
 
     item = cJSON_GetObjectItemCaseSensitive(root, "volume");
     if(cJSON_IsNumber(item)) {
@@ -623,6 +635,7 @@ esp_err_t app_config_save(void)
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "wifi_mode", g_app_config.wifi_mode);
     cJSON_AddBoolToObject(root, "sound_enabled", g_app_config.sound_enabled);
+    cJSON_AddNumberToObject(root, "sound_mode", g_app_config.sound_mode);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     cJSON_AddStringToObject(root, "ap_ssid", g_app_config.ap_ssid);
     cJSON_AddBoolToObject(root, "clock_12h", g_app_config.clock_12h);

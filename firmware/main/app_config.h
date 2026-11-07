@@ -17,6 +17,7 @@ typedef struct {
     uint16_t screen_flip;      /* 0 or 180 degrees */
     uint8_t wifi_mode;         /* 0 = station, 1 = AP */
     bool sound_enabled;
+    uint8_t sound_mode;         /* 0 = none, 1 = touch, 2 = touch + key */
     uint8_t volume;            /* 0..100 */
     char ap_ssid[33];
     char library_id[128];      /* full iAP2/AFC media-library UUID */

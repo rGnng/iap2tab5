@@ -108,6 +108,10 @@ static void * ui_alloc_aligned(size_t size)
 
 #define MAX_FOCUS 1024
 
+/* Master-detail pages build a short track list in the right-hand preview.
+ * Enter opens the detail, which shows every track. */
+#define DETAIL_PREVIEW_MAX_TRACKS 15
+
 /* Type scale: four proportional levels plus tabular numeric/clock faces.
  * The queue is a compact 54 px list, so it keeps its own smaller pair. */
 static const lv_font_t * FONT_H1 = &inter_36;
@@ -249,6 +253,7 @@ static ui_system_config_t g_system_config = {
     .screen_flip = 0,
     .wifi_mode = 0,
     .sound_enabled = true,
+    .sound_mode = 2,
     .volume = 65,
     .wifi_status = "WiFi off",
     .wifi_ip = "--",
@@ -259,8 +264,13 @@ static void (*g_afc_status_cb)(ui_afc_status_t * out);
 static void (*g_afc_action_cb)(int action);
 static void (*g_time_changed_cb)(time_t now);
 
-static void ui_feedback_emit(ui_feedback_t type)
+/* Key Sound: 0 = none, 1 = touch only, 2 = touch + key.  Scrolling never
+ * calls this; only real activations do. */
+static void ui_feedback_emit(ui_feedback_t type, bool from_key)
 {
+    int mode = g_system_config.sound_mode;
+    if(!g_system_config.sound_enabled || mode <= 0) return;
+    if(from_key && mode < 2) return;
     if(g_feedback_cb != NULL) g_feedback_cb((int)type);
 }
 
@@ -371,7 +381,7 @@ static void focus_move(int delta)
     focus_select(next);
 }
 
-static void focus_activate(void)
+static void focus_activate(bool from_key)
 {
     if(g_focus_count <= 0 || g_focus_index < 0) return;
     if(g_edit_mode) {
@@ -379,7 +389,7 @@ static void focus_activate(void)
         return;
     }
     focus_item_t * item = &g_focus[g_focus_index];
-    ui_feedback_emit(UI_FEEDBACK_ACTIVATE);
+    ui_feedback_emit(UI_FEEDBACK_ACTIVATE, from_key);
     if(item->activate) item->activate(item->user);
 }
 
@@ -387,7 +397,7 @@ static void focus_click_async(void * arg)
 {
     int index = (int)(intptr_t)arg;
     focus_select(index);
-    focus_activate();
+    focus_activate(false);
 }
 
 /* Actions triggered from LVGL input callbacks must not delete the object that
@@ -452,10 +462,17 @@ static int focus_add_clickable(lv_obj_t * obj, focus_activate_fn activate,
 
 /* Touch-only action: usable on the inactive panel without joining the knob
  * focus chain. */
+static void feedback_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
+}
+
 static void touch_add_clickable(lv_obj_t * obj, lv_event_cb_t cb, void * user)
 {
     lv_obj_set_clickable(obj, true);
     enable_event_bubble(obj);
+    lv_obj_add_event_cb(obj, feedback_touch_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(obj, cb, LV_EVENT_CLICKED, user);
 }
 
@@ -795,6 +812,8 @@ static lv_obj_t * make_flat_icon_button(lv_obj_t * parent, const char * icon,
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     make_label(button, icon, font, fg);
+    lv_obj_set_clickable(button, true);
+    lv_obj_add_event_cb(button, feedback_touch_cb, LV_EVENT_CLICKED, NULL);
     return button;
 }
 
@@ -1533,6 +1552,7 @@ static void menu_click_async(void * arg)
 
 static void menu_click_cb(lv_event_t * event)
 {
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     int index = (int)(intptr_t)lv_event_get_user_data(event);
     ui_call_async(menu_click_async, (void *)(intptr_t)index);
 }
@@ -2239,7 +2259,7 @@ static void ui_back(void)
         ui_exit_edit();
         return;
     }
-    ui_feedback_emit(UI_FEEDBACK_BACK);
+    ui_feedback_emit(UI_FEEDBACK_BACK, true);
     if(g_pages[g_current_screen].back && g_pages[g_current_screen].back()) {
         return;
     }
@@ -2317,7 +2337,7 @@ void ui_handle_key(ui_key_t key)
                 focus_move(1);
                 break;
             case UI_KEY_ENTER:
-                focus_activate();
+                focus_activate(true);
                 break;
             case UI_KEY_BACK:
             case UI_KEY_6:
@@ -2368,7 +2388,7 @@ void ui_handle_key(ui_key_t key)
             focus_move(1);
             break;
         case UI_KEY_ENTER:
-            focus_activate();
+            focus_activate(true);
             break;
         case UI_KEY_1:
         case UI_KEY_2:
@@ -3567,7 +3587,6 @@ static int albums_first_for_top(int top)
 #define ALBUM_HEADER_H     112
 #define ALBUM_TRACK_ROWS   9
 #define ALBUM_TRACK_LIST_H (ALBUM_TRACK_ROWS * ALBUM_TRACK_ROW_H)
-#define ALBUM_DETAIL_MAX_TRACKS 18
 
 static int albums_selected;
 static bool albums_detail_open;
@@ -3959,6 +3978,7 @@ static void albums_row_touch_cb(lv_event_t * event)
        (uint32_t)(lv_tick_get() - albums_swipe_guard) < 1000) {
         return;
     }
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     lv_obj_t * row = lv_event_get_current_target(event);
     ui_call_async(albums_open_async, lv_obj_get_user_data(row));
 }
@@ -4190,10 +4210,8 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
                         LV_EVENT_SCROLL_END, NULL);
     int track_count = player_album_track_count(album.id);
 
-    /* The right-hand preview must show the same track list as the opened
-     * detail; the old 3-row preview made long albums look truncated until
-     * Enter was pressed. */
-    int max_tracks = ALBUM_DETAIL_MAX_TRACKS;
+    /* The preview stays short; the opened detail shows the whole album. */
+    int max_tracks = interactive ? track_count : DETAIL_PREVIEW_MAX_TRACKS;
     if(max_tracks > track_count) max_tracks = track_count;
     for(int i = 0; i < max_tracks; i++) {
         player_track_t track;
@@ -4398,9 +4416,6 @@ static void albums_create(lv_obj_t * parent)
 #define ARTIST_HEADER_H       56
 #define ARTIST_DETAIL_ROWS    10
 #define ARTIST_DETAIL_LIST_H  (ARTIST_DETAIL_ROWS * ARTIST_TRACK_ROW_H)
-#define ARTIST_ALBUM_MAX      4
-#define ARTIST_TRACKS_PER_ALBUM 6
-#define ARTIST_DETAIL_MAX_ROWS  24
 #define ARTISTS_POOL          11
 
 static int artists_selected;
@@ -4721,6 +4736,7 @@ static void artists_row_touch_cb(lv_event_t * event)
        (uint32_t)(lv_tick_get() - artists_swipe_guard) < 1000) {
         return;
     }
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     lv_obj_t * row = lv_event_get_current_target(event);
     ui_call_async(artists_open_async, lv_obj_get_user_data(row));
 }
@@ -4885,34 +4901,54 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_add_event_cb(album_list, albums_track_scroll_end_cb,
                         LV_EVENT_SCROLL_END, NULL);
 
-    /* Collect a bounded set of albums/tracks in one pass.  The previous
-     * version scanned every artist song for every album, which made prolific
-     * artists (hundreds of tracks) block the UI for several seconds. */
-    uint64_t album_ids[ARTIST_ALBUM_MAX] = {0};
-    int album_track_indices[ARTIST_ALBUM_MAX][ARTIST_TRACKS_PER_ALBUM];
-    int album_track_counts[ARTIST_ALBUM_MAX] = {0};
+    /* Collect the artist's tracks in one pass.  The preview keeps only a
+     * short list; the opened detail keeps every track. */
+    int songs = player_song_count();
+    int artist_songs = 0;
+    for(int i = 0; i < songs; i++) {
+        player_track_t track;
+        if(player_song_get(i, &track) && track.artist_id == artist.id) {
+            artist_songs++;
+        }
+    }
+
+    int max_tracks = interactive ? artist_songs : DETAIL_PREVIEW_MAX_TRACKS;
+    if(max_tracks > artist_songs) max_tracks = artist_songs;
+
+    int * track_indices = NULL;
+    int * track_albums = NULL;
+    uint64_t * album_ids = NULL;
     int album_total = 0;
     int track_rows = 0;
 
-    int songs = player_song_count();
-    for(int i = 0; i < songs && track_rows < ARTIST_DETAIL_MAX_ROWS; i++) {
-        player_track_t track;
-        if(!player_song_get(i, &track) || track.artist_id != artist.id) continue;
+    if(max_tracks > 0) {
+        track_indices = malloc((size_t)max_tracks * sizeof(*track_indices));
+        track_albums = malloc((size_t)max_tracks * sizeof(*track_albums));
+        album_ids = malloc((size_t)max_tracks * sizeof(*album_ids));
+        if(track_indices == NULL || track_albums == NULL || album_ids == NULL) {
+            free(track_indices);
+            free(track_albums);
+            free(album_ids);
+            return;
+        }
 
-        int slot = -1;
-        for(int a = 0; a < album_total; a++) {
-            if(album_ids[a] == track.album_id) {
-                slot = a;
-                break;
+        for(int i = 0; i < songs && track_rows < max_tracks; i++) {
+            player_track_t track;
+            if(!player_song_get(i, &track) || track.artist_id != artist.id) continue;
+
+            int slot = -1;
+            for(int a = 0; a < album_total; a++) {
+                if(album_ids[a] == track.album_id) {
+                    slot = a;
+                    break;
+                }
             }
-        }
-        if(slot < 0) {
-            if(album_total >= ARTIST_ALBUM_MAX) continue;
-            slot = album_total++;
-            album_ids[slot] = track.album_id;
-        }
-        if(album_track_counts[slot] < ARTIST_TRACKS_PER_ALBUM) {
-            album_track_indices[slot][album_track_counts[slot]++] = i;
+            if(slot < 0) {
+                slot = album_total++;
+                album_ids[slot] = track.album_id;
+            }
+            track_indices[track_rows] = i;
+            track_albums[track_rows] = slot;
             track_rows++;
         }
     }
@@ -4960,8 +4996,9 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
                                 (void *)(intptr_t)album_index);
         }
 
-        for(int j = 0; j < album_track_counts[a]; j++) {
-            int track_index = album_track_indices[a][j];
+        for(int j = 0; j < track_rows; j++) {
+            if(track_albums[j] != a) continue;
+            int track_index = track_indices[j];
             player_track_t track;
             if(!player_song_get(track_index, &track)) continue;
             bool current = (track.id == snapshot.track.id);
@@ -5002,11 +5039,15 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
         }
     }
 
-    if(track_rows >= ARTIST_DETAIL_MAX_ROWS) {
+    if(max_tracks < artist_songs) {
         lv_obj_t * more = make_label(album_list, "More tracks not shown",
                                      FONT_CAPTION, COL_MUTED);
         lv_obj_set_height(more, 32);
     }
+
+    free(track_indices);
+    free(track_albums);
+    free(album_ids);
 }
 
 static void artists_create(lv_obj_t * parent)
@@ -5776,6 +5817,7 @@ static void songs_row_click_cb(lv_event_t * event)
        (uint32_t)(lv_tick_get() - songs_swipe_guard) < 1000) {
         return;
     }
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     lv_obj_t * row = lv_event_get_current_target(event);
     int index = (int)(intptr_t)lv_obj_get_user_data(row);
     songs_selected = index;
@@ -5930,7 +5972,6 @@ static void songs_create(lv_obj_t * parent)
 #define PLAYLIST_TRACK_ROWS    10
 #define PLAYLIST_HEADER_H      56
 #define PLAYLIST_TRACK_LIST_H  (PLAYLIST_TRACK_ROWS * PLAYLIST_TRACK_ROW_H)
-#define PLAYLIST_DETAIL_MAX_TRACKS 24
 
 static int playlists_selected;
 static bool playlists_detail_open;
@@ -5963,7 +6004,7 @@ static void playlists_detail_timer_cb(lv_timer_t * timer)
     if(playlists_detail_dirty && playlists_right_content != NULL) {
         playlists_detail_dirty = false;
         uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
-        playlists_render_detail(playlists_right_content, false);
+        playlists_render_detail(playlists_right_content, playlists_detail_open);
         perf_log_us("playlists_detail", perf_t0);
     }
 }
@@ -6051,6 +6092,7 @@ static void playlists_row_touch_cb(lv_event_t * event)
        (uint32_t)(lv_tick_get() - playlists_swipe_guard) < 1000) {
         return;
     }
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     ui_call_async(playlists_open_async, lv_event_get_user_data(event));
 }
 
@@ -6213,7 +6255,9 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_style_pad_row(track_list, 0, 0);
     lv_obj_set_style_pad_right(track_list, 14, 0);
     int count = player_playlist_track_count(playlists_selected);
-    int max_tracks = interactive ? PLAYLIST_DETAIL_MAX_TRACKS : 3;
+    /* The preview stays short; the opened detail shows the whole playlist. */
+    int max_tracks = interactive ? count : DETAIL_PREVIEW_MAX_TRACKS;
+    if(max_tracks > count) max_tracks = count;
     int shown = 0;
     for(int i = 0; i < count && shown < max_tracks; i++) {
         player_track_t track;
@@ -6254,7 +6298,7 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
         }
         shown++;
     }
-    if(interactive && shown < count) {
+    if(max_tracks < count) {
         lv_obj_t * more = make_label(track_list, "More tracks not shown",
                                      FONT_CAPTION, COL_MUTED);
         lv_obj_set_height(more, 32);
@@ -6625,6 +6669,7 @@ static void ble_tick(void)
 enum {
     SETTING_AFC_IAP2 = 0,
     SETTING_BLUETOOTH,
+    SETTING_KEY_SOUND,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
     SETTING_USB,
@@ -6689,6 +6734,9 @@ static lv_obj_t * settings_detail_wifi_mode_value;
 static lv_obj_t * settings_detail_wifi_status_value;
 static lv_obj_t * settings_detail_sound_value;
 static lv_obj_t * settings_detail_volume_value;
+static lv_obj_t * settings_detail_sound_touch_check;
+static lv_obj_t * settings_detail_sound_both_check;
+static lv_obj_t * settings_detail_sound_none_check;
 static int settings_brightness = 70;
 
 typedef enum {
@@ -6703,6 +6751,9 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(cfg == NULL) return;
 
     g_system_config = *cfg;
+    if(g_system_config.sound_mode < 0) g_system_config.sound_mode = 0;
+    if(g_system_config.sound_mode > 2) g_system_config.sound_mode = 2;
+    g_system_config.sound_enabled = g_system_config.sound_mode != 0;
 
     g_clock_12h = cfg->clock_12h != 0;
     if(cfg->sort_field >= 0 && cfg->sort_field < SORT_FIELD_COUNT) {
@@ -6729,6 +6780,7 @@ static void settings_rebuild(void);
 static const char * const settings_names[SETTING_COUNT] = {
     "iOS Device",
     "Bluetooth",
+    "Key Sound",
     "Theme",
     "Now Playing Background",
     "USB Options",
@@ -6967,6 +7019,48 @@ static void settings_volume_action(void * user)
 {
     (void)user;
     ui_enter_edit("UP/DOWN Adjust   ENTER Confirm   6 Cancel");
+}
+
+static void settings_key_sound_update_checks(void)
+{
+    int mode = g_system_config.sound_mode;
+    if(settings_detail_sound_touch_check) {
+        lv_label_set_text(settings_detail_sound_touch_check,
+                          mode == 1 ? ICON_CHECK : "");
+    }
+    if(settings_detail_sound_both_check) {
+        lv_label_set_text(settings_detail_sound_both_check,
+                          mode == 2 ? ICON_CHECK : "");
+    }
+    if(settings_detail_sound_none_check) {
+        lv_label_set_text(settings_detail_sound_none_check,
+                          mode == 0 ? ICON_CHECK : "");
+    }
+}
+
+static void settings_key_sound_action(void * user)
+{
+    int mode = (int)(intptr_t)user;
+    g_system_config.sound_mode = mode;
+    g_system_config.sound_enabled = mode != 0;
+    settings_key_sound_update_checks();
+    settings_system_changed();
+    /* Keep the cursor on the chosen row: the volume row is 0, then Touch,
+     * Touch + Key and None. */
+    if(g_focus_count > 0) {
+        focus_select(mode == 1 ? 1 : (mode == 2 ? 2 : 3));
+    }
+}
+
+static void settings_key_sound_touch_cb(lv_event_t * event)
+{
+    settings_key_sound_action(lv_event_get_user_data(event));
+}
+
+static void settings_volume_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    settings_volume_action(NULL);
 }
 
 static void settings_update_np_bg_checks(void)
@@ -7778,6 +7872,9 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_wifi_status_value = NULL;
     settings_detail_sound_value = NULL;
     settings_detail_volume_value = NULL;
+    settings_detail_sound_touch_check = NULL;
+    settings_detail_sound_both_check = NULL;
+    settings_detail_sound_none_check = NULL;
     settings_time_year_value = NULL;
     settings_time_month_value = NULL;
     settings_time_day_value = NULL;
@@ -7937,6 +8034,62 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                         settings_ble_scan_connect_action,
                                         NULL, (void *)(intptr_t)i, true);
                 }
+            }
+            break;
+        }
+        case SETTING_KEY_SOUND: {
+            lv_obj_t * vol = settings_make_value_row(
+                parent, "Volume", "", COL_TEXT, SETTINGS_ROW_H, FONT_H2,
+                FONT_H2, &settings_detail_volume_value);
+            char text[8];
+            snprintf(text, sizeof(text), "%d%%", g_system_config.volume);
+            lv_label_set_text(settings_detail_volume_value, text);
+            if(interactive) {
+                focus_add_clickable(vol, settings_volume_action,
+                                    settings_volume_adjust, NULL, true);
+            }
+            else {
+                touch_add_clickable(vol, settings_volume_touch_cb, NULL);
+            }
+
+            /* Inset between the level control and the mode list. */
+            lv_obj_t * spacer = lv_obj_create(parent);
+            lv_obj_set_size(spacer, LV_PCT(100), 14);
+            lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(spacer, 0, 0);
+            lv_obj_set_style_pad_all(spacer, 0, 0);
+            lv_obj_set_scrollable(spacer, false);
+            lv_obj_clear_flag(spacer, LV_OBJ_FLAG_CLICKABLE);
+
+            lv_obj_t * heading = make_label(parent, "Play sound on",
+                                            FONT_GROUP, COL_MUTED);
+            lv_obj_set_style_pad_left(heading, 16, 0);
+
+            int mode = g_system_config.sound_mode;
+            lv_obj_t * touch = settings_make_choice_row(
+                parent, "Touch", mode == 1,
+                &settings_detail_sound_touch_check);
+            lv_obj_t * both = settings_make_choice_row(
+                parent, "Touch + Key", mode == 2,
+                &settings_detail_sound_both_check);
+            lv_obj_t * none = settings_make_choice_row(
+                parent, "None", mode == 0,
+                &settings_detail_sound_none_check);
+            if(interactive) {
+                focus_add_clickable(touch, settings_key_sound_action, NULL,
+                                    (void *)(intptr_t)1, true);
+                focus_add_clickable(both, settings_key_sound_action, NULL,
+                                    (void *)(intptr_t)2, true);
+                focus_add_clickable(none, settings_key_sound_action, NULL,
+                                    (void *)(intptr_t)0, true);
+            }
+            else {
+                touch_add_clickable(touch, settings_key_sound_touch_cb,
+                                    (void *)(intptr_t)1);
+                touch_add_clickable(both, settings_key_sound_touch_cb,
+                                    (void *)(intptr_t)2);
+                touch_add_clickable(none, settings_key_sound_touch_cb,
+                                    (void *)(intptr_t)0);
             }
             break;
         }

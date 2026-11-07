@@ -622,6 +622,7 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "wifi_mode", g_app_config.wifi_mode);
     cJSON_AddBoolToObject(root, "sound_enabled", g_app_config.sound_enabled);
+    cJSON_AddNumberToObject(root, "sound_mode", g_app_config.sound_mode);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
@@ -679,6 +680,12 @@ static esp_err_t config_post(httpd_req_t * req)
     item = cJSON_GetObjectItemCaseSensitive(root, "sound_enabled");
     if(cJSON_IsBool(item)) {
         g_app_config.sound_enabled = cJSON_IsTrue(item);
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "sound_mode");
+    if(cJSON_IsNumber(item)) {
+        int mode = item->valueint;
+        g_app_config.sound_mode = (uint8_t)(mode < 0 ? 0 : (mode > 2 ? 2 : mode));
+        g_app_config.sound_enabled = g_app_config.sound_mode != 0;
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "debug_log");
     if(cJSON_IsBool(item)) {

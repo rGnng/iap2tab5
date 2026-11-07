@@ -364,9 +364,10 @@ static void apply_runtime_config(void)
         apply_screen_flip();
         s_applied_flip = g_app_config.screen_flip;
     }
-    if((int)g_app_config.sound_enabled != s_applied_sound) {
-        feedback_set_enabled(g_app_config.sound_enabled);
-        s_applied_sound = g_app_config.sound_enabled;
+    bool sound_on = g_app_config.sound_enabled && g_app_config.sound_mode != 0;
+    if((int)sound_on != s_applied_sound) {
+        feedback_set_enabled(sound_on);
+        s_applied_sound = sound_on;
     }
     if((int)g_app_config.volume != s_applied_volume) {
         feedback_set_volume(g_app_config.volume);
@@ -391,6 +392,8 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.screen_flip = (cfg->screen_flip == 180) ? 180 : 0;
     g_app_config.wifi_mode = (cfg->wifi_mode == 1) ? 1 : 0;
     g_app_config.sound_enabled = cfg->sound_enabled;
+    g_app_config.sound_mode = (uint8_t)cfg->sound_mode;
+    g_app_config.sound_enabled = g_app_config.sound_mode != 0;
     g_app_config.volume = (uint8_t)cfg->volume;
     g_app_config.clock_12h = cfg->clock_12h != 0;
     g_app_config.sort_field = (uint8_t)cfg->sort_field;
@@ -435,6 +438,7 @@ static void fill_ui_config(ui_system_config_t * cfg)
     cfg->screen_flip = g_app_config.screen_flip;
     cfg->wifi_mode = g_app_config.wifi_mode;
     cfg->sound_enabled = g_app_config.sound_enabled;
+    cfg->sound_mode = g_app_config.sound_mode;
     cfg->volume = g_app_config.volume;
     snprintf(cfg->ap_ssid, sizeof(cfg->ap_ssid), "%s", g_app_config.ap_ssid);
     cfg->wifi_status[0] = '\0';
@@ -667,11 +671,12 @@ void app_main(void)
                                          : LV_DISPLAY_ROTATION_90);
     s_applied_flip = g_app_config.screen_flip;
     s_applied_volume = g_app_config.volume;
-    s_applied_sound = g_app_config.sound_enabled;
+    s_applied_sound = g_app_config.sound_enabled && g_app_config.sound_mode != 0;
     s_applied_wifi_mode = g_app_config.wifi_mode;
     s_applied_brightness = g_app_config.brightness;
 
-    feedback_init(g_app_config.sound_enabled, g_app_config.volume);
+    feedback_init(g_app_config.sound_enabled && g_app_config.sound_mode != 0,
+                  g_app_config.volume);
 
     bsp_display_lock(0);
     ui_system_config_t saved_cfg;

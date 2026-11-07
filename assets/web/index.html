@@ -276,7 +276,13 @@ pre {
         <label class="field"><span class="lbl">Brightness <span id="bri_v">70</span>%</span>
           <input type="range" id="brightness" min="0" max="100" step="1">
         </label>
-        <label class="check"><input type="checkbox" id="sound_enabled"> Prompt sound</label>
+        <label class="field"><span class="lbl">Key sound</span>
+          <select id="sound_mode">
+            <option value="2">Touch + Key</option>
+            <option value="1">Touch</option>
+            <option value="0">None</option>
+          </select>
+        </label>
         <label class="check"><input type="checkbox" id="debug_log"> Debug log to SD</label>
         <label class="check"><input type="checkbox" id="iap2_mode"> iAP2 mode (reboot to apply)</label>
         <label class="field"><span class="lbl">USB mode</span>
@@ -426,7 +432,7 @@ function render(s, c) {
 
   setVal('volume', c.volume); $('vol_v').textContent = c.volume;
   setVal('brightness', c.brightness); $('bri_v').textContent = c.brightness;
-  $('sound_enabled').checked = !!c.sound_enabled;
+  setVal('sound_mode', String(c.sound_mode));
   $('debug_log').checked = !!c.debug_log;
   $('iap2_mode').checked = !!c.iap2_mode;
   setVal('usb_mode', String(c.usb_mode));
@@ -466,7 +472,7 @@ function saveConfig() {
   var body = {
     screen_flip: +$('screen_flip').value,
     wifi_mode: +$('wifi_mode').value,
-    sound_enabled: $('sound_enabled').checked,
+    sound_mode: +$('sound_mode').value,
     debug_log: $('debug_log').checked,
     iap2_mode: $('iap2_mode').checked,
     usb_mode: +$('usb_mode').value,

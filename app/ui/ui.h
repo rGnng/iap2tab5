@@ -69,6 +69,7 @@ typedef struct {
     int screen_flip;       /* 0 or 180 */
     int wifi_mode;         /* 0 = station, 1 = AP */
     bool sound_enabled;
+    int sound_mode;        /* 0 = none, 1 = touch, 2 = touch + key */
     int volume;            /* 0..100 */
     char ap_ssid[33];
     char wifi_status[64];
