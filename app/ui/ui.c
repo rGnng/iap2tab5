@@ -2,6 +2,7 @@
 
 #include "icons.h"
 #include "fonts/inter_fonts.h"
+#include "plug_art.h"
 #include "player.h"
 #include "ble_remote.h"
 #include "thumb_cache_format.h"
@@ -3165,38 +3166,6 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     np_vertical_gap(left, 32);
 }
 
-/* Plug-in silhouette: connector tab, body and cable, matching the
- * reference artwork (white plug on a transparent background). */
-static void np_plug_art(lv_obj_t * parent)
-{
-    lv_obj_t * art = lv_obj_create(parent);
-    lv_obj_set_size(art, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(art, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(art, 0, 0);
-    lv_obj_set_style_pad_all(art, 0, 0);
-    lv_obj_set_style_pad_row(art, 0, 0);
-    lv_obj_set_flex_flow(art, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(art, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(art, false);
-
-    struct { int w, h, r; uint32_t color; } parts[] = {
-        { 42, 30, 10, COL_MUTED },   /* connector tab */
-        { 104, 72, 12, COL_MUTED },  /* body */
-        { 22, 176, 11, COL_MUTED },  /* cable */
-    };
-    for(size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
-        lv_obj_t * part = lv_obj_create(art);
-        lv_obj_set_size(part, parts[i].w, parts[i].h);
-        lv_obj_set_style_radius(part, parts[i].r, 0);
-        lv_obj_set_style_bg_color(part, lv_color_hex(parts[i].color), 0);
-        lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(part, 0, 0);
-        lv_obj_set_style_pad_all(part, 0, 0);
-        lv_obj_set_scrollable(part, false);
-    }
-}
-
 static void np_placeholder(lv_obj_t * parent)
 {
     bool sd = !g_dev_sd_ready || ui_sd_needs_reboot();
@@ -3207,12 +3176,13 @@ static void np_placeholder(lv_obj_t * parent)
     lv_obj_set_style_border_width(box, 0, 0);
     lv_obj_set_style_pad_all(box, 0, 0);
     lv_obj_set_style_pad_row(box, 18, 0);
-    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(box, false);
 
     if(sd) {
+        lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
         lv_obj_t * icons = lv_obj_create(box);
         lv_obj_set_size(icons, LV_SIZE_CONTENT, 64);
         lv_obj_set_style_bg_opa(icons, LV_OPA_TRANSP, 0);
@@ -3231,7 +3201,9 @@ static void np_placeholder(lv_obj_t * parent)
         }
     }
     else {
-        np_plug_art(box);
+        lv_obj_t * img = lv_image_create(box);
+        lv_image_set_src(img, &plug_in_dsc);
+        lv_obj_align(img, LV_ALIGN_BOTTOM_MID, 0, -24);
     }
 }
 
@@ -4052,11 +4024,17 @@ static bool albums_back(void)
         albums_rebuild();
         return true;
     }
-    if(albums_selected > -1) {
-        albums_select(-1);
-        return true;
+    /* Back never lands on the Shuffle All row: from any album it returns to
+     * the first album with that row scrolled out of view, and only from the
+     * first album does it leave the page. */
+    if(albums_selected == 0 || albums_selected < 0) return false;
+
+    albums_left_scroll_y = albums_row_top(0);
+    if(albums_left_list) {
+        lv_obj_scroll_to_y(albums_left_list, albums_left_scroll_y, LV_ANIM_OFF);
     }
-    return false;
+    albums_select(0);
+    return true;
 }
 
 static void albums_same_key(void)
@@ -7796,19 +7774,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
 
     switch(index) {
         case SETTING_AFC_IAP2: {
-            player_snapshot_t snap;
-            player_get_snapshot(&snap);
-            char battery[48];
-            if(snap.battery >= 0) {
-                snprintf(battery, sizeof(battery), "%s  %d%%",
-                         snap.charging ? "CHG" : "NOT CHG", snap.battery);
-            }
-            else {
-                snprintf(battery, sizeof(battery), "%s  --%%",
-                         snap.charging ? "CHG" : "NOT CHG");
-            }
-            settings_make_info_row(parent, "Battery", battery,
-                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
             ui_afc_status_t st;
             settings_afc_read_status(&st);
             if(st.afc_mode) {
@@ -7848,6 +7813,19 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                    FONT_H2, FONT_H2, SETTINGS_ROW_H);
             settings_make_info_row(parent, "iAP2 Status",
                                    st.iap2_status[0] ? st.iap2_status : "—",
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
+            player_snapshot_t snap;
+            player_get_snapshot(&snap);
+            char battery[48];
+            if(snap.battery >= 0) {
+                snprintf(battery, sizeof(battery), "%s  %d%%",
+                         snap.charging ? "CHG" : "NOT CHG", snap.battery);
+            }
+            else {
+                snprintf(battery, sizeof(battery), "%s  --%%",
+                         snap.charging ? "CHG" : "NOT CHG");
+            }
+            settings_make_info_row(parent, "Battery", battery,
                                    FONT_H2, FONT_H2, SETTINGS_ROW_H);
             break;
         }

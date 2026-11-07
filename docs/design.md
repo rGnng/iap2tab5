@@ -466,7 +466,7 @@ Queue 显示时的左栏：
 - **iAP2 模式且没有检测到 iPod**（未识别）：
   - menubar 中除 Now Playing 与 Settings 外的图标显示为暗灰（`#686868`）；
   - Now Playing 菜单图标换成 `bi phone`；
-  - Now Playing 页面只显示居中的线缆插头示意图（连接器、插头本体、线缆），不显示播放器 UI。
+  - Now Playing 页面只显示插头图片（96×248，白色，透明背景，编译为 LVGL RGB565A8）：在内容区水平居中、贴底对齐（下边距 24 px），不显示播放器 UI。
 - **SD 卡缺失或挂载失败**：
   - 同样的菜单项置灰；
   - Now Playing 菜单图标换成 `bi sd-card`；
@@ -488,7 +488,7 @@ Queue 显示时的左栏：
 
 设置项顺序：iOS Device、Bluetooth、Theme、Now Playing Background、USB Options、Boot Screen、About、Clock。
 
-- **iOS Device**：第一行 `Battery`，显示 `CHG` / `NOT CHG` 和电量百分比（iPod 不提供电量时显示 `--%`）；其后是 iAP2/AFC 模式切换和同步操作。
+- **iOS Device**：iAP2/AFC 模式切换、缓存统计和 iAP2 状态；`Battery` 行放在详情最下方（`iAP2 Status` 之后），显示 `CHG` / `NOT CHG` 和电量百分比（iPod 不提供电量时显示 `--%`）。
 
 ```text
 ┌──────────────────────────────────────┬──────────────────────────────┐
@@ -520,6 +520,7 @@ Queue 显示时的左栏：
   - 确认后写入系统时间和 RX8130CE RTC；模拟器仍使用内存 offset。
 - 触摸两侧都可操作。进入标签页时光标总是回到左栏，并回到该页之前选中的行。
 - Back 的顺序：右栏 → 左栏；已在左栏且不在第 1 行时 Back 回到第 1 行；已在第 1 行时 Back 返回 Now Playing。
+- Albums 的 Back 不会停在 `Shuffle All`：从任意专辑 Back 会选中第 1 张专辑并把 `Shuffle All` 滚出视野；已在第 1 张或 `Shuffle All` 时 Back 直接返回 Now Playing。
 
 ---
 
