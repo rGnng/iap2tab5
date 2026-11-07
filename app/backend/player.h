@@ -38,11 +38,13 @@ typedef struct {
 typedef struct {
     uint64_t id;
     uint64_t artist_id;
+    uint64_t album_pid;   /* original SQLite/iAP2 album persistent ID */
     char title[80];
     char artist[64];
     uint16_t year;
     uint16_t track_count;
     uint32_t color;      /* 0xRRGGBB fallback shade */
+    uint32_t date_added; /* AFC Unix timestamp, 0 when unknown */
     char cover[192];     /* LVGL path, e.g. A:/.../covers/000.png */
     uint16_t cover_index; /* index into the packed raw thumbnail files */
 } player_album_t;
@@ -107,6 +109,15 @@ bool player_artwork_copy(uint8_t * dst, size_t len);
 /* Remote AFC artwork path for an album ID (real imported library only). */
 bool player_artwork_remote(uint64_t album_id, char * out, size_t out_len);
 bool player_album_get(int index, player_album_t *out);
+
+/* Album list order: 0 = added date, 1 = name, 2 = year.  Sorting is applied
+ * in place; album IDs and track associations stay stable. */
+void player_sort_albums(int field, bool desc);
+
+/* iAP2 media library update: remember when an album PID was first seen.
+ * Used as the local fallback order for albums without an AFC date. */
+void player_note_iap2_album(uint64_t album_pid);
+
 int player_artist_count(void);
 bool player_artist_get(int index, player_artist_t *out);
 int player_song_count(void);

@@ -8,6 +8,9 @@
 #include "app_config.h"
 #include "star_store.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "iap2_host.h"
 static const char * TAG = "player";
 #endif
@@ -15,6 +18,7 @@ static const char * TAG = "player";
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #ifndef MOCK_ASSET_DIR
 #define MOCK_ASSET_DIR "."
@@ -76,6 +80,41 @@ static bool real_library;
 static MOCK_LARGE_BSS char artwork_remote[MAX_ALBUMS][128];
 static int artwork_count;
 
+/* iAP2 album first-seen order.  The AFC date is authoritative when present;
+ * this map only provides the local fallback for albums missing that date. */
+#define ALBUM_SEEN_SLOTS 8192u
+typedef struct {
+    uint64_t pid;
+    uint32_t seq;
+} album_seen_t;
+
+static MOCK_LARGE_BSS album_seen_t album_seen[ALBUM_SEEN_SLOTS];
+static uint32_t album_seen_next_seq = 1;
+static uint32_t album_seen_batch_seq;
+static int64_t album_seen_batch_last_us;
+static bool album_seen_dirty;
+static int64_t album_seen_dirty_since_us;
+
+static int album_sort_field;
+static bool album_sort_desc = true;
+
+#if defined(ESP_PLATFORM)
+static SemaphoreHandle_t album_seen_lock;
+
+static void album_seen_lock_take(void)
+{
+    if(album_seen_lock != NULL) xSemaphoreTake(album_seen_lock, portMAX_DELAY);
+}
+
+static void album_seen_lock_give(void)
+{
+    if(album_seen_lock != NULL) xSemaphoreGive(album_seen_lock);
+}
+#else
+static void album_seen_lock_take(void) { }
+static void album_seen_lock_give(void) { }
+#endif
+
 static void copy_str(char *dst, size_t size, const char *src)
 {
     if(size == 0) return;
@@ -84,6 +123,245 @@ static void copy_str(char *dst, size_t size, const char *src)
     if(n > 0) memcpy(dst, src, n);
     dst[n] = '\0';
 }
+
+static uint32_t album_seen_hash(uint64_t pid)
+{
+    pid ^= pid >> 33;
+    pid *= 0xff51afd7ed558ccdULL;
+    pid ^= pid >> 33;
+    return (uint32_t)pid & (ALBUM_SEEN_SLOTS - 1u);
+}
+
+/* Caller holds album_seen_lock. */
+static album_seen_t * album_seen_find_unlocked(uint64_t pid)
+{
+    if(pid == 0) return NULL;
+    uint32_t slot = album_seen_hash(pid);
+    for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS; i++) {
+        album_seen_t * entry = &album_seen[slot];
+        if(entry->pid == pid) return entry;
+        if(entry->pid == 0) return NULL;
+        slot = (slot + 1u) & (ALBUM_SEEN_SLOTS - 1u);
+    }
+    return NULL;
+}
+
+static uint32_t album_seen_seq_unlocked(uint64_t pid)
+{
+    album_seen_t * entry = album_seen_find_unlocked(pid);
+    return entry != NULL ? entry->seq : 0;
+}
+
+/* Caller holds album_seen_lock. */
+static bool album_seen_insert_unlocked(uint64_t pid, uint32_t seq)
+{
+    if(pid == 0) return false;
+    uint32_t slot = album_seen_hash(pid);
+    for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS; i++) {
+        album_seen_t * entry = &album_seen[slot];
+        if(entry->pid == pid) return false;
+        if(entry->pid == 0) {
+            entry->pid = pid;
+            entry->seq = seq;
+            return true;
+        }
+        slot = (slot + 1u) & (ALBUM_SEEN_SLOTS - 1u);
+    }
+    return false;
+}
+
+static int album_compare(const void * va, const void * vb)
+{
+    const player_album_t * a = va;
+    const player_album_t * b = vb;
+    int cmp = 0;
+
+    if(album_sort_field == 0) {
+        uint32_t ad = a->date_added;
+        uint32_t bd = b->date_added;
+        if(ad == 0 || bd == 0) {
+            if(ad == 0 && bd == 0) {
+                uint32_t as = album_seen_seq_unlocked(a->album_pid);
+                uint32_t bs = album_seen_seq_unlocked(b->album_pid);
+                cmp = (as > bs) - (as < bs);
+            }
+            else {
+                /* An album without an AFC timestamp was found after the
+                 * last AFC sync; treat it as newer. */
+                cmp = ad != 0 ? -1 : 1;
+            }
+        }
+        else {
+            cmp = (ad > bd) - (ad < bd);
+            if(cmp == 0) {
+                uint32_t as = album_seen_seq_unlocked(a->album_pid);
+                uint32_t bs = album_seen_seq_unlocked(b->album_pid);
+                cmp = (as > bs) - (as < bs);
+            }
+        }
+    }
+    else if(album_sort_field == 1) {
+        cmp = strcasecmp(a->title, b->title);
+        if(cmp == 0) cmp = strcasecmp(a->artist, b->artist);
+    }
+    else {
+        cmp = (a->year > b->year) - (a->year < b->year);
+    }
+
+    if(cmp == 0) {
+        cmp = strcasecmp(a->title, b->title);
+        if(cmp == 0) cmp = (a->id > b->id) - (a->id < b->id);
+        return cmp;
+    }
+    return album_sort_desc ? -cmp : cmp;
+}
+
+void player_sort_albums(int field, bool desc)
+{
+    if(album_count <= 1) return;
+    album_seen_lock_take();
+    album_sort_field = field;
+    album_sort_desc = desc;
+    qsort(albums, (size_t)album_count, sizeof(albums[0]), album_compare);
+    album_seen_lock_give();
+}
+
+void player_note_iap2_album(uint64_t album_pid)
+{
+#if defined(ESP_PLATFORM)
+    if(album_pid == 0) return;
+    album_seen_lock_take();
+    if(album_seen_find_unlocked(album_pid) != NULL) {
+        album_seen_lock_give();
+        return;
+    }
+    int64_t now = esp_timer_get_time();
+    if(album_seen_batch_seq == 0 ||
+       now - album_seen_batch_last_us > 5000000) {
+        album_seen_batch_seq = album_seen_next_seq++;
+    }
+    album_seen_batch_last_us = now;
+    if(album_seen_insert_unlocked(album_pid, album_seen_batch_seq)) {
+        album_seen_dirty = true;
+        album_seen_dirty_since_us = now;
+    }
+    album_seen_lock_give();
+#else
+    (void)album_pid;
+#endif
+}
+
+typedef struct __attribute__((packed)) {
+    char magic[8];
+    uint32_t version;
+    uint32_t count;
+} album_seen_header_t;
+
+typedef struct __attribute__((packed)) {
+    uint64_t pid;
+    uint32_t seq;
+} album_seen_record_t;
+
+#if defined(ESP_PLATFORM)
+static void album_seen_path(char * path, size_t size)
+{
+    snprintf(path, size, "%s/album_seen.bin", app_config_library_dir());
+}
+
+static void album_seen_load(void)
+{
+    if(!app_config_sd_ready()) return;
+    char path[160];
+    album_seen_path(path, sizeof(path));
+    FILE * f = fopen(path, "rb");
+    if(f == NULL) return;
+
+    album_seen_header_t header;
+    if(fread(&header, 1, sizeof(header), f) != sizeof(header) ||
+       memcmp(header.magic, "T5SEE001", 8) != 0 ||
+       header.version != 1 || header.count > ALBUM_SEEN_SLOTS) {
+        fclose(f);
+        return;
+    }
+
+    uint32_t max_seq = 0;
+    for(uint32_t i = 0; i < header.count; i++) {
+        album_seen_record_t rec;
+        if(fread(&rec, 1, sizeof(rec), f) != sizeof(rec)) break;
+        if(rec.pid == 0 || rec.seq == 0) continue;
+        album_seen_insert_unlocked(rec.pid, rec.seq);
+        if(rec.seq > max_seq) max_seq = rec.seq;
+    }
+    fclose(f);
+    album_seen_next_seq = max_seq + 1;
+    album_seen_batch_seq = 0;
+    album_seen_dirty = false;
+    ESP_LOGI(TAG, "album seen order loaded (%u entries)",
+             (unsigned)header.count);
+}
+
+static void album_seen_save(bool force)
+{
+    if(!album_seen_dirty || !app_config_sd_ready()) return;
+    int64_t now = esp_timer_get_time();
+    if(!force && now - album_seen_dirty_since_us < 5000000) return;
+
+    album_seen_lock_take();
+    uint32_t count = 0;
+    for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS; i++) {
+        if(album_seen[i].pid != 0 && album_seen[i].seq != 0) count++;
+    }
+
+    char path[160];
+    char tmp[168];
+    album_seen_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE * f = fopen(tmp, "wb");
+    if(f == NULL) {
+        album_seen_lock_give();
+        return;
+    }
+
+    album_seen_header_t header = {
+        .magic = "T5SEE001",
+        .version = 1,
+        .count = count,
+    };
+    bool ok = fwrite(&header, 1, sizeof(header), f) == sizeof(header);
+    if(ok) {
+        for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS && count > 0; i++) {
+            if(album_seen[i].pid == 0 || album_seen[i].seq == 0) continue;
+            album_seen_record_t rec = {
+                .pid = album_seen[i].pid,
+                .seq = album_seen[i].seq,
+            };
+            if(fwrite(&rec, 1, sizeof(rec), f) != sizeof(rec)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    if(fclose(f) != 0) ok = false;
+    if(ok) {
+        /* FATFS rename() does not replace an existing target. */
+        remove(path);
+        if(rename(tmp, path) == 0) {
+            album_seen_dirty = false;
+        }
+        else {
+            ok = false;
+        }
+    }
+    if(!ok) {
+        remove(tmp);
+        ESP_LOGW(TAG, "album seen order save failed");
+    }
+    album_seen_lock_give();
+}
+#else
+static void album_seen_load(void) { }
+static void album_seen_save(bool force) { (void)force; }
+#endif
 
 #if defined(ESP_PLATFORM)
 static bool iap2_active(iap2_state_t * state)
@@ -292,6 +570,21 @@ static uint64_t json_u64(const cJSON * object, const char * key)
     return item ? (uint64_t)item->valuedouble : 0;
 }
 
+/* Album persistent IDs are emitted as 16-hex strings to preserve all 64
+ * bits through cJSON's double-backed numbers. */
+static uint64_t json_u64_hex(const cJSON * object, const char * key)
+{
+    const cJSON * item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if(item == NULL) return 0;
+    if(cJSON_IsString(item) && item->valuestring != NULL) {
+        return strtoull(item->valuestring, NULL, 16);
+    }
+    if(cJSON_IsNumber(item)) {
+        return (uint64_t)item->valuedouble;
+    }
+    return 0;
+}
+
 static const char * json_str(const cJSON * object, const char * key)
 {
     const cJSON * item = cJSON_GetObjectItemCaseSensitive(object, key);
@@ -308,10 +601,12 @@ typedef struct {
 typedef struct {
     uint64_t id;
     uint64_t artist_id;
+    uint64_t album_pid;
     uint32_t year;
     uint32_t track_count;
     uint32_t color;
     uint32_t cover_index;
+    uint32_t date_added;
     char title[80];
     char artist[64];
 } lib_album_t;
@@ -352,14 +647,12 @@ static bool load_library_bin(const char * path)
     if(f == NULL) return false;
 
     uint8_t header[36];
-    if(fread(header, 1, 32, f) != 32) {
+    if(fread(header, 1, sizeof(header), f) != sizeof(header)) {
         fclose(f);
         return false;
     }
-    bool v2 = memcmp(header, "T5LIB002", 8) == 0 &&
-              rd_le32(header + 8) == 2;
-    if(!v2 && !(memcmp(header, "T5LIB001", 8) == 0 &&
-                rd_le32(header + 8) == 1)) {
+    if(memcmp(header, "T5LIB003", 8) != 0 ||
+       rd_le32(header + 8) != 3) {
         fclose(f);
         return false;
     }
@@ -368,15 +661,7 @@ static bool load_library_bin(const char * path)
     uint32_t wl = rd_le32(header + 16);
     uint32_t wt = rd_le32(header + 20);
     uint32_t wp = rd_le32(header + 24);
-    uint32_t wc = 0;
-    if(v2) {
-        uint8_t reserved[4];
-        if(fread(reserved, 1, sizeof(reserved), f) != sizeof(reserved)) {
-            fclose(f);
-            return false;
-        }
-        wc = rd_le32(header + 28);
-    }
+    uint32_t wc = rd_le32(header + 28);
 
     uint32_t ca = wa < MAX_ARTISTS ? wa : MAX_ARTISTS;
     uint32_t cl = wl < MAX_ALBUMS ? wl : MAX_ALBUMS;
@@ -407,10 +692,12 @@ static bool load_library_bin(const char * path)
         memset(a, 0, sizeof(*a));
         a->id = w.id;
         a->artist_id = w.artist_id;
+        a->album_pid = w.album_pid;
         a->year = (uint16_t)w.year;
         a->track_count = (uint16_t)w.track_count;
         a->color = w.color;
         a->cover_index = (uint16_t)w.cover_index;
+        a->date_added = w.date_added;
         copy_str(a->title, sizeof(a->title), w.title);
         copy_str(a->artist, sizeof(a->artist), w.artist);
     }
@@ -559,6 +846,8 @@ static void load_library(void)
             memset(album, 0, sizeof(*album));
             album->id = json_u64(item, "id");
             album->artist_id = json_u64(item, "artist_id");
+            album->album_pid = json_u64_hex(item, "album_pid");
+            album->date_added = (uint32_t)json_u64(item, "date_added");
             copy_str(album->title, sizeof(album->title), json_str(item, "title"));
             copy_str(album->artist, sizeof(album->artist), json_str(item, "artist"));
             album->year = (uint16_t)json_u64(item, "year");
@@ -670,9 +959,22 @@ void player_init(void)
     charging = false;
     revision = 1;
 
+#if defined(ESP_PLATFORM)
+    if(album_seen_lock == NULL) {
+        album_seen_lock = xSemaphoreCreateMutex();
+    }
+#endif
+    memset(album_seen, 0, sizeof(album_seen));
+    album_seen_next_seq = 1;
+    album_seen_batch_seq = 0;
+    album_seen_batch_last_us = 0;
+    album_seen_dirty = false;
+    album_seen_dirty_since_us = 0;
+
     load_library();
 
 #if defined(ESP_PLATFORM)
+    album_seen_load();
     /* stars.csv is the source of truth across reboots. It is per-library, so
      * switching iPods cannot leak stars into another media library. */
     if(app_config_sd_ready()) {
@@ -703,7 +1005,10 @@ void player_init(void)
 void player_tick(void)
 {
 #if defined(ESP_PLATFORM)
-    /* iAP2 pushes state from the host task; AFC has no playback at all. */
+    /* iAP2 pushes state from the host task; AFC has no playback at all.
+     * The UI tick is still a good place to flush the compact iAP2 album
+     * seen-order sidecar without blocking the USB task. */
+    album_seen_save(false);
     return;
 #else
     if(status != PLAYER_PLAYING || queue_count <= 0) return;

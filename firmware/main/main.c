@@ -7,6 +7,8 @@
 
 #include "app_config.h"
 #include "ble_remote.h"
+#include "charge.h"
+#include "debug_log.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -14,7 +16,9 @@
 #include "feedback.h"
 #include "serial_input.h"
 #include "ui.h"
+#include "boot.h"
 #include "player.h"
+#include "rtc_time.h"
 #include "usb_hid_input.h"
 #include "usbmux_host.h"
 #include "lockdown_client.h"
@@ -27,6 +31,9 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_hosted.h"
+#include "esp_hosted_event.h"
+#include "esp_timer.h"
 #include "esp_spiffs.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -53,6 +60,26 @@ static int s_applied_sound = -1;
 static int s_applied_wifi_mode = -1;
 static int s_applied_brightness = -1;
 static volatile bool s_save_pending;
+
+/* 0 = USB-A HS only, 1 = USB-C FS only, 2 = both root ports.
+ *
+ * Dual-host is verified on the Tab5 (USB-A HS iPod + USB-C FS D100H behind
+ * a powered hub). */
+#define ENABLE_USB_DUAL_HOST 1
+
+static unsigned usb_peripheral_map_for_mode(uint8_t mode)
+{
+    switch(mode) {
+        case 2:
+#if ENABLE_USB_DUAL_HOST
+            return (1u << 0) | (1u << 1);
+#else
+            ESP_LOGW(TAG, "USB mode 2 requested; dual host disabled, using USB-A HS");
+            return 1u << 0;
+#endif
+        default: return 1u << 0;
+    }
+}
 
 static void apply_screen_flip(void)
 {
@@ -175,14 +202,25 @@ static void ui_afc_status_handler(ui_afc_status_t * out)
              out->library_tracks);
     struct stat lib_st;
     if(stat(app_config_library_bin_path(), &lib_st) == 0) {
+        out->library_db_bytes = (uint64_t)lib_st.st_size;
         struct tm tmv;
         localtime_r(&lib_st.st_mtime, &tmv);
         strftime(out->library_updated, sizeof(out->library_updated),
                  "%Y-%m-%d %H:%M", &tmv);
     }
     else {
+        out->library_db_bytes = 0;
         snprintf(out->library_updated, sizeof(out->library_updated), "—");
     }
+    char cache_path[160];
+    snprintf(cache_path, sizeof(cache_path), "%s/thumbs.bin",
+             app_config_library_dir());
+    struct stat cache_st;
+    out->cover_cache_bytes = stat(cache_path, &cache_st) == 0
+                                 ? (uint64_t)cache_st.st_size : 0;
+    snprintf(out->iap2_status, sizeof(out->iap2_status), "%s",
+             app_config_iap2_mode() ? iap2_host_status()
+                                    : "Disabled (AFC mode)");
 
     if(!out->job_active) {
         app_config_sd_info_refresh_idle();
@@ -271,7 +309,7 @@ static void afc_job_task(void * arg)
     app_config_save();
     ESP_LOGW(TAG, "AFC job done; switching back to iAP2");
     vTaskDelay(pdMS_TO_TICKS(600));
-    esp_restart();
+    web_server_reboot();
     vTaskDelete(NULL);
 }
 
@@ -283,7 +321,7 @@ static void ui_afc_action_handler(int action)
             app_config_save();
             ESP_LOGW(TAG, "AFC pair/connect: switching to AFC config 4");
             vTaskDelay(pdMS_TO_TICKS(350));
-            esp_restart();
+            web_server_reboot();
         }
         else if(afc_client_is_ready()) {
             xTaskCreate(afc_probe_task, "afc_probe", 6144, NULL, 4, NULL);
@@ -297,7 +335,7 @@ static void ui_afc_action_handler(int action)
         app_config_save();
         ESP_LOGW(TAG, "switching to iAP2 config 2");
         vTaskDelay(pdMS_TO_TICKS(350));
-        esp_restart();
+        web_server_reboot();
         return;
     }
 
@@ -317,7 +355,7 @@ static void ui_afc_action_handler(int action)
     ESP_LOGW(TAG, "AFC %s sync queued; rebooting to AFC",
              job == 1 ? "quick" : "full");
     vTaskDelay(pdMS_TO_TICKS(350));
-    esp_restart();
+    web_server_reboot();
 }
 
 static void apply_runtime_config(void)
@@ -338,6 +376,11 @@ static void apply_runtime_config(void)
         wifi_manager_request_mode(g_app_config.wifi_mode);
         s_applied_wifi_mode = g_app_config.wifi_mode;
     }
+    if((int)g_app_config.brightness != s_applied_brightness &&
+       g_app_config.brightness <= 100) {
+        bsp_display_brightness_set(g_app_config.brightness);
+        s_applied_brightness = g_app_config.brightness;
+    }
     publish_system_config();
 }
 
@@ -357,6 +400,10 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.np_bg_mode = (uint8_t)cfg->np_bg_mode;
     g_app_config.brightness = (uint8_t)cfg->brightness;
     g_app_config.usb_mode = (uint8_t)cfg->usb_mode;
+    g_app_config.theme = (uint8_t)cfg->theme;
+    g_app_config.boot_screen = (uint8_t)cfg->boot_screen;
+    g_app_config.ble_enabled = cfg->ble_enabled != 0;
+    ble_remote_set_enabled(g_app_config.ble_enabled);
 
     s_save_pending = true;
     if(cfg->brightness != s_applied_brightness &&
@@ -370,6 +417,16 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
 static void ui_feedback_handler(int type)
 {
     feedback_play((feedback_t)type);
+}
+
+/* Settings → Clock commits the edited wall clock here.  Keeping this in
+ * app_main lets the shared UI code stay platform independent. */
+static void ui_time_changed_handler(time_t now)
+{
+    esp_err_t err = rtc_time_sync_epoch(now);
+    if(err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "time sync failed: %s", esp_err_to_name(err));
+    }
 }
 
 static void fill_ui_config(ui_system_config_t * cfg)
@@ -390,6 +447,9 @@ static void fill_ui_config(ui_system_config_t * cfg)
     cfg->np_bg_mode = g_app_config.np_bg_mode;
     cfg->brightness = g_app_config.brightness;
     cfg->usb_mode = g_app_config.usb_mode;
+    cfg->theme = g_app_config.theme;
+    cfg->boot_screen = g_app_config.boot_screen;
+    cfg->ble_enabled = g_app_config.ble_enabled ? 1 : 0;
 }
 
 static void publish_system_config(void)
@@ -434,9 +494,98 @@ static void set_preview_clock(void)
     settimeofday(&tv, NULL);
 }
 
+/* The C6 co-processor can stop responding while the P4 keeps running (UI is
+ * alive but Wi-Fi/HTTP is dead).  Use the ESP-Hosted heartbeat to detect it
+ * and reboot the host, which also resets the C6. */
+#define C6_HEARTBEAT_INTERVAL_S 5
+#define C6_HEARTBEAT_TIMEOUT_S  30
+
+static esp_timer_handle_t s_c6_timer;
+static bool s_c6_reboot_pending;
+
+static void c6_watchdog_timeout(void * arg)
+{
+    (void)arg;
+    ESP_LOGE(TAG, "C6 watchdog timeout; rebooting");
+    web_server_reboot();
+}
+
+static void c6_event_handler(void * arg, esp_event_base_t base,
+                             int32_t id, void * data)
+{
+    (void)arg;
+    (void)data;
+    if(base != ESP_HOSTED_EVENT) return;
+
+    if(id == ESP_HOSTED_EVENT_CP_HEARTBEAT) {
+        if(s_c6_timer != NULL && !s_c6_reboot_pending) {
+            esp_timer_stop(s_c6_timer);
+            esp_timer_start_once(s_c6_timer,
+                                 (uint64_t)C6_HEARTBEAT_TIMEOUT_S * 1000000ULL);
+        }
+    }
+    else if(id == ESP_HOSTED_EVENT_TRANSPORT_FAILURE) {
+        if(!s_c6_reboot_pending) {
+            s_c6_reboot_pending = true;
+            ESP_LOGE(TAG, "C6 transport failure; rebooting");
+            if(s_c6_timer != NULL) {
+                esp_timer_stop(s_c6_timer);
+                esp_timer_start_once(s_c6_timer, 2000000ULL);
+            }
+        }
+    }
+}
+
+static void c6_watchdog_start(void)
+{
+    esp_err_t err = esp_event_handler_instance_register(
+        ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID, c6_event_handler, NULL, NULL);
+    if(err != ESP_OK) {
+        ESP_LOGW(TAG, "C6 event handler registration failed: %s",
+                 esp_err_to_name(err));
+    }
+
+    const esp_timer_create_args_t args = {
+        .callback = c6_watchdog_timeout,
+        .arg = NULL,
+        .name = "c6_wd",
+    };
+    if(esp_timer_create(&args, &s_c6_timer) != ESP_OK) {
+        ESP_LOGW(TAG, "C6 watchdog timer creation failed");
+        s_c6_timer = NULL;
+        return;
+    }
+
+    esp_hosted_coprocessor_fwver_t ver;
+    if(esp_hosted_get_coprocessor_fwversion(&ver) == ESP_OK) {
+        ESP_LOGI(TAG, "C6 firmware %u.%u.%u", ver.major1, ver.minor1,
+                 ver.patch1);
+    }
+    else {
+        ESP_LOGW(TAG, "C6 firmware version query failed");
+    }
+
+    err = esp_hosted_configure_heartbeat(true, C6_HEARTBEAT_INTERVAL_S);
+    if(err == ESP_OK) {
+        ESP_LOGI(TAG, "C6 heartbeat enabled (%ds interval, %ds timeout)",
+                 C6_HEARTBEAT_INTERVAL_S, C6_HEARTBEAT_TIMEOUT_S);
+        esp_timer_start_once(s_c6_timer,
+                             (uint64_t)C6_HEARTBEAT_TIMEOUT_S * 1000000ULL);
+    }
+    else {
+        ESP_LOGW(TAG, "C6 heartbeat unavailable: %s", esp_err_to_name(err));
+    }
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "IAP2 Tab5 preview firmware starting");
+    /* Install the in-memory log mirror before anything else so boot and
+     * Wi-Fi/USB logs are available from the web debug page. */
+    debug_log_init();
+
+    ESP_LOGI(TAG, "IAP2 Tab5 preview firmware starting (build %s %s)",
+             __DATE__, __TIME__);
+    ESP_LOGI(TAG, "reset reason: %d", (int)esp_reset_reason());
 
     esp_err_t nvs_err = nvs_flash_init();
     if(nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -446,6 +595,7 @@ void app_main(void)
     }
 
     app_config_init();
+    debug_log_set_sd_enabled(g_app_config.debug_log);
 
     setenv("TZ", "CST-8", 1);
     tzset();
@@ -500,6 +650,16 @@ void app_main(void)
     }
     s_display = display;
 
+    /* The BSP initialises the shared I2C bus while starting the display, so
+     * the RTC can only be probed after this point. */
+    esp_err_t rtc_err = rtc_time_init();
+    if(rtc_err == ESP_OK) {
+        ESP_LOGI(TAG, "RTC ready%s", rtc_time_available() ? "" : " (not found)");
+    }
+    else {
+        ESP_LOGW(TAG, "RTC init failed: %s", esp_err_to_name(rtc_err));
+    }
+
     /* The panel is native 720x1280; the UI is designed for 1280x720.
      * screen_flip=180 rotates the landscape UI the other way up. */
     lv_display_set_rotation(display, g_app_config.screen_flip == 180
@@ -520,6 +680,7 @@ void app_main(void)
     ui_set_network_status("WiFi off", "--");
     ui_set_system_config_changed_cb(ui_system_config_changed);
     ui_set_feedback_cb(ui_feedback_handler);
+    ui_set_time_changed_cb(ui_time_changed_handler);
     ui_set_afc_status_cb(ui_afc_status_handler);
     ui_set_afc_action_cb(ui_afc_action_handler);
     ui_set_afc_sync_mode(!g_app_config.iap2_mode);
@@ -539,16 +700,22 @@ void app_main(void)
     }
     lv_indev_t * touch = bsp_display_get_input_dev();
     if(touch != NULL) ui_attach_touch(touch);
+    if(g_app_config.boot_screen == 1) {
+        boot_ui_start(NULL);
+    }
     lv_refr_now(display);
     bsp_display_unlock();
 
     bsp_display_backlight_on();
     bsp_display_brightness_set(g_app_config.brightness);
+    /* Keep the QC/NTC pin untouched at boot until the charge path has been
+     * validated; only enable the charger. */
+    charge_set_enabled(g_app_config.charge_enabled);
     serial_input_start();
 
     usb_host_core_set_apple_config(g_app_config.iap2_mode ? 2 : 4);
-    usb_host_core_set_peripheral_map(g_app_config.usb_mode ? (1u << 1)
-                                                           : (1u << 0));
+    usb_host_core_set_peripheral_map(
+        usb_peripheral_map_for_mode(g_app_config.usb_mode));
     if(usb_host_core_start() == ESP_OK) {
         /* The HID class driver runs in both modes. It skips the iPod's own
          * HID interface and only owns the Ulanzi D100H / normal keyboards. */
@@ -583,9 +750,14 @@ void app_main(void)
         ui_set_network_status("WiFi unavailable", "--");
     }
 
+    /* Watch the ESP-Hosted/C6 link; a hung C6 otherwise needs a manual
+     * power cycle even though the P4 UI keeps running. */
+    c6_watchdog_start();
+
     /* BLE is on the C6 via ESP-Hosted as well. Start it after the hosted
      * transport is up from Wi-Fi initialization. */
     ble_remote_start();
+    ble_remote_set_enabled(g_app_config.ble_enabled);
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));

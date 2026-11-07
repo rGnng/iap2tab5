@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,11 @@ void ui_init(void);
 /** Feed one logical key event from the HID/keyboard layer. */
 void ui_handle_key(ui_key_t key);
 
+/** Apply a burst of the same key in one UI pass.  Used by rotary input so a
+ * fast spin updates the final selection once instead of queueing one frame
+ * per detent. */
+void ui_handle_key_repeat(ui_key_t key, int count);
+
 /** Jump directly to a screen by zero-based index (simulator/debug only). */
 void ui_select_screen(int index);
 
@@ -76,7 +82,10 @@ typedef struct {
     int touch_enabled;
     int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
     int brightness;        /* 0..100 */
-    int usb_mode;          /* 0 = host, 1 = OTG */
+    int usb_mode;          /* 0 = USB-A HS, 2 = USB-A HS + USB-C FS */
+    int theme;             /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */
+    int boot_screen;       /* 0 = off, 1 = KCN4M1 boot animation */
+    int ble_enabled;       /* Bluetooth remote on/off */
 } ui_system_config_t;
 
 /* Applies saved settings before ui_init(). */
@@ -84,6 +93,15 @@ void ui_apply_saved_settings(const ui_system_config_t *cfg);
 
 void ui_set_system_config(const ui_system_config_t *cfg);
 void ui_set_system_config_changed_cb(void (*cb)(const ui_system_config_t *cfg));
+
+/** Called when the user commits a new wall clock in Settings → Clock.
+ *  The firmware writes it to the RTC/system clock. */
+void ui_set_time_changed_cb(void (*cb)(time_t now));
+
+/** Tell the UI that the system clock was set externally (web browser sync).
+ *  Clears any temporary time offset and refreshes the clock labels. */
+void ui_clock_synced(void);
+
 void ui_set_network_status(const char *status, const char *ip);
 void ui_system_toggle_screen_flip(void);
 
@@ -148,6 +166,9 @@ typedef struct {
     int library_tracks;
     char library_db_item[64];
     char library_updated[32];
+    uint64_t library_db_bytes;
+    uint64_t cover_cache_bytes;
+    char iap2_status[96];
 } ui_afc_status_t;
 
 enum {

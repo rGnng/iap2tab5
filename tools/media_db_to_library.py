@@ -38,11 +38,11 @@ PALETTE = [
     0x5F5F8F, 0x8F7F2F, 0x3F7F5F, 0x7F3F3F, 0x3F5F8F, 0x7F5F3F,
 ]
 
-BIN_MAGIC = b"T5LIB002"
-BIN_VERSION = 2
+BIN_MAGIC = b"T5LIB003"
+BIN_VERSION = 3
 BIN_HEADER = struct.Struct("<8sIIIIIII")
 BIN_ARTIST = struct.Struct("<Q64s")
-BIN_ALBUM = struct.Struct("<QQIIII80s64s")
+BIN_ALBUM = struct.Struct("<QQQIIIII80s64s")
 BIN_TRACK = struct.Struct("<QQQIHH96s64s64s")
 BIN_PLAYLIST = struct.Struct("<Q64sI")
 BIN_ARTWORK = struct.Struct("<I128s")
@@ -60,6 +60,19 @@ def pick(columns: list[str], *names: str) -> str | None:
         if name in columns:
             return name
     return None
+
+
+APPLE_EPOCH = 978307200
+
+
+def apple_to_unix(value) -> int:
+    try:
+        ts = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if ts <= 0:
+        return 0
+    return int(ts + APPLE_EPOCH)
 
 
 def color_for(text: str) -> int:
@@ -108,7 +121,7 @@ def load_new_schema(conn: sqlite3.Connection):
     tracks = []
     rows = conn.execute("""
         SELECT i.item_pid, i.album_pid, i.album_artist_pid, i.item_artist_pid,
-               i.track_number, i.disc_number,
+               i.track_number, i.disc_number, i.date_added,
                e.title, e.total_time_ms, e.year
         FROM item i JOIN item_extra e ON e.item_pid = i.item_pid
         WHERE i.in_my_library != 0 AND i.media_type = 8
@@ -132,6 +145,7 @@ def load_new_schema(conn: sqlite3.Connection):
             "track_no": int(row["track_number"] or 0),
             "disc": int(row["disc_number"] or 1),
             "year": int(row["year"] or 0),
+            "date_added": apple_to_unix(row["date_added"]),
         })
 
     playlists = []
@@ -249,6 +263,7 @@ def load_old_schema(conn: sqlite3.Connection):
     duration_col = pick(item_cols, "duration", "duration_ms", "length", "total_time")
     track_no_col = pick(item_cols, "track_number", "track", "track_no")
     year_col = pick(item_cols, "year")
+    date_added_col = pick(item_cols, "date_added", "dateadded")
 
     where = [f'"{item_title_col}" IS NOT NULL', f'"{item_title_col}" != ""']
     if "is_music" in item_cols:
@@ -283,6 +298,8 @@ def load_old_schema(conn: sqlite3.Connection):
             "track_no": int(row[track_no_col] or 0) if track_no_col else 0,
             "disc": 1,
             "year": int(row[year_col] or 0) if year_col else 0,
+            "date_added": apple_to_unix(row[date_added_col]
+                                        if date_added_col else 0),
         })
 
     playlists = []
@@ -373,6 +390,9 @@ def build_library(conn: sqlite3.Connection, args):
         album_entries.append({
             "key": key, "title": title, "artist": artist_name,
             "artist_pid": artist_pid, "year": year,
+            "album_pid": (int(key[1]) & 0xffffffffffffffff)
+                          if key[0] == "pid" else 0,
+            "date_added": max((t.get("date_added") or 0) for t in group),
             "track_count": len(group), "tracks": group,
             "artwork": artwork,
         })
@@ -448,6 +468,8 @@ def build_library(conn: sqlite3.Connection, args):
             "artist_id": artist_seq.get(album["artist_pid"], 0),
             "artist": album["artist"],
             "year": album["year"],
+            "album_pid": f'{album.get("album_pid", 0):016x}',
+            "date_added": album.get("date_added", 0),
             "track_count": album["track_count"],
             "color": color_for(album["title"] + album["artist"]),
             "cover": "",
@@ -482,8 +504,12 @@ def write_bin(path: Path, artists, albums, tracks, playlists, artwork):
                                     artist["name"].encode("utf-8")[:63]))
         for album in albums:
             f.write(BIN_ALBUM.pack(
-                album["id"], album["artist_id"], album["year"],
-                album["track_count"], album["color"], album["cover_index"],
+                album["id"], album["artist_id"],
+                int(album.get("album_pid", "0"), 16)
+                if isinstance(album.get("album_pid"), str)
+                else album.get("album_pid", 0),
+                album["year"], album["track_count"], album["color"],
+                album["cover_index"], album.get("date_added", 0),
                 album["title"].encode("utf-8")[:79],
                 album["artist"].encode("utf-8")[:63]))
         for track in tracks:

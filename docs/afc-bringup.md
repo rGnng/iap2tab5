@@ -80,8 +80,8 @@ during the TLS handshake.
 
 ## SD card and media copy
 
-The Tab5 SD card is mounted at `/sdcard` with long filenames disabled by
-FATFS, so the copied files use 8.3 names:
+The Tab5 SD card is mounted at `/sdcard`; FATFS long filenames are enabled,
+but the copied AFC database files keep 8.3 names for compatibility:
 
 ```text
 /sdcard/AFC/MLDB.SQL   <- /iTunes_Control/iTunes/MediaLibrary.sqlitedb

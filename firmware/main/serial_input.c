@@ -35,6 +35,8 @@
  *   T / W      dump MLDB.SQL / MLDB.WAL as base64 over the console
  *   Q          upload /sdcard/library.bin as base64, end with EOF
  *   B          upload /sdcard/JPFONT.TTF as base64, end with EOF
+ *   +          upload /sdcard/wifi.txt as base64, end with EOF
+ *   =          print /sdcard/wifi.txt
  *   C / E      AFC artwork sync: first 64 albums / all albums
  *   # <id>     AFC artwork sync for one album ID
  *   9 <id>     dump the current library's <id>.cov as base64 (debug)
@@ -240,6 +242,17 @@ static bool map_serial_key(int c, ui_key_t * key)
         case '7': *key = UI_KEY_7; return true;
         default: return false;
     }
+}
+
+bool serial_input_inject_key(char c)
+{
+    ui_key_t key;
+    if(!map_serial_key(c, &key)) return false;
+    if(bsp_display_lock(0)) {
+        ui_handle_key(key);
+        bsp_display_unlock();
+    }
+    return true;
 }
 
 
@@ -779,6 +792,16 @@ static void serial_input_task(void * arg)
             continue;
         }
 
+        if(c == '+') {
+            serial_file_upload(APP_WIFI_CRED_PATH);
+            continue;
+        }
+
+        if(c == '=') {
+            serial_print_file(APP_WIFI_CRED_PATH);
+            continue;
+        }
+
         if(c == 'T') {
             if(app_config_sd_ensure()) {
                 serial_dump_file("/sdcard/AFC/MLDB.SQL");
@@ -820,13 +843,14 @@ static void serial_input_task(void * arg)
         }
 
         if(c == '(' || c == ')') {
-            g_app_config.usb_mode = (c == '(') ? 1 : 0;
+            g_app_config.usb_mode = (c == '(') ? 0 : 2;
             app_config_save();
             ESP_LOGI("usb", "host peripheral -> %s; rebooting",
-                     g_app_config.usb_mode ? "USB-C OTG FS"
-                                           : "USB-A HS");
+                     g_app_config.usb_mode == 2
+                         ? "USB-A HS + USB-C FS (Both A+C)"
+                         : "USB-A HS");
             vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
+            web_server_reboot();
             continue;
         }
 
@@ -837,7 +861,7 @@ static void serial_input_task(void * arg)
                      g_app_config.iap2_mode ? "iAP2 (config 2)" :
                                               "AFC (config 4)");
             vTaskDelay(pdMS_TO_TICKS(400));
-            esp_restart();
+            web_server_reboot();
             continue;
         }
 

@@ -29,32 +29,38 @@ export PATH="/home/ops/.local/share/uv/python/cpython-3.12-linux-aarch64-gnu/bin
 . /home/ops/esp/esp-idf-5.5.6/export.sh
 ```
 
-## USB ports and USB-C OTG
-
-The Tab5 has two USB connectors, but on this board revision they are not
-equivalent:
+## USB ports and host modes
 
 | Port | P4 connection | Role |
 | --- | --- | --- |
-| USB-A (J10) | `USB2_OTG` high-speed pins 49/50 | USB host (iPod, HID keyboard) |
-| USB-C (J8) | P4 USB device / USB Serial/JTAG via R94/R95 0R | Console, flashing, device mode |
+| USB-A (J10) | `USB2_OTG` high-speed pins 49/50; VBUS switched by the BSP | USB host (iPod, HID keyboard) |
+| USB-C (J8) | FSLS PHY0 (GPIO24/25); CC1/CC2 5.1k to GND; VBUS is `USB_5VIN` input | USB Serial/JTAG console by default; FS host when powered through a hub/dock |
 
-The USB-C data lines are stuffed to the **device** path by default. The
-optional host/UART path (R96/R97 to the CH9102F, which is not populated) is
-not a USB host. The P4 full-speed OTG host pins (GPIO24/25) are not routed to
-USB-C on this revision.
+The USB-C data lines are wired to **FSLS PHY0**, not the PHY that ESP-IDF
+uses by default. `usb_host_core.c` therefore calls
+`usb_wrap_ll_phy_select(&USB_WRAP, 0)` before `usb_host_install()` when the
+FS host is selected. Without that call the FS host runs on PHY1
+(GPIO26/27), which is not connected on this board.
 
-Consequently, the `usb_mode = 1` (USB-C FS host) setting can only work after
-a board rework that moves the USB-C data path to a P4 host controller. The
-firmware keeps `peripheral_map = BIT1` support for such a reworked board and
-for R&D, but the Settings UI reports USB-C OTG as "Requires board rework" and
-does not offer a switch that would leave the console unreachable. The serial
-debug commands `(` / `)` select USB-C FS / USB-A HS and reboot, for use only
-on a reworked board.
+The USB-C port itself is a sink/device port: the CC pins have 5.1k
+pull-downs and VBUS is an input into the charger/system rail. A USB-C
+hub/dock that supplies 5V to its upstream port can power the Tab5 while the
+Tab5 uses USB-C as a host. This was verified with a Ulanzi D100H behind a USB
+hub with the battery removed. A plain hub that only draws power from the host
+will not power the Tab5.
 
-The P4 host stack can only run one of its two OTG controllers as host at a
-time, so USB-A and USB-C cannot both be hosts simultaneously even after a
-rework.
+`usb_mode` in `/sdcard/config.json`:
+
+- `0`: USB-A HighSpeed Only (default); USB-C remains a device / serial console.
+- `2`: USB-A HS & USB-C OTG (Both A+C): USB-A HS + USB-C FS dual host. Verified with an iPod on
+  USB-A and a Ulanzi D100H behind a powered USB-C hub at the same time.
+
+The two P4 OTG controllers can run as hosts simultaneously. The serial debug
+commands `(` / `)` select USB-A HS / Both A+C and reboot.
+
+See [`docs/usb-modes.md`](../docs/usb-modes.md) for the boot flow, controller
+and PHY mapping, TT limitation, OTG device caveats, web interfaces, and the
+Settings UI integration notes for `usb_mode`.
 
 ## Build
 
@@ -121,6 +127,7 @@ live in `../docs/sd/`. Two files are used:
   "screen_flip": 0,
   "wifi_mode": 0,
   "sound_enabled": true,
+  "debug_log": false,
   "volume": 65,
   "ap_ssid": "Tab5-Debug",
   "clock_12h": false,
@@ -130,7 +137,9 @@ live in `../docs/sd/`. Two files are used:
   "touch_enabled": true,
   "np_bg_mode": 2,
   "brightness": 70,
-  "usb_mode": 0
+  "usb_mode": 0,
+  "charge_enabled": true,
+  "qc_high": true
 }
 ```
 
@@ -138,7 +147,13 @@ live in `../docs/sd/`. Two files are used:
 - `wifi_mode`: `0` station, `1` open AP
 - `np_bg_mode`: `0` theme, `1` blurred cover, `2` cover gradient
 - `sort_field`: `0` add date, `1` name, `2` year
-- `usb_mode`: `0` USB-A HS host (default), `1` USB-C FS host (needs board rework)
+- `usb_mode`: `0` USB-A HS host (default), `2` USB-A HS + USB-C FS
+  dual host (Both A+C, verified). The old USB-C-FS-only value `1` is
+  normalised to `0`.
+- `charge_enabled`: `true` enables the IP2326 charger (`CHG_EN`, E2.P7);
+  can also be toggled at runtime from the web
+- `qc_high`: raw level of `E2.P5` / `nCHG_QC_EN`; debug/compatibility knob
+  for the IP2326 QC/NTC circuit
 
 Missing or invalid files fall back to built-in defaults. The firmware writes
 the file back after every settings change (one write per second at most while
@@ -165,6 +180,37 @@ Wi-Fi starts in AP mode when no station credentials are available:
 The page shows uptime/heap/SD/Wi-Fi state, edits the config above, reboots, and
 accepts a firmware `.bin` for OTA. `POST /api/config` and `POST /api/ota` are
 the useful endpoints for scripts.
+
+The debug page at `/debug` provides a live log, UI key injection, screenshots,
+USB host mode switching, reboot and OTA upload. This is the main control path
+when USB-C is in host mode and the USB Serial/JTAG console is unavailable.
+
+Useful endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/status` | JSON status (build time, USB mode, iAP2, heap, SD) |
+| `GET /api/config` / `POST /api/config` | read/write `/sdcard/config.json` |
+| `GET /api/log?since=N` | log text after sequence N (`X-Log-Seq`) |
+| `GET /api/log/stream` | live SSE log stream |
+| `POST /api/loglevel?tag=usb&level=4` | change a log tag level at runtime |
+| `POST /api/key?k=w` | inject a serial-console key into the UI |
+| `GET /api/screenshot.bmp` | 1280x720 24-bit BMP snapshot |
+| `POST /api/usbmode?mode=0\|1\|2` | select USB-A / USB-C / both and reboot |
+| `GET /api/power` | INA226 voltage/current + `usb5v_en` / `chg_en` / `chg_stat` |
+| `POST /api/charge?en=0\|1` | enable/disable the IP2326 charger and persist it |
+| `POST /api/reboot` | reboot |
+| `POST /api/ota` | raw firmware image upload; verified over WiFi |
+
+Example OTA upload:
+
+```bash
+curl --data-binary @firmware/build55/iap2tab5.bin \
+     http://10.0.0.181/api/ota
+```
+
+A 2.7 MB image uploads in roughly 10-20 seconds on the tested C6 1.4.1
+firmware.
 
 **C6 firmware note:** the Tab5 factory ESP32-C6 runs ESP-Hosted 1.4.1, while
 the host component here is 2.13.x. The AP works, but the host logs a version
@@ -278,8 +324,10 @@ also yields to the idle task periodically so the task watchdog stays happy.
   a finger drag no longer re-renders all rows on every motion event. Page
   Up/Down still jumps one viewport, and a tap after scrolling opens/plays the
   row under the finger.
-- The menu-bar clock is seeded from the build timestamp until the RX8130CE
-  RTC driver is added.
+- The menu-bar clock is read from the RX8130CE RTC at boot. The web
+  **Sync browser time** button and Settings → Clock write the system clock
+  and the RTC; a board with an empty backup supply is seeded from the build
+  timestamp.
 - Audio prompt, Wi-Fi station/AP, SD config and the web UI are enabled.
   Camera is not. On hardware the UI shows only the connected device's library;
   with no device the library pages are empty and Now Playing shows No track.
@@ -313,9 +361,9 @@ also yields to the idle task periodically so the task watchdog stays happy.
   `<id>.cov` (360x360) RGB565 caches under `/sdcard/covers/`. The UI keeps
   a 48-entry list thumbnail cache plus dedicated mini-player/detail
   thumbnails, and a single 360 cover descriptor, all 64-byte aligned for
-  the PPA draw path. The SD card is mounted with
-  long filenames disabled, so the short `.thm` / `.cov` extensions are
-  required. See `docs/media-library-import.md`.
+  the PPA draw path. FATFS long filenames are enabled, but the cache files
+  keep the short `.thm` / `.cov` names for compatibility with older cards.
+  See `docs/media-library-import.md`.
 - TJPGD handles baseline JPEG only; progressive artwork falls back to the
   album color placeholder.
 - iAP2 Now Playing covers work end-to-end: the album ID is resolved from

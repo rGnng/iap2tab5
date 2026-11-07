@@ -1,11 +1,15 @@
 #include "web_server.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "app_config.h"
+#include "charge.h"
 #include "cJSON.h"
+#include "rtc_time.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -13,18 +17,63 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_ota_ops.h"
+#include "esp_rom_sys.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "ui.h"
+#include "bsp/esp-bsp.h"
+#include "esp_io_expander.h"
+#include "driver/i2c_master.h"
+#include "serial_input.h"
+#include "usb_hid_input.h"
 #include "usbmux_host.h"
 #include "lockdown_client.h"
 #include "afc_client.h"
 #include "iap2_host.h"
+#include "debug_log.h"
 
 static const char * TAG = "web";
 
+/* esp_restart() can stall while the USB host stack is active and then trip
+ * the watchdog.  Reset through the ROM instead; the bootloader reinitialises
+ * the PHYs and the C6 co-processor. */
+void web_server_reboot(void)
+{
+    esp_rom_software_reset_system();
+    esp_restart();
+    for(;;) {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+#define SSE_QUEUE_LEN 2
+#define SSE_BUF_SIZE  16384
+
+typedef struct __attribute__((packed)) {
+    uint16_t bf_type;
+    uint32_t bf_size;
+    uint16_t bf_reserved1;
+    uint16_t bf_reserved2;
+    uint32_t bf_off_bits;
+    uint32_t bi_size;
+    int32_t bi_width;
+    int32_t bi_height;
+    uint16_t bi_planes;
+    uint16_t bi_bit_count;
+    uint32_t bi_compression;
+    uint32_t bi_size_image;
+    int32_t bi_x_pels_per_meter;
+    int32_t bi_y_pels_per_meter;
+    uint32_t bi_clr_used;
+    uint32_t bi_clr_important;
+} bmp_header_t;
+
+_Static_assert(sizeof(bmp_header_t) == 54, "BMP header must be 54 bytes");
+
 static web_config_apply_cb_t s_apply_cb;
+static QueueHandle_t s_sse_queue;
 static char s_net_status[64] = "WiFi off";
 static char s_net_ip[32] = "--";
 
@@ -41,9 +90,15 @@ static const char * INDEX_HTML =
 "background:#4b7bec;color:#fff;border:0;border-radius:6px;font-size:15px}"
 "button.danger{background:#c0392b}pre{white-space:pre-wrap;color:#8fd}"
 "</style></head><body><h1>IAP2 Tab5 debug</h1>"
+"<p><a style='color:#8cf' href='/debug'>Live debug log / USB test</a>"
+" &middot; <a style='color:#8cf' href='/api/debuglog'>Download SD debug log</a></p>"
 "<div class='card'><b>Status</b><pre id='status'>loading...</pre>"
 "<button onclick='load()'>Refresh</button>"
 "<button class='danger' onclick='reboot()'>Reboot</button></div>"
+"<div class='card'><b>Power / charging</b><pre id='power'>loading...</pre>"
+"<label><input type='checkbox' id='charge_en'> Charge enabled (CHG_EN)</label>"
+"<label><input type='checkbox' id='qc_high'> nCHG_QC_EN high (debug)</label>"
+"<button onclick='saveCharge()'>Apply charging</button></div>"
 "<div class='card'><b>Config</b>"
 "<label>Screen flip</label><select id='screen_flip'><option value='0'>0 deg</option>"
 "<option value='180'>180 deg</option></select>"
@@ -51,9 +106,12 @@ static const char * INDEX_HTML =
 "<option value='1'>AP (open)</option></select>"
 "<label>AP SSID</label><input type='text' id='ap_ssid' maxlength='32'>"
 "<label><input type='checkbox' id='sound_enabled'> Prompt sound</label>"
+"<label><input type='checkbox' id='debug_log'> Debug log to SD</label>"
 "<label><input type='checkbox' id='iap2_mode'> iAP2 mode (USB config 2; reboot)</label>"
 "<label>Volume <span id='vol_label'>65</span>%</label>"
 "<input type='range' id='volume' min='0' max='100' step='5' oninput='vol_label.textContent=this.value'>"
+"<label>Brightness <span id='bright_label'>70</span>%</label>"
+"<input type='range' id='brightness' min='0' max='100' step='5' oninput='bright_label.textContent=this.value'>"
 "<button onclick='save()'>Save config</button></div>"
 "<div class='card'><b>Media library</b>"
 "<p>Copies MediaLibrary.sqlitedb, -wal and -shm to /sdcard/AFC "
@@ -66,19 +124,37 @@ static const char * INDEX_HTML =
 "and used for the lockdown TLS session.</p>"
 "<input type='file' id='pair'><button onclick='pair_upload()'>Upload "
 "pair.plist</button><pre id='pair_msg'></pre></div>"
+"<div class='card'><b>Device clock</b><pre id='clock'>loading...</pre>"
+"<button onclick='sync_time()'>Sync browser time</button>"
+"<pre id='time_msg'></pre></div>"
 "<div class='card'><b>Firmware update</b>"
 "<p>Upload an .bin built by idf.py. The device reboots when the update is verified.</p>"
 "<input type='file' id='fw'><button onclick='ota()'>Upload &amp; reboot</button>"
 "<pre id='ota_msg'></pre></div>"
 "<script>"
 "async function load(){let s=await(await fetch('/api/status')).json();"
-"status.textContent=JSON.stringify(s,null,2);let c=await(await fetch('/api/config')).json();"
+"status.textContent=JSON.stringify(s,null,2);"
+"clock.textContent=(s.local_time||new Date(s.epoch*1000).toLocaleString())+(s.rtc?' (RTC backed)':' (no RTC)');"
+"let c=await(await fetch('/api/config')).json();"
 "screen_flip.value=c.screen_flip;wifi_mode.value=c.wifi_mode;ap_ssid.value=c.ap_ssid;"
 "sound_enabled.checked=c.sound_enabled;iap2_mode.checked=c.iap2_mode;"
-"volume.value=c.volume;vol_label.textContent=c.volume;}"
+"debug_log.checked=c.debug_log;"
+"volume.value=c.volume;vol_label.textContent=c.volume;"
+"brightness.value=c.brightness;bright_label.textContent=c.brightness;loadPower();}"
+"async function sync_time(){let e=Math.floor(Date.now()/1000);"
+"time_msg.textContent='syncing...';let r=await fetch('/api/time',{method:'POST',"
+"headers:{'Content-Type':'application/json'},body:JSON.stringify({epoch:e})});"
+"time_msg.textContent=await r.text();load();}"
+"async function loadPower(){let p=await(await fetch('/api/power')).json();"
+"power.textContent=JSON.stringify(p,null,2);charge_en.checked=p.chg_en;"
+"qc_high.checked=p.nchg_qc_en;}"
+"async function saveCharge(){let r=await fetch('/api/charge?en='+(charge_en.checked?1:0)"
+"+'&qc='+(qc_high.checked?1:0),"
+"{method:'POST'});alert(await r.text());loadPower();}"
 "async function save(){let c={screen_flip:+screen_flip.value,wifi_mode:+wifi_mode.value,"
 "ap_ssid:ap_ssid.value,sound_enabled:sound_enabled.checked,"
-"iap2_mode:iap2_mode.checked,volume:+volume.value};"
+"iap2_mode:iap2_mode.checked,volume:+volume.value,brightness:+brightness.value,"
+"debug_log:debug_log.checked};"
 "let r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},"
 "body:JSON.stringify(c)});alert(await r.text());load();}"
 "async function reboot(){if(confirm('Reboot?')){await fetch('/api/reboot',{method:'POST'});}}"
@@ -92,10 +168,539 @@ static const char * INDEX_HTML =
 "{method:'POST',body:f});pair_msg.textContent=await r.text();load();}"
 "load();</script></body></html>";
 
+static const char * DEBUG_HTML =
+"<!doctype html><html><head><meta charset='utf-8'>"
+"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<title>Tab5 debug log</title><style>"
+"body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:14px}"
+"h1{font-size:20px;margin:0 0 8px}a{color:#8cf}"
+"button{padding:8px 12px;margin:4px 6px 4px 0;background:#4b7bec;color:#fff;"
+"border:0;border-radius:6px}button.danger{background:#c0392b}"
+"input{background:#111;color:#eee;border:1px solid #444;padding:6px;border-radius:6px}"
+"pre{white-space:pre-wrap;word-break:break-word;background:#1d1d20;border:1px solid #333;"
+"border-radius:8px;padding:10px;height:65vh;overflow:auto;color:#9fe;font-size:12px}"
+".row{max-width:1000px}.muted{color:#999;font-size:13px}"
+"</style></head><body><div class='row'>"
+"<h1>Tab5 live debug log</h1>"
+"<p><a href='/'>back to config</a> &middot; "
+"<span class='muted'>ESP_LOG is mirrored here even when the USB-C console is gone.</span></p>"
+"<p><button onclick='clearLog()'>Clear</button>"
+"<button onclick='reboot()'>Reboot</button>"
+"<button class='danger' onclick='usb(0)'>USB-A HS</button>"
+"<button class='danger' onclick='usb(2)'>Both (A+C)</button>"
+"<label>log tag <input id='tag' value='usb' size='10'></label>"
+"<label>level <input id='level' value='4' size='2'></label>"
+"<button onclick='setLevel()'>Set level</button></p>"
+"<p><button onclick=\"key('w')\">Up</button>"
+"<button onclick=\"key('s')\">Down</button>"
+"<button onclick=\"key('\\r')\">Enter</button>"
+"<button onclick=\"key('b')\">Back</button>"
+"<button onclick=\"key('[')\">Prev</button>"
+"<button onclick=\"key(']')\">Next</button>"
+"<button onclick=\"key('c')\">Menu</button>"
+"<button onclick=\"key('7')\">Play</button>"
+"<button onclick=\"key('1')\">NP</button>"
+"<button onclick=\"key('2')\">Albums</button>"
+"<button onclick=\"key('3')\">Artists</button>"
+"<button onclick=\"key('4')\">Songs</button></p>"
+"<p><a href='/api/screenshot.bmp' target='_blank'>Screenshot (BMP)</a>"
+" &middot; <input type='file' id='fw'><button onclick='ota()'>"
+"OTA upload &amp; reboot</button> <span id='ota_msg' class='muted'></span></p>"
+"<pre id='log'></pre>"
+"<script>"
+"const el=document.getElementById('log');"
+"function add(s){el.textContent+=s;if(el.textContent.length>300000)"
+"el.textContent=el.textContent.slice(-150000);el.scrollTop=el.scrollHeight;}"
+"let es=new EventSource('/api/log/stream');"
+"es.onmessage=e=>add(e.data+'\\n');"
+"es.onerror=()=>add('[stream disconnected; retrying]\\n');"
+"function clearLog(){el.textContent='';}"
+"async function setLevel(){let t=encodeURIComponent(document.getElementById('tag').value);"
+"let l=document.getElementById('level').value;"
+"let r=await fetch('/api/loglevel?tag='+t+'&level='+l,{method:'POST'});"
+"add(await r.text()+'\\n');}"
+"function key(k){fetch('/api/key?k='+encodeURIComponent(k),{method:'POST'});}"
+"async function usb(m){if(!confirm('Reboot with USB mode '+m+'?'))return;"
+"add(await (await fetch('/api/usbmode?mode='+m,{method:'POST'})).text()+'\\n');}"
+"async function reboot(){if(confirm('Reboot?')){"
+"await fetch('/api/reboot',{method:'POST'});}}"
+"async function ota(){let f=document.getElementById('fw').files[0];"
+"if(!f){alert('choose a .bin');return;}"
+"document.getElementById('ota_msg').textContent="
+"'uploading '+f.size+' bytes...';"
+"let r=await fetch('/api/ota',{method:'POST',body:f});"
+"document.getElementById('ota_msg').textContent=await r.text();}"
+"</script></div></body></html>";
+
+static bool query_value(httpd_req_t * req, const char * key,
+                        char * out, size_t out_len)
+{
+    char query[160];
+    if(httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+    return httpd_query_key_value(query, key, out, out_len) == ESP_OK;
+}
+
+/* httpd_query_key_value() does not percent-decode.  The debug page sends
+ * Enter/Prev/Next as %0D/%5B/%5D, so decode the value before mapping it to a
+ * serial key. */
+static void url_decode_inplace(char * value)
+{
+    char * out = value;
+    for(char * p = value; *p != '\0'; p++) {
+        if(*p == '%' && isxdigit((unsigned char)p[1]) &&
+           isxdigit((unsigned char)p[2])) {
+            char hex[3] = { p[1], p[2], '\0' };
+            *out++ = (char)strtol(hex, NULL, 16);
+            p += 2;
+        }
+        else if(*p == '+') {
+            *out++ = ' ';
+        }
+        else {
+            *out++ = *p;
+        }
+    }
+    *out = '\0';
+}
+
 static esp_err_t root_get(httpd_req_t * req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t debug_get(httpd_req_t * req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, DEBUG_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t debuglog_get(httpd_req_t * req)
+{
+    FILE * f = fopen("/sdcard/debug.log", "r");
+    if(f == NULL) {
+        return httpd_resp_send_err(
+            req, HTTPD_404_NOT_FOUND,
+            "SD debug log not found; enable Debug log to SD first");
+    }
+
+    httpd_resp_set_type(req, "text/plain");
+    char buf[4096];
+    size_t n;
+    while((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if(httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+    }
+    fclose(f);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t log_get(httpd_req_t * req)
+{
+    uint32_t since = 0;
+    char value[24];
+    if(query_value(req, "since", value, sizeof(value))) {
+        since = (uint32_t)strtoul(value, NULL, 10);
+    }
+
+    const size_t cap = 32 * 1024;
+    char * buf = malloc(cap);
+    if(buf == NULL) return httpd_resp_send_500(req);
+
+    size_t len = 0;
+    uint32_t dropped = 0;
+    uint32_t next = debug_log_read_text(since, buf, cap, &len, &dropped);
+
+    char header[24];
+    snprintf(header, sizeof(header), "%u", (unsigned)next);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "X-Log-Seq", header);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if(dropped > 0) {
+        snprintf(header, sizeof(header), "%u", (unsigned)dropped);
+        httpd_resp_set_hdr(req, "X-Log-Dropped", header);
+    }
+
+    esp_err_t err = httpd_resp_send(req, buf, (ssize_t)len);
+    free(buf);
+    return err;
+}
+
+static esp_err_t loglevel_post(httpd_req_t * req)
+{
+    char tag[32] = "*";
+    char value[8] = "4";
+    query_value(req, "tag", tag, sizeof(tag));
+    query_value(req, "level", value, sizeof(value));
+
+    int level = atoi(value);
+    if(level < ESP_LOG_NONE) level = ESP_LOG_NONE;
+    if(level > ESP_LOG_VERBOSE) level = ESP_LOG_VERBOSE;
+    esp_log_level_set(tag, (esp_log_level_t)level);
+
+    char reply[96];
+    snprintf(reply, sizeof(reply), "log level: tag '%s' -> %d", tag, level);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, reply);
+}
+
+static esp_err_t usbmode_post(httpd_req_t * req)
+{
+    char value[8] = "0";
+    query_value(req, "mode", value, sizeof(value));
+    int mode = atoi(value);
+    if(mode != 0 && mode != 2) {
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(
+            req, "invalid mode: 0 = USB-A HS, 2 = Both A+C");
+    }
+
+    g_app_config.usb_mode = (uint8_t)mode;
+    app_config_save();
+
+    const char * reply = mode == 2
+        ? "USB-A HS + USB-C FS (Both A+C) selected; rebooting"
+        : "USB-A HS host selected; rebooting";
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, reply);
+    vTaskDelay(pdMS_TO_TICKS(800));
+    web_server_reboot();
+    return ESP_OK;
+}
+
+static esp_err_t key_post(httpd_req_t * req)
+{
+    char value[8] = {0};
+    if(!query_value(req, "k", value, sizeof(value)) || value[0] == '\0') {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "missing k");
+    }
+    url_decode_inplace(value);
+
+    if(strcmp(value, "prev") == 0 || strcmp(value, "next") == 0 ||
+       strcmp(value, "play") == 0 || strcmp(value, "star") == 0) {
+        ui_key_t key = UI_KEY_PREV_TRACK;
+        if(strcmp(value, "next") == 0) key = UI_KEY_NEXT_TRACK;
+        else if(strcmp(value, "play") == 0) key = UI_KEY_7;
+        else if(strcmp(value, "star") == 0) key = UI_KEY_STAR;
+        if(bsp_display_lock(1000)) {
+            ui_handle_key(key);
+            bsp_display_unlock();
+        }
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "ok");
+    }
+
+    bool ok = serial_input_inject_key(value[0]);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, ok ? "ok" : "unknown key");
+}
+
+static esp_err_t power_get(httpd_req_t * req)
+{
+    cJSON * root = cJSON_CreateObject();
+    if(root == NULL) return httpd_resp_send_500(req);
+
+    i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = 0x41,
+        .scl_speed_hz = 100000,
+    };
+    i2c_master_dev_handle_t dev = NULL;
+    esp_err_t err = bus != NULL
+                        ? i2c_master_bus_add_device(bus, &dev_cfg, &dev)
+                        : ESP_ERR_INVALID_STATE;
+    int bus_mv = 0;
+    int current_ma = 0;
+    if(err == ESP_OK) {
+        uint8_t reg;
+        uint8_t raw[2];
+        uint16_t bus_raw = 0;
+        int16_t shunt_raw = 0;
+        uint16_t config_raw = 0;
+        reg = 0x00;
+        if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK) {
+            config_raw = (uint16_t)((raw[0] << 8) | raw[1]);
+        }
+        reg = 0x02;
+        if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK) {
+            bus_raw = (uint16_t)((raw[0] << 8) | raw[1]);
+        }
+        reg = 0x01;
+        if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK) {
+            shunt_raw = (int16_t)((raw[0] << 8) | raw[1]);
+        }
+        i2c_master_bus_rm_device(dev);
+        bus_mv = bus_raw * 5 / 4;
+        current_ma = shunt_raw * 5 / 10;
+        cJSON_AddNumberToObject(root, "shunt_raw", shunt_raw);
+        cJSON_AddNumberToObject(root, "ina226_config", config_raw);
+    }
+
+    cJSON_AddBoolToObject(root, "ina226_ok", err == ESP_OK);
+    cJSON_AddNumberToObject(root, "bus_mv", bus_mv);
+    cJSON_AddNumberToObject(root, "current_ma", current_ma);
+
+    esp_io_expander_handle_t io = bsp_io_expander1_init();
+    uint32_t level = 0, out = 0;
+    if(io != NULL) {
+        esp_io_expander_get_level(io, IO_EXPANDER_PIN_NUM_3 |
+                                          IO_EXPANDER_PIN_NUM_5 |
+                                          IO_EXPANDER_PIN_NUM_6 |
+                                          IO_EXPANDER_PIN_NUM_7, &level);
+        if(io->read_output_reg) io->read_output_reg(io, &out);
+    }
+    cJSON_AddBoolToObject(root, "usb5v_en",
+                          (out & IO_EXPANDER_PIN_NUM_3) != 0);
+    cJSON_AddBoolToObject(root, "nchg_qc_en",
+                          (out & IO_EXPANDER_PIN_NUM_5) != 0);
+    cJSON_AddBoolToObject(root, "chg_stat",
+                          (level & IO_EXPANDER_PIN_NUM_6) != 0);
+    cJSON_AddBoolToObject(root, "chg_en",
+                          (out & IO_EXPANDER_PIN_NUM_7) != 0);
+
+    char * text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if(text == NULL) return httpd_resp_send_500(req);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t send_err = httpd_resp_send(req, text, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(text);
+    return send_err;
+}
+
+static esp_err_t charge_post(httpd_req_t * req)
+{
+    char value[8] = "1";
+    char qc[8] = {0};
+    query_value(req, "en", value, sizeof(value));
+    bool enable = atoi(value) != 0;
+    bool qc_high = g_app_config.qc_high;
+    if(query_value(req, "qc", qc, sizeof(qc))) {
+        qc_high = atoi(qc) != 0;
+    }
+
+    /* Set the NTC/QC divider before enabling; the IP2326 can latch an NTC
+     * fault if EN rises while the divider is outside the normal range. */
+    esp_err_t qc_err = charge_set_qc_high(qc_high);
+    esp_err_t err = charge_set_enabled(enable);
+    if(qc_err == ESP_OK) g_app_config.qc_high = qc_high;
+    if(err == ESP_OK) g_app_config.charge_enabled = enable;
+    if(qc_err == ESP_OK || err == ESP_OK) app_config_save();
+
+    char reply[128];
+    snprintf(reply, sizeof(reply), "CHG_EN %d: %s, nCHG_QC_EN %d: %s",
+             enable ? 1 : 0, esp_err_to_name(err),
+             qc_high ? 1 : 0, esp_err_to_name(qc_err));
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, reply);
+}
+
+static esp_err_t keystate_post(httpd_req_t * req)
+{
+    char value[8] = {0};
+    char down[8] = "0";
+    query_value(req, "k", value, sizeof(value));
+    query_value(req, "down", down, sizeof(down));
+    url_decode_inplace(value);
+
+    ui_key_t key;
+    if(strcmp(value, "prev") == 0) {
+        key = UI_KEY_PREV_TRACK;
+    }
+    else if(strcmp(value, "next") == 0) {
+        key = UI_KEY_NEXT_TRACK;
+    }
+    else {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "k must be prev or next");
+    }
+
+    usb_hid_input_post_key_state(key, atoi(down) != 0);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, "ok");
+}
+
+static esp_err_t hidbit_post(httpd_req_t * req)
+{
+    char value[8] = "0";
+    query_value(req, "bit", value, sizeof(value));
+    int bit = atoi(value);
+    if(bit < 0 || bit > 11) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "bit must be 0..11");
+    }
+
+    char mode[8] = "tap";
+    query_value(req, "mode", mode, sizeof(mode));
+
+    esp_err_t err;
+    if(strcmp(mode, "press") == 0) {
+        err = iap2_host_hid_press_bit((uint8_t)bit);
+    }
+    else if(strcmp(mode, "release") == 0) {
+        err = iap2_host_hid_release();
+    }
+    else {
+        err = iap2_host_hid_raw_bit((uint8_t)bit);
+    }
+
+    char reply[64];
+    snprintf(reply, sizeof(reply), "bit %d %s: %s", bit, mode,
+             esp_err_to_name(err));
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, reply);
+}
+
+static esp_err_t screenshot_get(httpd_req_t * req)
+{
+    if(!bsp_display_lock(1000)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "display busy");
+    }
+    lv_draw_buf_t * snap = lv_snapshot_take(lv_screen_active(),
+                                            LV_COLOR_FORMAT_RGB565);
+    bsp_display_unlock();
+    if(snap == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "snapshot failed");
+    }
+
+    const uint32_t w = snap->header.w;
+    const uint32_t h = snap->header.h;
+    const uint32_t stride = snap->header.stride;
+    const uint32_t row_bytes = (w * 3 + 3) & ~3u;
+    const uint32_t image_bytes = row_bytes * h;
+
+    bmp_header_t header = {
+        .bf_type = 0x4D42, /* 'B', 'M' */
+        .bf_size = sizeof(bmp_header_t) + image_bytes,
+        .bf_off_bits = sizeof(bmp_header_t),
+        .bi_size = 40,
+        .bi_width = (int32_t)w,
+        .bi_height = (int32_t)h,
+        .bi_planes = 1,
+        .bi_bit_count = 24,
+        .bi_size_image = image_bytes,
+    };
+
+    httpd_resp_set_type(req, "image/bmp");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "inline; filename=tab5.bmp");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    if(httpd_resp_send_chunk(req, (const char *)&header,
+                             sizeof(header)) != ESP_OK) {
+        lv_draw_buf_destroy(snap);
+        return ESP_FAIL;
+    }
+
+    uint8_t * line = malloc(row_bytes);
+    if(line == NULL) {
+        lv_draw_buf_destroy(snap);
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = ESP_OK;
+    for(int32_t y = (int32_t)h - 1; y >= 0; y--) {
+        const uint16_t * src = (const uint16_t *)(snap->data +
+                                                  (uint32_t)y * stride);
+        for(uint32_t x = 0; x < w; x++) {
+            uint16_t px = src[x];
+            uint8_t r = (px >> 11) & 0x1F;
+            uint8_t g = (px >> 5) & 0x3F;
+            uint8_t b = px & 0x1F;
+            r = (uint8_t)((r << 3) | (r >> 2));
+            g = (uint8_t)((g << 2) | (g >> 4));
+            b = (uint8_t)((b << 3) | (b >> 2));
+            line[x * 3 + 0] = b;
+            line[x * 3 + 1] = g;
+            line[x * 3 + 2] = r;
+        }
+        for(uint32_t i = w * 3; i < row_bytes; i++) line[i] = 0;
+        err = httpd_resp_send_chunk(req, (const char *)line, row_bytes);
+        if(err != ESP_OK) break;
+    }
+
+    free(line);
+    lv_draw_buf_destroy(snap);
+    if(err != ESP_OK) return err;
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static void sse_stream(httpd_req_t * req)
+{
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    char * buf = malloc(SSE_BUF_SIZE);
+    if(buf == NULL) return;
+
+    if(httpd_resp_send_chunk(req, "retry: 1000\n\n",
+                             HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+        free(buf);
+        return;
+    }
+
+    uint32_t seq = 0;   /* start with the whole ring */
+    TickType_t last_send = xTaskGetTickCount();
+
+    for(;;) {
+        size_t len = 0;
+        uint32_t dropped = 0;
+        seq = debug_log_read_sse(seq, buf, SSE_BUF_SIZE, &len, &dropped);
+        if(len > 0) {
+            if(httpd_resp_send_chunk(req, buf, (ssize_t)len) != ESP_OK) break;
+            last_send = xTaskGetTickCount();
+            /* Drain the ring quickly while there is new data. */
+            continue;
+        }
+        if((xTaskGetTickCount() - last_send) >= pdMS_TO_TICKS(10000)) {
+            if(httpd_resp_send_chunk(req, ": ping\n\n",
+                                     HTTPD_RESP_USE_STRLEN) != ESP_OK) break;
+            last_send = xTaskGetTickCount();
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    free(buf);
+}
+
+static void sse_worker_task(void * arg)
+{
+    (void)arg;
+    httpd_req_t * req = NULL;
+    for(;;) {
+        if(xQueueReceive(s_sse_queue, &req, portMAX_DELAY) == pdTRUE) {
+            sse_stream(req);
+            httpd_req_async_handler_complete(req);
+        }
+    }
+}
+
+static esp_err_t log_stream_get(httpd_req_t * req)
+{
+    if(s_sse_queue == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "log stream not started");
+    }
+
+    httpd_req_t * copy = NULL;
+    esp_err_t err = httpd_req_async_handler_begin(req, &copy);
+    if(err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "async handler failed");
+    }
+
+    if(xQueueSend(s_sse_queue, &copy, 0) != pdPASS) {
+        httpd_req_async_handler_complete(copy);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "log stream busy");
+    }
+    return ESP_OK;
 }
 
 static esp_err_t config_get(httpd_req_t * req)
@@ -107,9 +712,14 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "wifi_mode", g_app_config.wifi_mode);
     cJSON_AddBoolToObject(root, "sound_enabled", g_app_config.sound_enabled);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
+    cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
+    cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
     cJSON_AddStringToObject(root, "ap_ssid", g_app_config.ap_ssid);
     cJSON_AddBoolToObject(root, "sd_ready", app_config_sd_ready());
     cJSON_AddBoolToObject(root, "iap2_mode", g_app_config.iap2_mode);
+    cJSON_AddNumberToObject(root, "usb_mode", g_app_config.usb_mode);
+    cJSON_AddBoolToObject(root, "charge_enabled", g_app_config.charge_enabled);
+    cJSON_AddBoolToObject(root, "qc_high", g_app_config.qc_high);
 
     char * text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -159,9 +769,35 @@ static esp_err_t config_post(httpd_req_t * req)
     if(cJSON_IsBool(item)) {
         g_app_config.sound_enabled = cJSON_IsTrue(item);
     }
+    item = cJSON_GetObjectItemCaseSensitive(root, "debug_log");
+    if(cJSON_IsBool(item)) {
+        bool enabled = cJSON_IsTrue(item);
+        g_app_config.debug_log = enabled;
+        debug_log_set_sd_enabled(enabled);
+    }
     item = cJSON_GetObjectItemCaseSensitive(root, "iap2_mode");
     if(cJSON_IsBool(item)) {
         app_config_set_iap2_mode(cJSON_IsTrue(item));
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "usb_mode");
+    if(cJSON_IsNumber(item)) {
+        g_app_config.usb_mode = (item->valueint == 2) ? 2 : 0;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "charge_enabled");
+    if(cJSON_IsBool(item)) {
+        bool enabled = cJSON_IsTrue(item);
+        if(enabled != g_app_config.charge_enabled) {
+            charge_set_enabled(enabled);
+            g_app_config.charge_enabled = enabled;
+        }
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "qc_high");
+    if(cJSON_IsBool(item)) {
+        bool high = cJSON_IsTrue(item);
+        if(high != g_app_config.qc_high) {
+            charge_set_qc_high(high);
+            g_app_config.qc_high = high;
+        }
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "volume");
     if(cJSON_IsNumber(item)) {
@@ -169,6 +805,13 @@ static esp_err_t config_post(httpd_req_t * req)
         if(v < 0) v = 0;
         if(v > 100) v = 100;
         g_app_config.volume = (uint8_t)v;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
+    if(cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        if(v < 0) v = 0;
+        if(v > 100) v = 100;
+        g_app_config.brightness = (uint8_t)v;
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "ap_ssid");
     if(cJSON_IsString(item) && item->valuestring[0] != '\0') {
@@ -195,12 +838,38 @@ static esp_err_t status_get(httpd_req_t * req)
 
     const esp_app_desc_t * app = esp_app_get_description();
     cJSON_AddStringToObject(root, "firmware", app->version);
+    cJSON_AddStringToObject(root, "build", __DATE__ " " __TIME__);
+    cJSON_AddNumberToObject(root, "reset_reason", (int)esp_reset_reason());
+    time_t now = time(NULL);
+    cJSON_AddNumberToObject(root, "epoch", (double)now);
+    cJSON_AddBoolToObject(root, "rtc", rtc_time_available());
+    struct tm local_tm;
+    if(localtime_r(&now, &local_tm) != NULL) {
+        char local_text[32];
+        strftime(local_text, sizeof(local_text), "%Y-%m-%d %H:%M:%S",
+                 &local_tm);
+        cJSON_AddStringToObject(root, "local_time", local_text);
+    }
+    cJSON_AddNumberToObject(root, "usb_mode", g_app_config.usb_mode);
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(root, "free_psram",
                             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddBoolToObject(root, "sd_ready", app_config_sd_ready());
+    app_config_sd_info_t sd_info;
+    if(app_config_sd_info(&sd_info)) {
+        cJSON_AddNumberToObject(root, "sd_total", (double)sd_info.total_bytes);
+        cJSON_AddNumberToObject(root, "sd_used", (double)sd_info.used_bytes);
+    }
+    cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
+    cJSON_AddBoolToObject(root, "debug_log_sd_open", debug_log_sd_file_open());
+    cJSON_AddNumberToObject(root, "debug_log_sd_lines",
+                            (double)debug_log_sd_lines());
+    cJSON_AddNumberToObject(root, "debug_log_sd_errors",
+                            (double)debug_log_sd_errors());
     cJSON_AddBoolToObject(root, "iap2_mode", g_app_config.iap2_mode);
+    cJSON_AddBoolToObject(root, "charge_enabled", g_app_config.charge_enabled);
+    cJSON_AddBoolToObject(root, "qc_high", g_app_config.qc_high);
     cJSON_AddStringToObject(root, "wifi", s_net_status);
     cJSON_AddStringToObject(root, "ip", s_net_ip);
     cJSON_AddStringToObject(root, "usbmux", usbmux_host_status());
@@ -211,6 +880,12 @@ static esp_err_t status_get(httpd_req_t * req)
                           iap2_host_is_identified());
     iap2_state_t iap2;
     if(iap2_host_get_state(&iap2)) {
+        cJSON_AddNumberToObject(root, "play_status", iap2.play_status);
+        cJSON_AddStringToObject(root, "title", iap2.title);
+        cJSON_AddNumberToObject(root, "elapsed_ms", iap2.elapsed_ms);
+        cJSON_AddNumberToObject(root, "duration_ms", iap2.duration_ms);
+        cJSON_AddBoolToObject(root, "shuffle", iap2.shuffle);
+        cJSON_AddNumberToObject(root, "repeat", iap2.repeat);
         cJSON_AddNumberToObject(root, "device_battery", iap2.battery);
         cJSON_AddBoolToObject(root, "device_charging", iap2.charging);
         cJSON_AddNumberToObject(root, "device_charging_state",
@@ -235,11 +910,140 @@ static esp_err_t status_get(httpd_req_t * req)
     return err;
 }
 
+static esp_err_t time_post(httpd_req_t * req)
+{
+    if(req->content_len == 0 || req->content_len > 256) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad size");
+    }
+
+    char body[257];
+    int received = 0;
+    while(received < (int)req->content_len) {
+        int n = httpd_req_recv(req, body + received,
+                               (int)req->content_len - received);
+        if(n <= 0) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "recv failed");
+        }
+        received += n;
+    }
+    body[received] = '\0';
+
+    cJSON * root = cJSON_Parse(body);
+    if(root == NULL) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+    }
+    cJSON * epoch_item = cJSON_GetObjectItem(root, "epoch");
+    if(!cJSON_IsNumber(epoch_item)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing epoch");
+    }
+
+    double epoch_value = epoch_item->valuedouble;
+    cJSON_Delete(root);
+
+    /* RX8130CE stores 2000-2099.  Keep a little slack for browser clocks. */
+    if(epoch_value < 946684800.0 || epoch_value > 4102444799.0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "epoch out of range");
+    }
+
+    esp_err_t err = rtc_time_sync_epoch((time_t)epoch_value);
+    if(bsp_display_lock(1000)) {
+        ui_clock_synced();
+        bsp_display_unlock();
+    }
+
+    httpd_resp_set_type(req, "text/plain");
+    if(err == ESP_OK) {
+        return httpd_resp_sendstr(req, "time synced to RTC");
+    }
+    if(err == ESP_ERR_INVALID_STATE) {
+        return httpd_resp_sendstr(req,
+                                  "system time updated; RTC unavailable");
+    }
+    return httpd_resp_sendstr(req,
+                              "RTC write failed; system time updated");
+}
+
 static esp_err_t reboot_post(httpd_req_t * req)
 {
     httpd_resp_sendstr(req, "rebooting");
-    vTaskDelay(pdMS_TO_TICKS(300));
-    esp_restart();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    web_server_reboot();
+    return ESP_OK;
+}
+
+/* Raw library.bin upload for development.  The new image is written to the
+ * per-library path and the device reboots so player_init() can load it. */
+static esp_err_t library_post(httpd_req_t * req)
+{
+    if(!app_config_sd_ready()) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "SD not ready");
+    }
+    if(req->content_len <= 0 || req->content_len > 32 * 1024 * 1024) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "bad library size");
+    }
+
+    const char * path = app_config_library_bin_path();
+    char tmp[160];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE * f = fopen(tmp, "wb");
+    if(f == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "open failed");
+    }
+
+    char buffer[4096];
+    uint8_t head[12];
+    size_t head_len = 0;
+    int remaining = req->content_len;
+    bool ok = true;
+    while(remaining > 0) {
+        int want = remaining < (int)sizeof(buffer) ? remaining
+                                                   : (int)sizeof(buffer);
+        int n = httpd_req_recv(req, buffer, want);
+        if(n <= 0) {
+            ok = false;
+            break;
+        }
+        if(head_len < sizeof(head)) {
+            size_t copy = sizeof(head) - head_len;
+            if(copy > (size_t)n) copy = (size_t)n;
+            memcpy(head + head_len, buffer, copy);
+            head_len += copy;
+        }
+        if(fwrite(buffer, 1, (size_t)n, f) != (size_t)n) {
+            ok = false;
+            break;
+        }
+        remaining -= n;
+    }
+    if(fclose(f) != 0) ok = false;
+    if(ok) {
+        ok = head_len >= sizeof(head) &&
+             memcmp(head, "T5LIB003", 8) == 0 &&
+             head[8] == 3 && head[9] == 0 && head[10] == 0 && head[11] == 0;
+    }
+    if(!ok) {
+        remove(tmp);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "invalid library image");
+    }
+    /* FATFS rename() does not replace an existing target. */
+    remove(path);
+    if(rename(tmp, path) != 0) {
+        remove(tmp);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "rename failed");
+    }
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "library OK, rebooting");
+    vTaskDelay(pdMS_TO_TICKS(800));
+    web_server_reboot();
     return ESP_OK;
 }
 
@@ -337,8 +1141,8 @@ static esp_err_t ota_post(httpd_req_t * req)
     }
 
     httpd_resp_sendstr(req, "OTA OK, rebooting");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    web_server_reboot();
     return ESP_OK;
 }
 
@@ -419,14 +1223,25 @@ void web_server_set_network_info(const char * status, const char * ip)
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 8;
-    config.stack_size = 8192;
+    config.max_uri_handlers = 24;
+    config.stack_size = 12288;
+    config.lru_purge_enable = true;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
     if(err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
         return err;
+    }
+
+    s_sse_queue = xQueueCreate(SSE_QUEUE_LEN, sizeof(httpd_req_t *));
+    if(s_sse_queue == NULL) {
+        ESP_LOGW(TAG, "SSE queue allocation failed");
+    }
+    else if(xTaskCreate(sse_worker_task, "sse_log", 8192, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "SSE worker task creation failed");
+        vQueueDelete(s_sse_queue);
+        s_sse_queue = NULL;
     }
 
     const httpd_uri_t root = {
@@ -441,11 +1256,17 @@ esp_err_t web_server_start(void)
     const httpd_uri_t status = {
         .uri = "/api/status", .method = HTTP_GET, .handler = status_get,
     };
+    const httpd_uri_t time_sync = {
+        .uri = "/api/time", .method = HTTP_POST, .handler = time_post,
+    };
     const httpd_uri_t reboot = {
         .uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post,
     };
     const httpd_uri_t ota = {
         .uri = "/api/ota", .method = HTTP_POST, .handler = ota_post,
+    };
+    const httpd_uri_t library = {
+        .uri = "/api/library", .method = HTTP_POST, .handler = library_post,
     };
     const httpd_uri_t pair = {
         .uri = "/api/pair", .method = HTTP_POST, .handler = pair_post,
@@ -453,15 +1274,66 @@ esp_err_t web_server_start(void)
     const httpd_uri_t sync = {
         .uri = "/api/sync", .method = HTTP_POST, .handler = sync_post,
     };
+    const httpd_uri_t debug = {
+        .uri = "/debug", .method = HTTP_GET, .handler = debug_get,
+    };
+    const httpd_uri_t log = {
+        .uri = "/api/log", .method = HTTP_GET, .handler = log_get,
+    };
+    const httpd_uri_t debuglog = {
+        .uri = "/api/debuglog", .method = HTTP_GET, .handler = debuglog_get,
+    };
+    const httpd_uri_t log_stream = {
+        .uri = "/api/log/stream", .method = HTTP_GET, .handler = log_stream_get,
+    };
+    const httpd_uri_t loglevel = {
+        .uri = "/api/loglevel", .method = HTTP_POST, .handler = loglevel_post,
+    };
+    const httpd_uri_t usbmode = {
+        .uri = "/api/usbmode", .method = HTTP_POST, .handler = usbmode_post,
+    };
+    const httpd_uri_t key = {
+        .uri = "/api/key", .method = HTTP_POST, .handler = key_post,
+    };
+    const httpd_uri_t screenshot = {
+        .uri = "/api/screenshot.bmp", .method = HTTP_GET,
+        .handler = screenshot_get,
+    };
+    const httpd_uri_t hidbit = {
+        .uri = "/api/hidbit", .method = HTTP_POST, .handler = hidbit_post,
+    };
+    const httpd_uri_t keystate = {
+        .uri = "/api/keystate", .method = HTTP_POST, .handler = keystate_post,
+    };
+    const httpd_uri_t power = {
+        .uri = "/api/power", .method = HTTP_GET, .handler = power_get,
+    };
+    const httpd_uri_t charge = {
+        .uri = "/api/charge", .method = HTTP_POST, .handler = charge_post,
+    };
 
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &cfg_get);
     httpd_register_uri_handler(server, &cfg_post);
     httpd_register_uri_handler(server, &status);
+    httpd_register_uri_handler(server, &time_sync);
     httpd_register_uri_handler(server, &reboot);
     httpd_register_uri_handler(server, &ota);
+    httpd_register_uri_handler(server, &library);
     httpd_register_uri_handler(server, &pair);
     httpd_register_uri_handler(server, &sync);
+    httpd_register_uri_handler(server, &debug);
+    httpd_register_uri_handler(server, &log);
+    httpd_register_uri_handler(server, &debuglog);
+    httpd_register_uri_handler(server, &log_stream);
+    httpd_register_uri_handler(server, &loglevel);
+    httpd_register_uri_handler(server, &usbmode);
+    httpd_register_uri_handler(server, &key);
+    httpd_register_uri_handler(server, &screenshot);
+    httpd_register_uri_handler(server, &hidbit);
+    httpd_register_uri_handler(server, &keystate);
+    httpd_register_uri_handler(server, &power);
+    httpd_register_uri_handler(server, &charge);
 
     ESP_LOGI(TAG, "web server started on port 80");
     return ESP_OK;

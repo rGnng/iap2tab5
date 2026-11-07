@@ -16,10 +16,13 @@
 #include "app_config.h"
 #include "iap2_auth.h"
 #include "lockdown_client.h"
+#include "player.h"
 #include "usb/usb_helpers.h"
 #include "usb/usb_host.h"
 
 static const char * TAG = "iap2";
+
+static uint64_t be64(const uint8_t * p);
 
 #define APPLE_VID        0x05AC
 #define IPOD_PID         0x12AA
@@ -134,7 +137,10 @@ static char s_artist[128];
 static char s_album[128];
 static uint64_t s_track_key;
 static char s_library_id[128];
+static char s_library_sub_id[128];
+static char s_library_revision[128];
 static bool s_library_subscribed;
+static bool s_library_resynced;
 static int s_library_items;
 static char s_device_name[64] = "iPod touch";
 static uint32_t s_elapsed_ms;
@@ -472,7 +478,10 @@ static void reset_link(void)
     s_title[0] = s_artist[0] = s_album[0] = '\0';
         s_track_key = 0;
         s_library_id[0] = '\0';
+        s_library_sub_id[0] = '\0';
+        s_library_revision[0] = '\0';
         s_library_subscribed = false;
+        s_library_resynced = false;
         s_library_items = 0;
     if(s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     while(s_txq_tail != s_txq_head) {
@@ -620,7 +629,10 @@ static void close_device(void)
         s_title[0] = s_artist[0] = s_album[0] = '\0';
         s_track_key = 0;
         s_library_id[0] = '\0';
+        s_library_sub_id[0] = '\0';
+        s_library_revision[0] = '\0';
         s_library_subscribed = false;
+        s_library_resynced = false;
         s_library_items = 0;
         s_elapsed_ms = s_duration_ms = 0;
         s_queue_index = -1;
@@ -1008,25 +1020,34 @@ static void send_library_request(void)
 
 static void send_library_updates_request(void)
 {
-    if(s_library_id[0] == '\0' || s_library_subscribed) return;
+    const char * sub_id = s_library_sub_id[0] != '\0'
+                              ? s_library_sub_id : s_library_id;
+    if(sub_id[0] == '\0' || s_library_subscribed) return;
 
     uint8_t buf[512];
     uint8_t group_buf[256];
+    uint8_t playlist_buf[128];
     pb_t b = { buf, 0, sizeof(buf) };
     pb_t g = { group_buf, 0, sizeof(group_buf) };
+    pb_t pl = { playlist_buf, 0, sizeof(playlist_buf) };
 
-    pb_str(&b, 0, s_library_id);
-    pb_str(&b, 1, "");
-    /* Same property set a car uses: 0-19, 21 and 23. Requesting
-     * unsupported IDs (20, 22, 24+) can make the device answer with an
-     * empty update. */
-    for(uint16_t i = 0; i <= 19; i++) pb_void(&g, i);
-    pb_void(&g, 21);
-    pb_void(&g, 23);
+    pb_str(&b, 0, sub_id);
+    pb_str(&b, 1, s_library_revision[0] != '\0' ? s_library_revision : "0");
+    /* Match the property set used by iap2mediactrl: all MediaItem
+     * properties (0-27) plus the MediaPlaylist property group (0-5) and
+     * the update/resident/All Songs flags. */
+    for(uint16_t i = 0; i <= 27; i++) pb_void(&g, i);
     pb_param(&b, 2, group_buf, g.len);
+    for(uint16_t i = 0; i <= 5; i++) pb_void(&pl, i);
+    pb_param(&b, 3, playlist_buf, pl.len);
+    pb_void(&b, 4);
+    pb_void(&b, 5);
+    pb_void(&b, 6);
     csm_send(0x4C03, &b);
     s_library_subscribed = true;
-    ESP_LOGI(TAG, "subscribed to media library updates: %s", s_library_id);
+    ESP_LOGI(TAG, "subscribed to media library updates: %s (rev=%s)",
+             sub_id,
+             s_library_revision[0] != '\0' ? s_library_revision : "0");
 }
 
 static void send_power_source_update(void)
@@ -1072,17 +1093,27 @@ static void send_hid_start(void)
     csm_send(0x6800, &b);
 }
 
-static void send_hid_report(uint8_t bit)
+static void send_hid_report_raw(const uint8_t report[2])
 {
-    uint8_t report[2] = { 0, 0 };
-    report[bit / 8] = (uint8_t)(1 << (bit % 8));
-
     uint8_t buf[32];
     pb_t b = { buf, 0, sizeof(buf) };
     pb_u16(&b, 0, 0x14E9);
-    pb_param(&b, 1, report, sizeof(report));
+    pb_param(&b, 1, report, 2);
     csm_send(0x6802, &b);
-    ESP_LOGI(TAG, "HID command bit %u", bit);
+}
+
+static void send_hid_report(uint8_t bit)
+{
+    uint8_t press[2] = { 0, 0 };
+    uint8_t release[2] = { 0, 0 };
+    press[bit / 8] = (uint8_t)(1 << (bit % 8));
+
+    /* The HID command is a tap: send the pressed report and then an
+     * all-zero release.  Without the release the iPod sees the key as held;
+     * next/previous then behave like scan/FF/REW instead of a track skip. */
+    send_hid_report_raw(press);
+    send_hid_report_raw(release);
+    ESP_LOGI(TAG, "HID command bit %u press+release", bit);
 }
 
 static bool find_hid_bit(const char * name, uint8_t * bit)
@@ -1301,6 +1332,8 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
             uint16_t pid = 0;
             const uint8_t * value = NULL;
             size_t value_len = 0;
+            char local_id[128] = "";
+            char any_id[128] = "";
             while(next_param(&p, end, &pid, &value, &value_len)) {
                 if(pid != 0) continue;
                 const uint8_t * q = value;
@@ -1310,54 +1343,116 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
                 size_t cvlen = 0;
                 while(next_param(&q, qend, &cid, &cv, &cvlen)) {
                     if(cid == 1 && cvlen > 0) {
-                        snprintf(s_library_id, sizeof(s_library_id), "%.*s",
+                        char uuid[128];
+                        snprintf(uuid, sizeof(uuid), "%.*s",
                                  (int)cvlen, (const char *)cv);
+                        if(any_id[0] == '\0') {
+                            snprintf(any_id, sizeof(any_id), "%s", uuid);
+                        }
+                        if(strstr(uuid, "-MPB-") != NULL ||
+                           strstr(uuid, "-mpb-") != NULL) {
+                            snprintf(local_id, sizeof(local_id), "%s", uuid);
+                        }
                     }
                 }
             }
-            ESP_LOGI(TAG, "media library information (%u bytes): id='%s'",
-                     (unsigned)len, s_library_id);
-            if(s_library_id[0] != '\0') {
-                app_config_set_library_id(s_library_id);
+#if defined(IAP2TAB5_FULL_LIBRARY_SYNC)
+            const char * chosen = local_id[0] != '\0' ? local_id : any_id;
+#else
+            const char * chosen = any_id;
+#endif
+            ESP_LOGI(TAG, "media library information (%u bytes): local='%s'",
+                     (unsigned)len, chosen);
+            if(chosen[0] != '\0') {
+                snprintf(s_library_sub_id, sizeof(s_library_sub_id), "%s",
+                         chosen);
+                app_config_set_library_id(chosen);
+                s_library_revision[0] = '\0';
+                s_library_resynced = false;
+                s_library_subscribed = false;
             }
+#if defined(IAP2TAB5_FULL_LIBRARY_SYNC)
             send_library_updates_request();
+#endif
             break;
         }
         case 0x4C04: {
-            /* MediaLibraryUpdate: count the item groups in parameter 2 and
-             * log completion. The real track keys are the SQLite item_pid
-             * values already present in the binary library. */
+            /* MediaLibraryUpdate: extract the album PID from each item
+             * group so the iAP2-side discovery order can be recorded, and
+             * handle the device's delete-phase handshake. */
             const uint8_t * p = body;
             const uint8_t * end = body + len;
             uint16_t pid = 0;
             const uint8_t * value = NULL;
             size_t value_len = 0;
             int progress = -1;
+            int last7 = -1;
+            bool has_items = false;
+            bool has_playlists = false;
+            bool reset_seen = false;
+            static int update_msgs;
+            update_msgs++;
             while(next_param(&p, end, &pid, &value, &value_len)) {
-                if(pid == 2) {
+                if(update_msgs <= 12) {
+                    ESP_LOGI(TAG, "library param %u len %u first=%02x",
+                             (unsigned)pid, (unsigned)value_len,
+                             value_len > 0 ? value[0] : 0);
+                }
+                if(pid == 1 && value_len > 0) {
+                    snprintf(s_library_revision, sizeof(s_library_revision),
+                             "%.*s", (int)value_len, (const char *)value);
+                }
+                else if(pid == 2) {
+                    has_items = true;
                     const uint8_t * q = value;
                     const uint8_t * qend = value + value_len;
                     uint16_t cid = 0;
                     const uint8_t * cv = NULL;
                     size_t cvlen = 0;
+                    uint64_t album_pid = 0;
                     while(next_param(&q, qend, &cid, &cv, &cvlen)) {
-                        (void)cid;
-                        s_library_items++;
+                        /* Property 5 is the album persistent ID; remember
+                         * when this album was first seen so the album list
+                         * still has a stable order without an AFC date. */
+                        if(cid == 5 && cvlen == 8) {
+                            album_pid = be64(cv);
+                        }
                     }
+                    s_library_items++;
+                    if(album_pid != 0) {
+                        player_note_iap2_album(album_pid);
+                    }
+                }
+                else if(pid == 3) {
+                    has_playlists = true;
+                }
+                else if(pid == 6) {
+                    reset_seen = true;
                 }
                 else if(pid == 7 && value_len >= 1) {
                     progress = value[0];
+                    last7 = value[0];
                 }
             }
-            static int update_msgs;
-            update_msgs++;
-            if(update_msgs <= 8 || (s_library_items % 1000) == 0) {
+            if(update_msgs <= 8 || (update_msgs % 1000) == 0) {
                 ESP_LOGI(TAG, "library update msg %d: total groups=%d progress=%d",
                          update_msgs, s_library_items, progress);
             }
-            if(progress >= 100) {
+            if((last7 == 0x5A || reset_seen) &&
+               !has_items && !has_playlists &&
+               s_library_revision[0] != '\0' && !s_library_resynced) {
+                /* The first pass only says "delete everything".  Subscribe
+                 * again with the revision the device just reported so it
+                 * sends the full item/playlist database. */
+                s_library_resynced = true;
+                s_library_subscribed = false;
+                ESP_LOGI(TAG, "library delete phase complete; resubscribing");
+                send_library_updates_request();
+            }
+            else if(progress >= 100) {
                 ESP_LOGI(TAG, "media library updates complete: %d groups",
                          s_library_items);
+                s_library_resynced = false;
             }
             break;
         }
@@ -2251,6 +2346,34 @@ esp_err_t iap2_host_hid_command(const char * name)
         return ESP_ERR_INVALID_STATE;
     }
     send_hid_report(bit);
+    return ESP_OK;
+}
+
+esp_err_t iap2_host_hid_raw_bit(uint8_t bit)
+{
+    if(bit > 11) return ESP_ERR_INVALID_ARG;
+    if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    send_hid_report(bit);
+    return ESP_OK;
+}
+
+esp_err_t iap2_host_hid_press_bit(uint8_t bit)
+{
+    if(bit > 11) return ESP_ERR_INVALID_ARG;
+    if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    uint8_t report[2] = { 0, 0 };
+    report[bit / 8] = (uint8_t)(1 << (bit % 8));
+    send_hid_report_raw(report);
+    ESP_LOGI(TAG, "HID press bit %u", bit);
+    return ESP_OK;
+}
+
+esp_err_t iap2_host_hid_release(void)
+{
+    if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    uint8_t report[2] = { 0, 0 };
+    send_hid_report_raw(report);
+    ESP_LOGI(TAG, "HID release");
     return ESP_OK;
 }
 

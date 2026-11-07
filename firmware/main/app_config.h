@@ -30,6 +30,12 @@ typedef struct {
     uint8_t np_bg_mode;
     uint8_t brightness;
     uint8_t usb_mode;
+    uint8_t theme;              /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */
+    uint8_t boot_screen;        /* 0 = off, 1 = KCN4M1 boot animation */
+    bool ble_enabled;           /* Bluetooth remote enabled */
+    bool debug_log;             /* mirror ESP_LOG to /sdcard/debug.log */
+    bool charge_enabled;        /* IP2326 CHG_EN (E2.P7) */
+    bool qc_high;               /* raw E2.P5 nCHG_QC_EN level */
     bool iap2_mode;             /* false = AFC/usbmux config 4, true = iAP2 config 2 */
 } app_config_t;
 
@@ -78,6 +84,8 @@ esp_err_t app_config_set_iap2_mode(bool enabled);
 esp_err_t app_config_set_afc_job(uint8_t job);
 uint8_t app_config_peek_afc_job(void);
 uint8_t app_config_take_afc_job(void);
+
+
 
 /* Retries mounting the SD card if it was not present at boot. */
 bool app_config_sd_ensure(void);

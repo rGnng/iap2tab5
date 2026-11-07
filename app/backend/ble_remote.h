@@ -28,6 +28,8 @@ typedef struct {
 void ble_remote_start(void);
 void ble_remote_scan_start(void);
 void ble_remote_scan_stop(void);
+void ble_remote_set_enabled(bool enabled);
+bool ble_remote_enabled(void);
 uint32_t ble_remote_revision(void);
 void ble_remote_status(ble_remote_state_t * state, char * text,
                        size_t text_len);

@@ -11,6 +11,7 @@
 #include "usb_host_core.h"
 
 #include "bsp/esp-bsp.h"
+#include "iap2_host.h"
 #include "ui.h"
 #include "ulanzi_d100h.h"
 
@@ -35,8 +36,23 @@ typedef struct {
     hid_host_driver_event_t event;
 } hid_device_event_t;
 
+typedef struct {
+    ui_key_t key;
+    bool down;
+} key_event_t;
+
 static QueueHandle_t s_device_events;
 static QueueHandle_t s_key_events;
+
+/* Previous/next behave as tap-to-skip and hold-to-rewind/fast-forward. */
+#define HOLD_MS         500
+#define HOLD_MAX_MS     8000
+
+static bool s_hold_pending;
+static bool s_hold_sent;
+static ui_key_t s_hold_key;
+static int64_t s_hold_start_us;
+static int64_t s_hold_sent_us;
 
 static uint8_t s_prev_keys[HID_KEYBOARD_KEY_MAX];
 
@@ -173,7 +189,7 @@ static void keyboard_report(const uint8_t * data, int length)
 
         ui_key_t key;
         if(hid_key_to_ui(code, &key)) {
-            xQueueSend(s_key_events, &key, 0);
+            usb_hid_input_post_key(key);
         }
     }
 
@@ -203,7 +219,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                     0x21,0xf4,0x5e,0xb7,0x1c,0x35,0x87,0xab
                 };
                 if(memcmp(data, beat, sizeof(beat)) != 0) {
-                    ESP_LOGI(TAG, "D100H vendor raw len=%u: "
+                    ESP_LOGD(TAG, "D100H vendor raw len=%u: "
                              "%02x %02x %02x %02x %02x %02x %02x %02x",
                              (unsigned)length, data[0], data[1], data[2],
                              data[3], data[4], data[5], data[6], data[7]);
@@ -219,7 +235,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                     }
                 }
                 if(nonzero) {
-                    ESP_LOGI(TAG, "D100H raw if=%u len=%u: "
+                    ESP_LOGD(TAG, "D100H raw if=%u len=%u: "
                              "%02x %02x %02x %02x %02x %02x %02x %02x",
                              params.iface_num, (unsigned)length,
                              length > 0 ? data[0] : 0,
@@ -254,17 +270,22 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                             ESP_LOGI(TAG,
                                      "D100H top-right held=%lldms key=%d",
                                      (long long)held_ms, (int)key);
-                            xQueueSend(s_key_events, &key, 0);
+                            usb_hid_input_post_key(key);
                         }
+                    }
+                    else if(id == 0x05 || id == 0x08) {
+                        usb_hid_input_post_key_state(
+                            id == 0x05 ? UI_KEY_PREV_TRACK
+                                       : UI_KEY_NEXT_TRACK, down);
                     }
                     else {
                         ui_key_t key;
                         bool mapped = ulanzi_d100h_to_ui(id, down, &key);
-                        ESP_LOGI(TAG, "D100H event id=%u down=%d mapped=%d key=%d",
+                        ESP_LOGD(TAG, "D100H event id=%u down=%d mapped=%d key=%d",
                                  (unsigned)id, (int)down, (int)mapped,
                                  mapped ? (int)key : -1);
                         if(mapped) {
-                            xQueueSend(s_key_events, &key, 0);
+                            usb_hid_input_post_key(key);
                         }
                     }
                 }
@@ -370,31 +391,127 @@ static void hid_event_task(void * arg)
     }
 }
 
+static uint8_t hold_bit_for_key(ui_key_t key)
+{
+    /* Tap uses bits 3/2 (previous/next).  Hold uses the dedicated
+     * rewind/fast-forward bits 11/10, which the iPod scans while pressed. */
+    return key == UI_KEY_PREV_TRACK ? 11 : 10;
+}
+
+static void dispatch_key_event(const key_event_t * evt)
+{
+    const ui_key_t key = evt->key;
+
+    if(key == UI_KEY_PREV_TRACK || key == UI_KEY_NEXT_TRACK) {
+        if(evt->down) {
+            if(s_hold_pending) return;
+            s_hold_pending = true;
+            s_hold_sent = false;
+            s_hold_key = key;
+            s_hold_start_us = esp_timer_get_time();
+            return;
+        }
+
+        if(!s_hold_pending || s_hold_key != key) return;
+        if(s_hold_sent) {
+            iap2_host_hid_release();
+        }
+        else if(bsp_display_lock(1000)) {
+            /* Short tap: previous/next track. */
+            ui_handle_key(key);
+            bsp_display_unlock();
+        }
+        s_hold_pending = false;
+        s_hold_sent = false;
+        return;
+    }
+
+    if(!evt->down) return;
+
+    int delta = 0;
+    if(key == UI_KEY_UP) delta = -1;
+    else if(key == UI_KEY_DOWN) delta = 1;
+
+    if(delta != 0) {
+        /* Coalesce a rotary burst.  A fast spin otherwise queues one
+         * list refresh per detent, so the UI keeps moving after the knob
+         * has stopped. */
+        for(int i = 0; i < 63; i++) {
+            key_event_t next;
+            if(xQueuePeek(s_key_events, &next, 0) != pdTRUE) break;
+            if(!next.down) break;
+            if(next.key != UI_KEY_UP && next.key != UI_KEY_DOWN) break;
+            xQueueReceive(s_key_events, &next, 0);
+            delta += next.key == UI_KEY_UP ? -1 : 1;
+        }
+        if(delta != 0 && bsp_display_lock(1000)) {
+            ui_handle_key_repeat(delta < 0 ? UI_KEY_UP : UI_KEY_DOWN,
+                                 delta < 0 ? -delta : delta);
+            bsp_display_unlock();
+        }
+        return;
+    }
+
+    if(bsp_display_lock(1000)) {
+        ESP_LOGD(TAG, "dispatch UI key=%d", (int)key);
+        ui_handle_key(key);
+        bsp_display_unlock();
+    }
+}
+
 static void key_dispatch_task(void * arg)
 {
     LV_UNUSED(arg);
-    ui_key_t key;
     for(;;) {
-        if(xQueueReceive(s_key_events, &key, portMAX_DELAY) != pdTRUE) continue;
-        if(bsp_display_lock(0)) {
-            ESP_LOGI(TAG, "dispatch UI key=%d", (int)key);
-            ui_handle_key(key);
-            bsp_display_unlock();
+        TickType_t wait = portMAX_DELAY;
+        if(s_hold_pending) {
+            int64_t deadline = s_hold_sent
+                ? s_hold_sent_us + (int64_t)HOLD_MAX_MS * 1000
+                : s_hold_start_us + (int64_t)HOLD_MS * 1000;
+            int64_t remain_us = deadline - esp_timer_get_time();
+            wait = remain_us <= 0
+                       ? 0
+                       : pdMS_TO_TICKS((remain_us + 999) / 1000);
+        }
+
+        key_event_t evt;
+        if(xQueueReceive(s_key_events, &evt, wait) == pdTRUE) {
+            dispatch_key_event(&evt);
+            continue;
+        }
+
+        if(!s_hold_pending) continue;
+        if(!s_hold_sent) {
+            iap2_host_hid_press_bit(hold_bit_for_key(s_hold_key));
+            s_hold_sent = true;
+            s_hold_sent_us = esp_timer_get_time();
+        }
+        else {
+            /* Safety release if the controller disappears while held. */
+            iap2_host_hid_release();
+            s_hold_pending = false;
+            s_hold_sent = false;
         }
     }
 }
 
 void usb_hid_input_post_key(ui_key_t key)
 {
+    usb_hid_input_post_key_state(key, true);
+}
+
+void usb_hid_input_post_key_state(ui_key_t key, bool down)
+{
     if(s_key_events != NULL) {
-        xQueueSend(s_key_events, &key, 0);
+        key_event_t evt = { .key = key, .down = down };
+        xQueueSend(s_key_events, &evt, 0);
     }
 }
 
 void usb_hid_input_start(void)
 {
     s_device_events = xQueueCreate(8, sizeof(hid_device_event_t));
-    s_key_events = xQueueCreate(16, sizeof(ui_key_t));
+    s_key_events = xQueueCreate(32, sizeof(key_event_t));
     s_ulanzi_lock = xSemaphoreCreateMutex();
     if(s_device_events == NULL || s_key_events == NULL ||
        s_ulanzi_lock == NULL) {

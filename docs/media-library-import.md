@@ -2,7 +2,7 @@
 
 The UI library pages load a compact binary library. The mock build ships
 `/spiffs/library.json`; the real imported library lives at
-`/sdcard/library.bin` (v2, with an artwork manifest) and takes precedence.
+`/sdcard/lib/<short8>/library.bin` (v3, with add timestamps and an artwork manifest) and takes precedence.
 A JSON fallback is kept for older images.
 
 ## 1. Pull the AFC database
@@ -52,18 +52,23 @@ The real library on this iPod:
 
 ```text
 2,096 albums / 20,688 tracks / 1,067 album artists / 0 user playlists
-library.bin  6,017,764 bytes  (v2, 2,090 artwork entries)
+library.bin  6,042,916 bytes  (v3, 2,090 artwork entries)
 library.json 4,022,473 bytes
 ```
 
 ```text
 artists[]  id, name
-albums[]   id, title, artist_id, artist, year, track_count, color,
-           cover, cover_index
+albums[]   id, title, artist_id, artist, year, album_pid, date_added,
+           track_count, color, cover, cover_index
 tracks[]   id, album_id, artist_id, title, artist, album, duration_sec,
            track_no, year
 playlists[] id, name, track_ids[]
 ```
+
+`date_added` is Unix seconds derived from the device database's
+`item.date_added` (Apple/Core Data epoch + 978307200); an album takes the
+maximum timestamp of its tracks. `album_pid` is the original SQLite/iAP2
+album persistent ID and is used to merge the iAP2 side-car order later.
 
 Current firmware limits: 4096 albums, 24000 tracks, 2048 artists, 32
 playlists, 1024 tracks per playlist. Albums with real artwork use
@@ -71,20 +76,34 @@ playlists, 1024 tracks per playlist. Albums with real artwork use
 artwork use `cover_index: 100`, which the UI treats as "no thumbnail" and
 draws the album color placeholder.
 
-The v2 header is:
+The v3 header is:
 
 ```text
-T5LIB002  8 bytes
+T5LIB003  8 bytes
 version / artists / albums / tracks / playlists / artwork / reserved
           <8sIIIIIII, 36 bytes total
 records   artists, albums, tracks, playlists, then artwork entries
+album     <QQQIIIII80s64s:
+          id, artist_id, album_pid, year, track_count, color,
+          cover_index, date_added, title, artist
 artwork   <I128s: album_id + remote AFC path
 ```
+
+v2 is intentionally no longer accepted: convert the old file again and
+replace it on the card.  /api/library (POST, raw body) writes the new image
+to the current per-library path and reboots the Tab5.
 
 ## 3. Push library.bin to the Tab5
 
 ```bash
 python3 tools/iap2_library_push.py /tmp/opencode/ipod-db/library.bin /dev/ttyACM0 Q
+```
+
+or over Wi-Fi:
+
+```bash
+curl --data-binary @/tmp/opencode/ipod-db/library.bin \
+     http://<tab5-ip>/api/library
 ```
 
 The firmware command `Q` writes `/sdcard/library.bin` (streamed base64, no
@@ -110,7 +129,7 @@ Serial commands used by this workflow:
 
 Artwork is fetched over AFC while the iPod is connected and the firmware is
 in AFC mode (config 4). The manifest is generated from the iOS tables
-`best_artwork_token` / `artwork`; the remote path is stored in the v2
+`best_artwork_token` / `artwork`; the remote path is stored in the v3
 `library.bin` artwork section.
 
 The 54x54 thumbnails live in one packed file per library:
@@ -169,9 +188,9 @@ The one-pass path uses the ESP32-P4 hardware JPEG decoder when the RGB565
 output fits in PSRAM (currently up to 6 MB), otherwise scaled TJPGD (1/2,
 1/4 or 1/8). Only the thumbnail is kept; the original is freed immediately.
 
-The SD card uses FATFS with long filenames disabled, so only 8.3 names are
-valid. Keep the short extensions `.thm`, `.cov`, `.jpg`, `.wbp`, `.gif`;
-`.thumb` / `.cover` / `.webp` fail with `EINVAL`.
+FATFS long filenames are enabled, but the cache paths keep the short
+extensions `.thm`, `.cov`, `.jpg`, `.wbp`, `.gif` for compatibility with
+older cards and builds.
 
 Sync commands:
 
@@ -303,3 +322,18 @@ Asteroid`; the album detail shows `運命 Disaster`, `キラキラ雨`, `鴉少�
   (serial `S`, or `player_init`) releases the stale SD LDO and remounts.
 - Loading a large `library.json` uses PSRAM; the cJSON tree and arrays are
   allocated outside internal RAM.
+
+## Album added order
+
+`library.bin` v3 carries the AFC `item.date_added` timestamp for every album
+(maximum of its tracks). The Albums page uses it for the default
+"Recently Added" order; Settings → Sort basis / Order switches between added
+date, name and year, ascending/descending.
+
+A small `/sdcard/lib/<short8>/album_seen.bin` side-car can hold the iAP2-side
+first-seen sequence for albums without an AFC date. The iAP2 full-library
+subscription is currently **disabled by default**: the USB link layer cannot
+sustain the device's 15k-message delete phase reliably (out-of-order/checksum
+errors and watchdog resets). Build with
+`-DIAP2TAB5_FULL_LIBRARY_SYNC` to enable the experimental path once the link
+window/ACK handling has been hardened.

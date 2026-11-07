@@ -35,7 +35,8 @@ static void print_usage(const char * argv0)
     printf("  --screen <1-6>        Start on a specific screen\n");
     printf("  --menubar <side>      Menubar position: left or right\n");
     printf("  --keys <list>         Inject keys, e.g. \"2,enter\" or \"context\"\n");
-    printf("  --no-boot             Skip the boot sequence\n");
+    printf("  --boot                Play the KCN4M1 boot animation\n");
+    printf("  --no-boot             Skip the boot sequence (default)\n");
     printf("  --boot-freeze <ms>    Freeze the boot sequence at a time offset\n");
     printf("  --headless            Force SDL's offscreen video driver\n");
     printf("  --help                Show this help\n\n");
@@ -251,6 +252,7 @@ int main(int argc, char ** argv)
     const char * keys = NULL;
     bool headless = false;
     bool no_boot = false;
+    bool boot_requested = false;
     int boot_freeze_ms = -1;
 
     for(int i = 1; i < argc; i++) {
@@ -275,6 +277,9 @@ int main(int argc, char ** argv)
         }
         else if(strcmp(argv[i], "--keys") == 0 && i + 1 < argc) {
             keys = argv[++i];
+        }
+        else if(strcmp(argv[i], "--boot") == 0) {
+            boot_requested = true;
         }
         else if(strcmp(argv[i], "--no-boot") == 0) {
             no_boot = true;
@@ -331,7 +336,7 @@ int main(int argc, char ** argv)
     /* The boot sequence is the default startup experience. Explicit debug
      * selections (screen/menubar/keys) keep the old "jump straight to the UI"
      * behaviour so existing screenshot commands still work. */
-    bool boot_enabled = !no_boot;
+    bool boot_enabled = (boot_requested || boot_freeze_ms >= 0) && !no_boot;
     if(boot_freeze_ms < 0 &&
        (start_screen > 0 || menubar_side != NULL || keys != NULL)) {
         boot_enabled = false;

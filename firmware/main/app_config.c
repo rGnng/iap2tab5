@@ -35,6 +35,7 @@ app_config_t g_app_config = {
     .np_bg_mode = 2,
     .brightness = 70,
     .usb_mode = 0,
+    .debug_log = false,
     .iap2_mode = true,
 };
 
@@ -126,6 +127,66 @@ static bool is_hex_str(const char * s, size_t n)
     return true;
 }
 
+/* iAP2 reports several logical libraries that share one 36-character device
+ * GUID: the local iPod library ends in "-MPB-15.7.8", while Apple Music
+ * Radio uses "-4954524C-15.7.8". Keep the shared base GUID so the SD cache
+ * stays stable across both. */
+static void library_base_id(const char * id, char * out, size_t out_len)
+{
+    out[0] = '\0';
+    if(id == NULL) return;
+
+    for(const char * p = id; *p != '\0'; p++) {
+        if(strlen(p) < 36) break;
+        bool uuid = isxdigit((unsigned char)p[0]) &&
+                    isxdigit((unsigned char)p[1]) &&
+                    isxdigit((unsigned char)p[2]) &&
+                    isxdigit((unsigned char)p[3]) &&
+                    isxdigit((unsigned char)p[4]) &&
+                    isxdigit((unsigned char)p[5]) &&
+                    isxdigit((unsigned char)p[6]) &&
+                    isxdigit((unsigned char)p[7]) &&
+                    p[8] == '-' &&
+                    isxdigit((unsigned char)p[9]) &&
+                    isxdigit((unsigned char)p[10]) &&
+                    isxdigit((unsigned char)p[11]) &&
+                    isxdigit((unsigned char)p[12]) &&
+                    p[13] == '-' &&
+                    isxdigit((unsigned char)p[14]) &&
+                    isxdigit((unsigned char)p[15]) &&
+                    isxdigit((unsigned char)p[16]) &&
+                    isxdigit((unsigned char)p[17]) &&
+                    p[18] == '-' &&
+                    isxdigit((unsigned char)p[19]) &&
+                    isxdigit((unsigned char)p[20]) &&
+                    isxdigit((unsigned char)p[21]) &&
+                    isxdigit((unsigned char)p[22]) &&
+                    p[23] == '-' &&
+                    isxdigit((unsigned char)p[24]) &&
+                    isxdigit((unsigned char)p[25]) &&
+                    isxdigit((unsigned char)p[26]) &&
+                    isxdigit((unsigned char)p[27]) &&
+                    isxdigit((unsigned char)p[28]) &&
+                    isxdigit((unsigned char)p[29]) &&
+                    isxdigit((unsigned char)p[30]) &&
+                    isxdigit((unsigned char)p[31]) &&
+                    isxdigit((unsigned char)p[32]) &&
+                    isxdigit((unsigned char)p[33]) &&
+                    isxdigit((unsigned char)p[34]) &&
+                    isxdigit((unsigned char)p[35]);
+        if(uuid) {
+            size_t n = out_len > 36 ? 36 : out_len - 1;
+            memcpy(out, p, n);
+            out[n] = '\0';
+            for(size_t i = 0; i < n; i++) {
+                out[i] = (char)toupper((unsigned char)out[i]);
+            }
+            return;
+        }
+    }
+    snprintf(out, out_len, "%s", id);
+}
+
 static void library_short_from_id(const char * id, char * out, size_t out_len)
 {
     out[0] = '\0';
@@ -167,7 +228,9 @@ static void library_short_from_id(const char * id, char * out, size_t out_len)
 
 static void library_paths_apply(const char * id)
 {
-    snprintf(s_library_id, sizeof(s_library_id), "%s", id != NULL ? id : "");
+    char base[64];
+    library_base_id(id, base, sizeof(base));
+    snprintf(s_library_id, sizeof(s_library_id), "%s", base);
     library_short_from_id(s_library_id, s_library_short,
                           sizeof(s_library_short));
 
@@ -194,6 +257,70 @@ static bool path_exists(const char * path)
     return stat(path, &st) == 0;
 }
 
+static bool path_is_empty_dir(const char * path)
+{
+    DIR * d = opendir(path);
+    if(d == NULL) return false;
+    bool empty = true;
+    struct dirent * ent;
+    while((ent = readdir(d)) != NULL) {
+        if(strcmp(ent->d_name, ".") != 0 &&
+           strcmp(ent->d_name, "..") != 0) {
+            empty = false;
+            break;
+        }
+    }
+    closedir(d);
+    return empty;
+}
+
+/* Older builds keyed the cache by the Apple Music Radio suffix
+ * ("4954524C") instead of the shared base GUID.  If the new directory has no
+ * library yet and exactly one old directory contains one, move it. */
+static void library_migrate_previous_dir(void)
+{
+#if !defined(IAP2TAB5_FULL_LIBRARY_SYNC)
+    return;
+#endif
+    if(s_library_short[0] == '\0' || !s_sd_ready) return;
+    if(path_exists(s_library_bin) || !path_exists("/sdcard/lib")) return;
+
+    char candidate[256] = "";
+    DIR * d = opendir("/sdcard/lib");
+    if(d == NULL) return;
+    struct dirent * ent;
+    while((ent = readdir(d)) != NULL) {
+        if(strcmp(ent->d_name, ".") == 0 ||
+           strcmp(ent->d_name, "..") == 0 ||
+           strcmp(ent->d_name, s_library_short) == 0) {
+            continue;
+        }
+        char bin[320];
+        snprintf(bin, sizeof(bin), "/sdcard/lib/%s/library.bin",
+                 ent->d_name);
+        if(!path_exists(bin)) continue;
+        if(candidate[0] != '\0') {
+            candidate[0] = '\0';
+            break;
+        }
+        snprintf(candidate, sizeof(candidate), "%s", ent->d_name);
+    }
+    closedir(d);
+
+    if(candidate[0] == '\0') return;
+    if(path_exists(s_library_dir) && !path_is_empty_dir(s_library_dir)) {
+        return;
+    }
+    if(path_exists(s_library_dir)) rmdir(s_library_dir);
+
+    char old_dir[320];
+    snprintf(old_dir, sizeof(old_dir), "/sdcard/lib/%s", candidate);
+    if(rename(old_dir, s_library_dir) == 0) {
+        ESP_LOGI(TAG, "migrated library dir %s -> %s",
+                 old_dir, s_library_dir);
+    }
+}
+
 /* One-time move from the old flat /sdcard/library.bin + /sdcard/covers
  * layout into the per-library directory. Once the first device is migrated,
  * a second device gets its own empty directory. */
@@ -202,6 +329,7 @@ static void library_migrate_legacy(void)
     if(s_library_short[0] == '\0' || !s_sd_ready) return;
 
     mkdir("/sdcard/lib", 0777);
+    library_migrate_previous_dir();
     mkdir(s_library_dir, 0777);
 
     if(!path_exists(s_library_bin) && path_exists("/sdcard/library.bin")) {
@@ -283,7 +411,9 @@ const char * app_config_artwork_dir(void) { return s_artwork_dir; }
 
 esp_err_t app_config_set_library_id(const char * id)
 {
-    if(id == NULL) id = "";
+    char base[64];
+    library_base_id(id, base, sizeof(base));
+    id = base;
     if(strcmp(id, s_library_id) == 0) {
         library_dirs_ensure();
         return ESP_OK;
@@ -322,6 +452,12 @@ static void set_defaults(void)
     g_app_config.np_bg_mode = 2;
     g_app_config.brightness = 70;
     g_app_config.usb_mode = 0;
+    g_app_config.theme = 0;
+    g_app_config.boot_screen = 0;
+    g_app_config.ble_enabled = true;
+    g_app_config.debug_log = false;
+    g_app_config.charge_enabled = true;
+    g_app_config.qc_high = false;
     g_app_config.iap2_mode = true;
 }
 
@@ -378,7 +514,26 @@ static void load_from_json(const char * text)
     item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
     if(cJSON_IsNumber(item)) g_app_config.brightness = (uint8_t)item->valueint;
     item = cJSON_GetObjectItemCaseSensitive(root, "usb_mode");
-    if(cJSON_IsNumber(item)) g_app_config.usb_mode = (uint8_t)item->valueint;
+    if(cJSON_IsNumber(item)) {
+        g_app_config.usb_mode = (item->valueint == 2) ? 2 : 0;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "theme");
+    if(cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        g_app_config.theme = (uint8_t)(v >= 0 && v <= 2 ? v : 0);
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "boot_screen");
+    if(cJSON_IsNumber(item)) {
+        g_app_config.boot_screen = (uint8_t)(item->valueint == 1 ? 1 : 0);
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "ble_enabled");
+    if(cJSON_IsBool(item)) g_app_config.ble_enabled = cJSON_IsTrue(item);
+    item = cJSON_GetObjectItemCaseSensitive(root, "debug_log");
+    if(cJSON_IsBool(item)) g_app_config.debug_log = cJSON_IsTrue(item);
+    item = cJSON_GetObjectItemCaseSensitive(root, "charge_enabled");
+    if(cJSON_IsBool(item)) g_app_config.charge_enabled = cJSON_IsTrue(item);
+    item = cJSON_GetObjectItemCaseSensitive(root, "qc_high");
+    if(cJSON_IsBool(item)) g_app_config.qc_high = cJSON_IsTrue(item);
     item = cJSON_GetObjectItemCaseSensitive(root, "iap2_mode");
     if(cJSON_IsBool(item)) g_app_config.iap2_mode = cJSON_IsTrue(item);
     item = cJSON_GetObjectItemCaseSensitive(root, "library_id");
@@ -463,6 +618,12 @@ esp_err_t app_config_save(void)
     cJSON_AddNumberToObject(root, "np_bg_mode", g_app_config.np_bg_mode);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddNumberToObject(root, "usb_mode", g_app_config.usb_mode);
+    cJSON_AddNumberToObject(root, "theme", g_app_config.theme);
+    cJSON_AddNumberToObject(root, "boot_screen", g_app_config.boot_screen);
+    cJSON_AddBoolToObject(root, "ble_enabled", g_app_config.ble_enabled);
+    cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
+    cJSON_AddBoolToObject(root, "charge_enabled", g_app_config.charge_enabled);
+    cJSON_AddBoolToObject(root, "qc_high", g_app_config.qc_high);
     cJSON_AddBoolToObject(root, "iap2_mode", g_app_config.iap2_mode);
     cJSON_AddStringToObject(root, "library_id", g_app_config.library_id);
 

@@ -4,8 +4,11 @@ idf_component_register(
     SRCS
         "main.c"
         "app_config.c"
+        "charge.c"
+        "debug_log.c"
         "feedback.c"
         "serial_input.c"
+        "rtc_time.c"
         "web_server.c"
         "wifi_manager.c"
         "usb_hid_input.c"
@@ -23,6 +26,7 @@ idf_component_register(
         "../../app/backend/mock_player.c"
         "../../app/backend/ble_remote.c"
         "../../app/ui/ui.c"
+        "../../app/ui/boot.c"
         ${UI_FONT_SRCS}
     INCLUDE_DIRS
         "."

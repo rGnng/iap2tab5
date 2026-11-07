@@ -21,6 +21,10 @@ void web_server_set_network_info(const char * status, const char * ip);
 /* Debug helper: GET http://192.168.4.1/api/status from the device itself. */
 void web_server_self_test(void);
 
+/* Hard reset used by OTA/mode changes.  esp_restart() can stall while the
+ * USB host stack is active; this resets through the ROM instead. */
+void web_server_reboot(void);
+
 #ifdef __cplusplus
 }
 #endif

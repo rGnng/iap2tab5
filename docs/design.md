@@ -122,7 +122,7 @@ Tab5 第一版只取其中与播放控制最相关的部分：**Now Playing、Al
 | key3 | Artists |
 | key4 | Songs |
 | key5 | Settings |
-| key6 | Back：返回上一级；根界面返回 Now Playing |
+| key6 | Back：返回上一级；根界面返回 Now Playing；Now Playing 的 Up Next 打开时先关闭面板 |
 | key7 | Play / Pause（全局） |
 
 额外 HID 键：
@@ -133,7 +133,7 @@ Tab5 第一版只取其中与播放控制最相关的部分：**Now Playing、Al
 | Page Down | 下一个分区；到 Settings 停住 |
 | Backspace | 同 key6：返回上一级；Albums/Artists 详情页的 Back 行同效 |
 
-Page Down 只切换 menubar 当前项，到头停在 Settings。Page Up 在其它页面切到上一个分区；已经在 Now Playing 时改为切换 Up Next 面板：第一次显示，再按隐藏。
+Page Down 只切换 menubar 当前项，到头停在 Settings。Page Up 在其它页面切到上一个分区；已经在 Now Playing 时改为切换 Up Next 面板：第一次显示，再按隐藏。Up Next 打开时按 Back 也会关闭面板。
 
 **上一首/下一首、随机/循环不进入焦点链。**
 
@@ -304,7 +304,7 @@ menubar 也可以放到右侧，用户可以在 Settings 里切换；右侧布�
 
 ### 5.2 Now Playing + Queue
 
-左右两栏；两栏之间没有间隔，直接贴在一起，用底色区分：左栏 `#141414`，右栏 `#1E1E1E`。Up Next 默认隐藏，在 Now Playing 按 Page Up 显示，再按 Page Up 隐藏。隐藏时左侧 Now Playing 面板占满内容区，并保持横向布局；显示时左栏切换为上下布局。
+左右两栏；两栏之间没有间隔，直接贴在一起，用底色区分：左栏 `#141414`，右栏 `#1E1E1E`。Up Next 默认隐藏，在 Now Playing 按 Page Up 显示，再按 Page Up 隐藏；面板打开时按 Back 也可以关闭。隐藏时左侧 Now Playing 面板占满内容区，并保持横向布局；显示时左栏切换为上下布局。
 
 Queue 显示时的左栏：
 
@@ -321,8 +321,8 @@ Queue 显示时的左栏：
 └────────────────────────────────────────┴──────────────────────────────┘
 ```
 
-- Queue 隐藏时（默认）：左栏横向布局，360×360 封面 + 582 px 信息列（≈封面 × 1.618）；标题和元信息作为一组下移到黄金分割位置，组内间距 12 px；传输按钮在信息列底部，shuffle/repeat/star 在进度条下方居中；
-- Queue 显示时：左栏宽度 700 px，改为上下布局，字号整体比默认横向布局小一档：
+- Queue 隐藏时（默认）：左栏横向布局，360×360 封面 + 582 px 信息列（≈封面 × 1.618）；歌名（40 px）、艺术家（32 px）、专辑（32 px）各占一行，三行间距按黄金比例分布（26:16 ≈ 1.625），文字组在封面高度内垂直居中；收藏星标位于专辑行下方，左对齐；进度条与五个等尺寸控制按钮（shuffle / prev / play / next / repeat，96×84 px）在封面下方占满 966 px 宽，按钮行在进度条与底部空间之间垂直居中；
+- Queue 显示时：左栏宽度 620 px，改为上下布局，字号整体比默认横向布局小一档：
   - 封面居中，360×360；
   - 标题行、`Artist - Album`、进度条、控制行统一使用 582 px 宽并居中；比 360 px 封面宽，同时左右保留约 39 px 内边距，避免贴边，也给长标题留出余量；
   - 标题 32 px，收藏星标固定在标题行最右侧；
@@ -330,13 +330,13 @@ Queue 显示时的左栏：
   - 进度条一行，播放时间 18 px，分列左右两侧；
   - 控制行：shuffle 在最左，prev / play / next 居中，repeat 在最右；传输按钮使用标准 84 / 108 / 84 px 和 48 px 图标；
   - 垂直构成：28 + 360 + 16 + 56 + 8 + 40 + 12 + 28 + 16 + 84 + 32 = 680 px；
-- 进度条在封面区域下方；时间标签使用 20 px Inter tabular 字体 + 固定 72 px 宽，避免走时造成进度条左右抖动；
-- shuffle / repeat 使用 32 px 图标；启用时显示 `#303030` 直角底色；star 使用 32 px 图标，收藏后显示实心星；
+- 进度条在封面区域下方；普通布局时间标签使用 24 px Inter tabular（88 px 宽），队列布局使用 18 px（72 px 宽），避免走时造成进度条左右抖动；
+- shuffle / repeat 在普通布局使用与传输按钮一致的 48 px 图标，队列布局使用 32 px；启用时显示 `#303030` 直角底色；star 普通布局 40 px、队列布局 32 px，收藏后显示实心星；
 - 传输按钮无背景、48 px 图标，只支持触摸点击，不进入焦点链；
 - 界面不显示 Playing/Paused 文本，播放状态由 menubar 图标表示；
-- 右侧约 42%：Up Next 队列，标题右侧显示 `当前队列位置/总数`（如 `1/8`），使用 18 px tabular 数字；
+- 右侧：Up Next 队列占满左栏之外的剩余宽度，内容区右侧留 16 px；标题行左侧为 `Up Next`，右侧为 `当前队列位置/总数`（如 `1/8`）计数器，与列表行同一右边缘；
 - 当前播放项在队列中高亮，但不等于键盘焦点；
-- 队列行：序号、标题（上）/ 艺术家（下）、时长；行高 54 px，固定 11 行：11 × 54 + 10 × 4 = 634 px；
+- 队列行与 Songs 列表同格式：行高 56 px，序号（或当前播放标记）、歌名（FONT_H2，超长淡出）、艺术家（FONT_H2，靠右 200 px 列，超长直接切断）、时长（靠右）；无行间距；固定 11 行，列表高 616 px；
 - Now Playing 背景有三种模式，由 Settings → Now Playing Background 控制：
   - **Theme**：沿用当前面板主题灰（`#141414`）；
   - **Blurred cover**：当前封面按 16:9 填充整个内容区，做高斯模糊，再叠 60% 黑色遮罩；封面本体仍保持清晰；
@@ -377,9 +377,10 @@ Queue 显示时的左栏：
 - 左右两栏无间隔，左栏 `#141414`、右栏 `#1E1E1E`，用底色区分；
 - 右侧详情始终显示左栏当前选中的专辑，不再显示占位提示文字；
 - 两侧面板不再加遮罩；选中专辑行保留 `#262626` 选中底色，浅色条只在旋钮焦点位于左栏时显示；上下移动左栏选中项时右侧内容实时跟随；
-- Enter 打开右侧详情并把焦点移到 `Play album`；左侧选中行保留选中底色但不显示浅色条；两侧内容始终可以直接触摸操作；左栏滚动位置保持不变；
-- 右侧详情曲目列表固定 7 行：7 × 52 px + 6 个 4 px 间隔 = 388 px，可视高度 389 px；
-- 右侧详情顶部有可聚焦的 `Back` 行，Enter 或 Backspace 返回专辑列表并恢复左栏焦点；
+- Enter 打开右侧详情并把焦点移到 `Play` 图标；左侧选中行保留选中底色但不显示浅色条；两侧内容始终可以直接触摸操作；左栏滚动位置保持不变；
+- 右侧详情曲目列表固定 9 行：9 × 56 px = 504 px，行间无间隔；顶部 108 px 用于封面、标题和 Shuffle/Play 图标，合计 612 px，正好填满右栏可视高度；
+- 曲目列表触摸滚动结束时按 56 px 行高吸附（`LV_EVENT_SCROLL_END` 自定义吸附），**不要**使用 `LV_SCROLL_SNAP_START`，否则旋钮焦点会被强制贴在列表顶部；
+- 右侧详情顶部的封面/标题右侧是 `Shuffle` 和 `Play` 两个纯图标按钮，与封面垂直居中对齐；Backspace 返回专辑列表并恢复左栏焦点；
 - 在曲目列表 Enter = 播放该曲；Back = 回专辑列表；
 - 在专辑列表长按 Enter = 上下文菜单（播放整张、加入队列等）。
 
@@ -402,17 +403,14 @@ Queue 显示时的左栏：
 ```
 
 - 标题右侧显示 `当前选中序号/总数`（如 `1/24`），使用 Inter tabular 18 px；
-- 右侧始终显示左侧当前选中的艺术家，不再显示占位提示文字；
-- 右侧按专辑分组，列出该艺术家涉及的全部专辑；每张专辑下面是该艺术家在这张专辑中的曲目；
-- 专辑 header 压缩为 48 px：34×34 封面、专辑名、年份 + 曲目数、右侧播放图标；
+- 右侧始终显示左侧当前选中的艺术家和完整专辑/曲目预览，不再显示占位提示文字；
+- 顶部压缩为 52 px：艺术家名和 `songs | albums` 统计同一行，右侧是 48 px 的纯图标 Shuffle / Play 按钮；Play 播放该艺术家的全部歌曲；
+- 下方列表 10 × 56 px = 560 px，整数行吸附；专辑和曲目共用这个滚动区域；
+- 每张专辑是单行 56 px：34×34 封面、专辑名、年份 + 曲目数、右侧播放图标；
 - 专辑 header 本身可聚焦，Enter / 触摸 = 播放整张专辑；
-- 曲目行 Enter / 触摸 = 播放该曲；
-- 左右两栏无间隔，左栏 `#141414`、右栏 `#1E1E1E`，用底色区分；
-- 选中的艺术家行保留 `#262626` 选中底色；左侧浅色条只在旋钮焦点位于左栏时显示；
-- 右侧详情顶部有可聚焦的 `Back` 行，Enter 或 Backspace 返回艺术家列表并保留左栏滚动位置；
-- Enter 在艺术家上 = 焦点进入右侧第一张专辑 header；
-- 触摸两侧都可操作；遮罩不再使用；
-- 不再单独提供 `Play all` 行，专辑 header 直接承担整张播放。
+- 曲目行 56 px，Enter / 触摸 = 播放该曲；
+- Enter 在艺术家上 = 打开详情并把焦点放到 Play 图标；Backspace 返回艺术家列表并保留左栏滚动位置；
+- 左右两栏无间隔，左栏 `#141414`、右栏 `#1E1E1E`，用底色区分；选中艺术家行保留 `#262626` 选中底色。
 
 ### 5.5 Songs
 
@@ -440,59 +438,39 @@ Queue 显示时的左栏：
 
 ### 5.6 Settings
 
-左右两栏：左侧设置项列表 + 右侧当前项详情/控制。
+左右两栏。左栏是设置项列表：标题栏 56 px、16 px 内边距，右上角为 `当前序号/总数` 计数器（与其它列表页一致）；设置项行高 64 px，文字 FONT_H2。右栏是当前设置项的内容，没有标题，内容从顶部开始排列。
+
+设置项顺序：AFC & iAP2、Bluetooth、Theme、Now Playing Background、USB Options、Boot Screen、About、Clock。
 
 ```text
 ┌──────────────────────────────────────┬──────────────────────────────┐
-│  Settings                    1/7     │  General                     │
-│  General                5 settings   │  Time format, time setting…  │
-│  Theme                               │  ← Back                      │
-│  Now Playing Background Cover gradient│  Time format            24H  │
-│  Device      iPod touch · 86% …      │  Set time             09:07  │
-│  USB-C                    Host       │  Menubar position       Left │
-│  Backend                  Mock       │  Touch input              On │
-│  About                    v0.1       │  Brightness             70%  │
+│  Settings                    3/8     │  Paired Devices              │
+│  AFC & iAP2                          │  …                           │
+│  Bluetooth                        ◀  │  Search Devices   PRESS: PAIR│
+│  Theme                               │  …                           │
+│  Now Playing Background              │                              │
+│  USB Options                         │                              │
+│  Boot Screen                         │                              │
+│  About                               │                              │
+│  Clock                               │                              │
 └──────────────────────────────────────┴──────────────────────────────┘
 ```
 
-- 左栏分为 7 组：**General、Theme、Now Playing Background、Device、USB-C、Backend、About**；
-- 标题右侧显示 `当前选中序号/总数`（如 `1/7`），使用 Inter tabular 18 px；
-- General 组内含 Time format、Set time、Menubar position、Touch input、Brightness 五项控制；
-- 左栏宽度 480 px，行高 56 px；General 行的值为 `5 settings`；
-- 选中行保留 `#262626` 选中底色；浅色条只在旋钮焦点位于左栏时显示；
-- 右侧始终显示左侧当前选中的组，不再使用占位文字或遮罩；
-- Enter 进入右侧：General 聚焦第一个控制行 Time format；Now Playing Background / USB-C 聚焦当前选中的选项；Device / Backend / About 聚焦 `Back`；
-- Time format：24H / 12H，Enter / 触摸切换；12H 显示为 `4:28 AM`，使用 24 px tabular 数字以适配 120 px 时间区；
-- Set time：打开右侧时间编辑器；时间以内存 offset 模拟，真机后续接 RTC/NTP；
-- Touch input、Menubar 的控制行 Enter / 触摸直接切换；
-- Brightness 控制行 Enter 进入调节模式，Up/Down 每次 ±5%，Back 退出；
-- Now Playing Background：右侧提供 Theme / Blurred cover / Cover gradient 三个选项，当前项右侧显示勾选；默认 Cover gradient，切换后返回 Now Playing 生效；
-- Device 显示设备名、电量、连接状态；Backend 显示 Mock/iAP2 状态；About 显示型号、版本、UI 运行时；
-- 触摸两侧都可操作，Backspace / Back 返回左侧并保留选中项。
-
-时间编辑器：
-
-```text
-Set time
-UP/DOWN select  ENTER edit/confirm  DOWN next
-← Back
-
-        [▲] [▼]
-
-    [05] : [04] [AM]
-```
-
-- 进入时默认选中 **Back**；
-- Up/Down 在 Back、Hour、Minute、（12H 时）AM/PM 之间移动焦点；
-- Enter 开始编辑当前项，选中项开始闪烁；
-- 编辑中 Up/Down 调整数值；AM/PM 段用上 = AM、下 = PM；
-- Enter 再次按下确认并停止闪烁，焦点仍留在当前项；
-- 确认后按 Down 移动到下一项，不再需要用 Enter 逐项切换；
-- 上方两个 64×56 触摸按钮：非编辑状态用于上下移动焦点，编辑状态用于调整当前项；
-- 直接触摸小时 / 分钟 / AM/PM 区域会聚焦并开始编辑；
-- 时间数字使用 36 px Inter tabular；外框为 2 px 直角白框；
-- 选中段底色填满外框内部高度；编辑时以 250 ms 闪烁，非编辑时保持静态高亮；
-- Back 行可聚焦；Enter / Backspace 返回 General，焦点回到 Set time 行。
+- 菜单项统一规格：所有可选、只读、带右侧值的菜单项都是 64 px 高、16 px 左内边距、FONT_H2 字号；颜色按语义保留（On 为绿色，Off 与次要信息为灰色，强调项为 accent 色）。
+- 说明性文字不随菜单字号：分组标题（如 `Paired Devices`、`Search Devices`）及其右侧提示、`Reboot to apply`、`No paired devices`、`Searching...` 保持原小字号；说明文字与菜单标签左对齐（16 px 内边距）。
+- **Bluetooth**：第一行是 Bluetooth On/Off。下方是 Paired Devices（Connected / Disconnected，长按 Enter 忘记设备）。页面底部是 **Search Devices** 分组（`PRESS: PAIR`）：打开页面即开始扫描，新发现的设备出现在该分组下方，选中即配对。已移除顶部的 Search 行。
+- **USB Options**：`USB-A HighSpeed Only`（`usb_mode 0`，默认）和 `USB-A HS & USB-C OTG`（`usb_mode 2`）；启动生效，需重启，详见 [`usb-modes.md`](usb-modes.md)。
+- **Boot Screen**：`OFF`（默认）和 `KCN4M1`；选中后保存到 `boot_screen`，下次启动生效。KCN4M1 是启动动画，设备上播放约 5 秒，模拟器需 `--boot` 才会播放。
+- **Now Playing Background**：Theme / Blurred cover / Cover gradient，默认 Cover gradient，切换后返回 Now Playing 生效。
+- **Clock**：
+  - 第一行 `FORMAT 12H/24H`：Enter 或触摸切换，写入配置；
+  - 下方为时间编辑器，字段依次为 YEAR、MONTH、DAY（日期行）和 HOUR、MINUTE、AM/PM（时间行）；六个字段宽度相同，两行列对齐；
+  - 12H 时 HOUR 显示 1–12，AM/PM 字段可见；HOUR 在同一半天内循环，AM/PM 字段 Enter 或方向键切换；24H 时 HOUR 显示 0–23，AM/PM 字段隐藏，留出空位保持列对齐；
+  - Enter 开始编辑当前字段，编辑中 Up/Down 调整数值，再次 Enter 确认；未编辑时 Up/Down 在字段间移动，Enter 只作用于当前字段；
+  - 上方两个 64×56 触摸按钮：非编辑状态用于上下移动焦点，编辑状态用于调整当前字段；
+  - 编辑框与菜单同宽，时间数字使用 36 px Inter tabular；选中字段以 250 ms 闪烁，非编辑时保持静态高亮；
+  - 确认后写入系统时间和 RX8130CE RTC；模拟器仍使用内存 offset。
+- 触摸两侧都可操作；Backspace / Back 返回左栏并保留选中项。
 
 ---
 
@@ -842,7 +820,7 @@ menubar 电量映射：
 
 - 用 `time()` + `localtime_r()` 取本地时间，`strftime("%H:%M")`；
 - 每秒检查一次即可，只在分钟变化时刷新 label；
-- 真机可用 Tab5 的 RX8130CE RTC；未对时前显示 `--:--`，不要显示假时间。
+- 真机使用 Tab5 的 RX8130CE RTC；上电时读取 RTC，掉电/时间不可信时用构建时间兜底，之后可用网页 “Sync browser time” 或 Settings → Clock 校正。
 
 
 ---
@@ -963,7 +941,7 @@ BOOT
 8. **Settings 第一版要哪些项**：触摸、亮度、超时、后端状态，是否还要 shuffle/repeat？
 9. **Now Playing 是否要独立 Queue 页面**：还是像现在设计一样常驻右侧？
 10. **主题色**：开发阶段已改为全灰阶；最终车内主题是否恢复低饱和强调色，还是保持灰阶？
-11. **menubar 时间制式**：默认 24 小时还是 12 小时？未对时的时候显示 `--:--` 还是 RTC 默认时间？
+11. **menubar 时间制式**：默认 24 小时还是 12 小时？RTC 掉电时用构建时间兜底还是显示 `--:--`？
 12. **设备状态**：phone 图标已去掉；未连接状态只在 Settings 的 Device 行显示？
 13. **电池位置**：当前放在 menubar 底部；是否还需要百分比文字，还是只留图标？
 14. **电量阈值/颜色**：按 15/40/75 分档是否合适？
@@ -980,3 +958,11 @@ BOOT
 - 本地 `../headunit`（QML 版本）与 `../headunit-lvgl`（LVGL 8 草稿）
 - [Bootstrap Icons](https://icons.getbootstrap.com/)（MIT）
 - 当前模拟器：`sim/main.c`、`app/ui/ui.c`、`app/ui/icons.h`、`README.md`
+
+### 5.x 长文本显示
+
+- 列表和详情里的文字一律不换行，超出部分不显示 `...`；
+- 超出右边缘时，最右 16 px 渐变淡出到所在行的背景色；
+- 选中项（Albums、Artists、Playlists、Songs 的选中行，以及详情页标题）停止操作约 1.2 s 后，超长文字从右向左匀速滚动（约 36 px/s），显示完最后一个字符后停约 1 s，再回到起始位置；选中项变化时重新计时；
+- Songs 列表只有歌名滚动和渐变，歌手、专辑等其它列超长直接切断；
+- Songs 列表字号与其它列表保持一致。

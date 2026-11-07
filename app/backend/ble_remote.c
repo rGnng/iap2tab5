@@ -60,6 +60,7 @@ static char s_status[80] = "Bluetooth off";
 static char s_current[32];
 static char s_current_addr[18];
 static bool s_supported;
+static bool s_enabled = true;
 static ble_remote_device_t s_scan[BLE_REMOTE_MAX_DEVICES];
 static uint8_t s_scan_type[BLE_REMOTE_MAX_DEVICES];
 static int s_scan_count;
@@ -705,7 +706,7 @@ static int gap_event(struct ble_gap_event * event, void * arg)
                 }
                 return 0;
             }
-            ESP_LOGI(TAG, "D100H event id=0x%02x down=%d", id, (int)down);
+            ESP_LOGD(TAG, "D100H event id=0x%02x down=%d", id, (int)down);
             if(id == 0x03) {
                 /* Top-right: short press = context, long press = star. */
                 if(down) {
@@ -717,6 +718,12 @@ static int gap_event(struct ble_gap_event * event, void * arg)
                     ui_key_t key = held_ms >= 600 ? UI_KEY_STAR : UI_KEY_CONTEXT;
                     usb_hid_input_post_key(key);
                 }
+                return 0;
+            }
+            if(id == 0x05 || id == 0x08) {
+                usb_hid_input_post_key_state(
+                    id == 0x05 ? UI_KEY_PREV_TRACK : UI_KEY_NEXT_TRACK,
+                    down);
                 return 0;
             }
             ui_key_t key;
@@ -747,6 +754,10 @@ static void on_sync(void)
     }
     s_nimble_ready = true;
     s_supported = true;
+    if(!s_enabled) {
+        set_state(BLE_REMOTE_OFF, "Bluetooth off");
+        return;
+    }
     set_state(BLE_REMOTE_IDLE, "Idle");
 
     if(s_scan_pending) {
@@ -804,7 +815,7 @@ static void heartbeat_task(void * arg)
         bool connected = s_state == BLE_REMOTE_CONNECTED && s_vendor_ready;
         uint16_t conn = s_conn_handle;
         uint16_t handle = s_vendor_write_handle;
-        bool retry = s_reconnect && s_nimble_ready &&
+        bool retry = s_enabled && s_reconnect && s_nimble_ready &&
                      s_state == BLE_REMOTE_IDLE && s_paired_count > 0 &&
                      esp_timer_get_time() >= s_reconnect_at;
         ble_addr_t addr;
@@ -896,6 +907,10 @@ void ble_remote_start(void)
 
 void ble_remote_scan_start(void)
 {
+    lock();
+    bool enabled = s_enabled;
+    unlock();
+    if(!enabled) return;
     if(!s_nimble_ready) {
         lock();
         s_scan_pending = true;
@@ -994,6 +1009,10 @@ bool ble_remote_paired_get(int index, ble_remote_device_t * out)
 bool ble_remote_connect(const char * addr)
 {
     if(addr == NULL) return false;
+    lock();
+    bool enabled = s_enabled;
+    unlock();
+    if(!enabled) return false;
     ble_addr_t target;
     if(!addr_from_str(addr, &target)) return false;
 
@@ -1038,6 +1057,49 @@ bool ble_remote_unpair(const char * addr)
     return true;
 }
 
+void ble_remote_set_enabled(bool enabled)
+{
+    lock();
+    if(s_enabled == enabled) {
+        unlock();
+        return;
+    }
+    s_enabled = enabled;
+    s_reconnect = false;
+    uint16_t conn = s_conn_handle;
+    bool nimble_ready = s_nimble_ready;
+    if(enabled) {
+        set_state_locked(BLE_REMOTE_IDLE, "Idle");
+    }
+    else {
+        set_state_locked(BLE_REMOTE_OFF, "Bluetooth off");
+    }
+    unlock();
+
+    if(!enabled) {
+        /* At boot this can be called before NimBLE has synced; touching the
+         * GAP API in that state crashes/reset-loops.  on_sync() honours
+         * s_enabled once the host is ready. */
+        if(nimble_ready) {
+            ble_gap_disc_cancel();
+            if(conn != BLE_HS_CONN_HANDLE_NONE) {
+                ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+            }
+        }
+    }
+    else if(nimble_ready) {
+        schedule_reconnect();
+    }
+}
+
+bool ble_remote_enabled(void)
+{
+    lock();
+    bool enabled = s_enabled;
+    unlock();
+    return enabled;
+}
+
 bool ble_remote_is_supported(void)
 {
     return s_supported;
@@ -1048,6 +1110,8 @@ bool ble_remote_is_supported(void)
 void ble_remote_start(void) {}
 void ble_remote_scan_start(void) {}
 void ble_remote_scan_stop(void) {}
+void ble_remote_set_enabled(bool enabled) { (void)enabled; }
+bool ble_remote_enabled(void) { return false; }
 uint32_t ble_remote_revision(void) { return 0; }
 
 void ble_remote_status(ble_remote_state_t * state, char * text,

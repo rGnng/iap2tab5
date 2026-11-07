@@ -32,7 +32,7 @@ This repository contains:
 ### UI
 
 - Six top-level screens: **Now Playing**, **Albums**, **Artists**, **Songs**, **Playlists**, **Settings**.
-- A dedicated **Bluetooth Remote** screen (opened from Settings) and a dedicated **AFC Sync** boot mode.
+- Bluetooth pairing lives in Settings → Bluetooth: opening the page starts a scan, new devices appear under **Search Devices** at the bottom, and selecting one pairs it. A dedicated **AFC Sync** boot mode is also available.
 - Vertical menubar on the left or right, with a 72 px clock area and a 72 px device-battery area.
 - Knob + key navigation with a custom focus engine; touch works as an optional pointer and can be disabled in Settings.
 - Now Playing includes artwork, title/artist/album, elapsed time, shuffle/repeat/star, transport controls, an Up Next panel and three background modes: Theme, Blurred cover, Cover gradient.
@@ -80,7 +80,7 @@ Previous/next on the D100H supports tap-to-skip and hold-to-rewind/fast-forward.
 ### Desktop simulator
 
 - SDL2 window at 1280×720; the mouse acts as the touchscreen.
-- A three-stage boot sequence (POST self-test, Initialize App, DISPLAY CHECKING) can play at startup and be skipped with any key.
+- The optional **KCN4M1** boot animation (Settings → Boot Screen, default OFF) plays a three-stage POST-style sequence at startup on the device. The simulator plays it only with `--boot`.
 - Mock library with 24 artists, 100 albums, 562 tracks, 6 device playlists and generated abstract covers.
 - Screenshot mode works without X11/Wayland by using SDL's offscreen driver.
 - Command-line switches can select a screen, menubar side, injected key sequence, boot freeze time and window zoom.
@@ -124,7 +124,8 @@ cmake --build build --target run
 --screen <n>          Start on a specific screen
 --menubar <side>      Menubar position: left or right
 --keys <list>         Inject keys, e.g. "2,enter" or "context"
---no-boot             Skip the boot sequence
+--boot                Play the KCN4M1 boot animation
+--no-boot             Skip the boot sequence (default)
 --boot-freeze <ms>    Freeze the boot sequence at a time offset
 --headless            Force SDL's offscreen video driver
 --help                Show help
@@ -146,7 +147,7 @@ mkdir -p build/screenshots
 ./build/tab5_sim --boot-freeze 5000 --screenshot build/screenshots/boot-display.png --wait 300
 ```
 
-`--boot-freeze` only stops the animation for screenshots/debugging; the normal boot sequence automatically enters the UI after about 5.8 seconds.
+`--boot-freeze` only stops the animation for screenshots/debugging. Without `--boot` the simulator starts directly in the UI; with `--boot` the animation enters the UI after about 5.8 seconds.
 
 ### Mock library
 
@@ -236,9 +237,10 @@ See [`firmware/README.md`](firmware/README.md) for the full `config.json` schema
 | USB-A (J10) | P4 high-speed OTG | iPod, USB HID keyboard/knob and D100H (normal host port) |
 | USB-C (J8) | P4 full-speed PHY0 / USB Serial/JTAG | Console and flashing; optional FS host through a powered hub/dock |
 
-- `usb_mode: 0` — USB-A high-speed host (default).
-- `usb_mode: 1` — USB-C full-speed host; the serial console moves, so use the Wi-Fi debug page. Requires a powered hub/dock.
-- `usb_mode: 2` — USB-A HS + USB-C FS dual host; verified with an iPod on USB-A and a Ulanzi D100H behind a powered USB-C hub. Protected by a boot-failure fallback.
+- `usb_mode: 0` — USB-A high-speed host (default); USB-C stays a device / serial console.
+- `usb_mode: 2` — USB-A HS & USB-C OTG (Both A+C): USB-A HS + USB-C FS dual host; verified with an iPod on USB-A and a Ulanzi D100H behind a powered USB-C hub.
+- Settings → USB Options offers the same two modes as **USB-A HighSpeed Only** and **USB-A HS & USB-C OTG**.
+- The old USB-C-FS-only mode (`1`) has been removed; existing configs fall back to USB-A HS.
 
 A plain USB-C hub that only draws power from the host cannot power the Tab5. Use a hub/dock that supplies 5 V upstream. The runtime/boot behavior, compile-time constraints and Settings UI integration notes are in [`docs/usb-modes.md`](docs/usb-modes.md).
 
@@ -249,7 +251,9 @@ If `/sdcard/wifi.txt` is missing or station mode fails, the firmware starts an o
 - SSID: `Tab5-Debug`
 - Address: <http://192.168.4.1>
 
-The main page shows status, edits the config, reboots and accepts a firmware `.bin` for OTA. The `/debug` page provides a live log, key injection, BMP screenshots, log-level control, USB host-mode switching, reboot and OTA upload. This is the main control path when USB-C is in host mode and the serial console is unavailable.
+The main page shows status, edits the config (including volume and display brightness), reboots and accepts a firmware `.bin` for OTA. The **Device clock** card shows the RTC-backed local time and has a **Sync browser time** button that writes the browser's UTC epoch to the system clock and the RX8130CE. The `/debug` page provides a live log, key injection, BMP screenshots, log-level control, USB host-mode switching, reboot and OTA upload. This is the main control path when USB-C is in host mode and the serial console is unavailable.
+
+Enable **Debug log to SD** in the config card to append `ESP_LOG` output to `/sdcard/debug.log`. The log is written by a low-priority task and flushed after each line, so it survives a reset; download it from **Download SD debug log** on the main page or `GET /api/debuglog`. At 4 MB it rotates to `debug.old.log`. This is useful when a boot hang happens before the web server is reachable.
 
 The web server has no authentication, and the fallback AP is open. Run it only on a trusted network.
 
@@ -258,6 +262,8 @@ The web server has no authentication, and the fallback AP is open. Run it only o
 The Tab5's ESP32-C6 provides Wi-Fi and BLE through ESP-Hosted. The host project uses **ESP-Hosted 2.13.1**, while many factory units still ship with **1.4.1**. Basic AP mode may work with the mismatch, but BLE and station mode are not reliable.
 
 Prebuilt 2.13.1 C6 images and flashing instructions are in [`tools/c6_firmware/`](tools/c6_firmware/). The first update requires the internal `C6_ISP` header; later 2.x updates can use the in-band path.
+
+The host enables the ESP-Hosted heartbeat (5 s interval, 30 s timeout) and logs the C6 firmware version at boot. If the C6 stops responding while the P4 UI keeps running, the watchdog logs the timeout and performs a hard reboot, which also resets the C6; no manual power cycle is needed.
 
 ### Media library import
 
@@ -362,7 +368,7 @@ UI mock:
 - [Artist detail](docs/screenshots/artist-detail.png)
 - [Songs](docs/screenshots/songs.png)
 - [Settings](docs/screenshots/settings.png)
-- [Settings — time](docs/screenshots/settings-time.png)
+- [Settings — Clock](docs/screenshots/settings-time.png)
 - [Settings — Now Playing background](docs/screenshots/settings-now-playing-background.png)
 - [Menubar on the right](docs/screenshots/menubar-right.png)
 
@@ -381,8 +387,8 @@ Real Tab5 hardware:
 - **The iAP2 media-library subscription is disabled by default.** The device's large delete-phase bursts are not yet reliable over the current link layer; use the AFC import path. The experimental path is enabled with `-DIAP2TAB5_FULL_LIBRARY_SYNC`.
 - **Star ratings are local.** They are persisted in `stars.csv` but not written back to the iPod.
 - **Some artwork falls back to a color placeholder.** TJPGD handles baseline JPEG; progressive or otherwise unsupported images may not decode.
-- **The clock is seeded from the build timestamp.** The RX8130CE RTC is not read yet.
-- **USB-C host mode needs a powered hub/dock**; dual-host mode is verified and protected by a boot-failure fallback. See [`docs/usb-modes.md`](docs/usb-modes.md).
+- **The clock is backed by the RX8130CE RTC.** On a battery-empty board it is seeded from the build timestamp, then corrected by the web **Sync browser time** button or Settings → Date Time.
+- **USB-C host mode needs a powered hub/dock**; dual-host mode is verified. Battery charging can be enabled/disabled from the web (`/api/charge`). See [`docs/usb-modes.md`](docs/usb-modes.md).
 - **The C6 and P4 must use matching ESP-Hosted versions** for reliable Wi-Fi and BLE.
 - **The firmware image contains the MFi private key**; do not publish built binaries.
 - **The simulator is not a performance model.** It renders with LVGL software rendering, while the Tab5 uses PSRAM buffers, PPA and a MIPI-DSI panel.
@@ -403,7 +409,7 @@ Real Tab5 hardware:
 
 - Parse the iAP2 queue and library update stream so Up Next and newly added media reflect the device.
 - Harden the iAP2 link window/ACK handling and re-enable the full library subscription.
-- Read the RX8130CE RTC and optionally sync time over NTP.
+- Add optional NTP sync now that the RX8130CE RTC is wired up.
 - Add tear-free DSI/VSYNC output on hardware.
 - Expand context menus and queue actions across Albums, Artists and Songs.
 - Continue CJK font coverage and metadata testing.

@@ -136,6 +136,11 @@ media library information (164 bytes)
 HID consumer-control bits: play 0, pause 1, next 2, previous 3, volume up 6,
 volume down 7, mute 8, stop 9, fast-forward 10, rewind 11.
 
+Each HID command must be sent as a pressed report **followed by an all-zero
+release report**. Sending only the pressed report leaves the key held; the
+iPod then treats bits 2/3 as scan/FF/REW instead of a next/previous track
+tap.
+
 Serial keys in iAP2 mode:
 
 | key | action |

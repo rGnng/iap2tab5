@@ -59,6 +59,15 @@ esp_err_t iap2_host_request_charging(void);
  * volume_up, volume_down, mute, stop, shuffle, repeat. */
 esp_err_t iap2_host_hid_command(const char * name);
 
+/* Send one raw consumer-control report bit (0..11). Debug aid for mapping
+ * the iAP2 HID command bits on real hardware. */
+esp_err_t iap2_host_hid_raw_bit(uint8_t bit);
+
+/* Press-and-hold helpers: press leaves the report bit set, release sends the
+ * all-zero report. Used for hold-to-rewind / hold-to-fast-forward. */
+esp_err_t iap2_host_hid_press_bit(uint8_t bit);
+esp_err_t iap2_host_hid_release(void);
+
 /* PlayMediaLibraryItems (0x4C07): keys are persistent media item IDs
  * (the SQLite item_pid values), start_index is the first queue entry. */
 esp_err_t iap2_host_play_track_keys(const uint64_t * keys, int count,

@@ -6,6 +6,11 @@
 #include "freertos/task.h"
 #include "usb/usb_host.h"
 
+#if CONFIG_IDF_TARGET_ESP32P4
+#include "hal/usb_wrap_ll.h"
+#include "soc/usb_wrap_struct.h"
+#endif
+
 static const char * TAG = "usb_core";
 
 /* iPod touch 6th gen / iOS 15.x used for the AFC bring-up. Selecting the
@@ -73,8 +78,27 @@ esp_err_t usb_host_core_start(void)
         }
     }
 
-    ESP_LOGI(TAG, "USB host peripheral_map=0x%x (%s)", s_peripheral_map,
-             (s_peripheral_map & (1u << 1)) ? "USB-C OTG FS" : "USB-A HS");
+    const bool usb_a = (s_peripheral_map & (1u << 0)) != 0;
+    const bool usb_c = (s_peripheral_map & (1u << 1)) != 0;
+    ESP_LOGI(TAG, "USB host peripheral_map=0x%x (%s%s%s)", s_peripheral_map,
+             usb_a ? "USB-A HS" : "",
+             (usb_a && usb_c) ? " + " : "",
+             usb_c ? "USB-C OTG FS" : "");
+
+#if CONFIG_IDF_TARGET_ESP32P4
+    if(s_peripheral_map & (1u << 1)) {
+        /* The Tab5 routes USB-C to FSLS PHY0 (GPIO24/25).  The IDF default
+         * maps USB_WRAP to PHY1 (GPIO26/27) and USJ to PHY0, so USB-C would
+         * otherwise never see the host controller.  This also moves the USB
+         * Serial/JTAG console to the unconnected PHY1, which is expected:
+         * logs remain available through the web debug stream. */
+        usb_wrap_ll_phy_select(&USB_WRAP, 0);
+        esp_log_level_set("HCD DWC", ESP_LOG_DEBUG);
+        esp_log_level_set("USB HOST", ESP_LOG_DEBUG);
+        esp_log_level_set("ENUM", ESP_LOG_DEBUG);
+        ESP_LOGI(TAG, "USB-C FS host routed to FSLS PHY0 (serial console moves to PHY1)");
+    }
+#endif
 
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,

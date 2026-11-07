@@ -7,6 +7,7 @@
 #include "thumb_cache_format.h"
 
 #include "lvgl.h"
+#include "src/widgets/label/lv_label_private.h"
 
 /* TinyTTF is enabled in lv_conf.h. Some ESP-IDF component builds do not
  * propagate the public declaration through lvgl.h, so declare it here. */
@@ -25,6 +26,7 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -61,7 +63,6 @@ static void * ui_alloc_aligned(size_t size)
 #define COL_MENU_TOP_FG   0xFFFFFF
 #define COL_MENU_BODY_BG  0x080808
 #define COL_MENU_BODY_FG  0xC8C8C8
-#define COL_MENU_BATT_BG  0x202020
 #define COL_MINI_BG       0x303030
 #define COL_MINI_FG       0xFFFFFF
 #define COL_MINI_MUTED    0xD0D0D0
@@ -91,13 +92,13 @@ static void * ui_alloc_aligned(size_t size)
 
 #define SCREEN_W   1280
 #define SCREEN_H   720
-/* The menubar is 96 px wide. Six 96 px square menu tiles fill 576 px,
- * leaving 72 px strips for the clock and battery at the top/bottom. */
+/* The menubar is 108 px wide: a 72 px clock strip on top and six 108 px
+ * square menu tiles below (72 + 6 × 108 = 720).  The mini player uses the
+ * same 72 px height as the clock strip. */
 #define MENUBAR_TIME_H     72
-#define MENUBAR_BATTERY_H  72
-#define MENUBAR_W          96
-/* The mini bar now follows the menubar's 72 px top strip. */
-#define MINI_NOW_H         72
+#define MENUBAR_TILE_H     108
+#define MENUBAR_W          108
+#define MINI_NOW_H         MENUBAR_TIME_H
 /* Shared master-detail split: Albums / Artists / Playlists / Settings. */
 #define SIDE_PANEL_W       480
 #define CONTENT_Y          0
@@ -111,7 +112,8 @@ static void * ui_alloc_aligned(size_t size)
 static const lv_font_t * FONT_H1 = &inter_36;
 static const lv_font_t * FONT_NP_TITLE = &inter_40;
 static const lv_font_t * FONT_NP_ARTIST = &inter_32;
-static const lv_font_t * FONT_NP_TIME = &inter_tabular_20;
+static const lv_font_t * FONT_NP_ALBUM = &inter_32;
+static const lv_font_t * FONT_NP_TIME = &inter_tabular_24;
 static const lv_font_t * FONT_DETAIL_TITLE = &inter_28;
 static const lv_font_t * FONT_PAGE_TITLE = &inter_28;
 static const lv_font_t * FONT_H2 = &inter_28;
@@ -125,6 +127,15 @@ static const lv_font_t * FONT_NUM = &inter_tabular_18;
 static const lv_font_t * FONT_CLOCK = &inter_tabular_28;
 static const lv_font_t * FONT_CLOCK_12 = &inter_tabular_24;
 static const lv_font_t * FONT_CLOCK_LG = &inter_tabular_36;
+
+enum {
+    SORT_FIELD_ADD_DATE = 0,
+    SORT_FIELD_NAME,
+    SORT_FIELD_YEAR,
+    SORT_FIELD_COUNT,
+};
+static int g_sort_field = SORT_FIELD_ADD_DATE;
+static bool g_sort_desc = true;
 
 static uint8_t * jp_font_data;
 
@@ -184,6 +195,9 @@ static void fonts_init(void)
     MAKE_JP(28, FONT_PAGE_TITLE);
     MAKE_JP(28, FONT_H2);
     MAKE_JP(32, FONT_NP_ARTIST);
+    /* Artist and album share one 32 px face in the default Now Playing
+     * layout so the two metadata lines read as a pair. */
+    FONT_NP_ALBUM = FONT_NP_ARTIST;
     MAKE_JP(36, FONT_H1);
     MAKE_JP(40, FONT_NP_TITLE);
 #undef MAKE_JP
@@ -220,6 +234,7 @@ typedef struct {
 
 static void enable_event_bubble(lv_obj_t * obj);
 static void settings_update_system_labels(void);
+static void ui_page_teardown(void);
 
 static focus_item_t g_focus[MAX_FOCUS];
 static int g_focus_count;
@@ -241,6 +256,7 @@ static void (*g_system_config_changed_cb)(const ui_system_config_t * cfg);
 static void (*g_feedback_cb)(int type);
 static void (*g_afc_status_cb)(ui_afc_status_t * out);
 static void (*g_afc_action_cb)(int action);
+static void (*g_time_changed_cb)(time_t now);
 
 static void ui_feedback_emit(ui_feedback_t type)
 {
@@ -465,6 +481,224 @@ static void enable_event_bubble(lv_obj_t * obj)
     for(uint32_t i = 0; i < count; i++) {
         enable_event_bubble(lv_obj_get_child(obj, i));
     }
+}
+
+/* Overflowing list text is clipped (no wrapping, no ellipsis).  The cut-off
+ * end fades into the background of the row the label sits on. */
+#define TEXT_FADE_W      16
+#define MARQUEE_SPEED_PX 36
+#define MARQUEE_IDLE_MS  1200
+#define MARQUEE_HOLD_MS  1000
+#define MARQUEE_BACK_MS  400
+
+static lv_color_t text_fade_bg(lv_obj_t * obj)
+{
+    for(lv_obj_t * p = lv_obj_get_parent(obj); p != NULL; p = lv_obj_get_parent(p)) {
+        if(lv_obj_get_style_bg_opa(p, 0) >= LV_OPA_COVER) {
+            return lv_obj_get_style_bg_color(p, 0);
+        }
+    }
+    return lv_color_hex(COL_MAIN_BG);
+}
+
+static void text_fade_draw_cb(lv_event_t * e)
+{
+    lv_obj_t * obj = lv_event_get_target_obj(e);
+    lv_point_t size;
+    lv_text_get_size(&size, lv_label_get_text(obj),
+                     lv_obj_get_style_text_font(obj, 0), 0, 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    int box_w = lv_area_get_width(&area);
+    if(size.x <= box_w) return;
+
+    lv_color_t bg = text_fade_bg(obj);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_opa = LV_OPA_COVER;
+    dsc.bg_grad.dir = LV_GRAD_DIR_HOR;
+    dsc.bg_grad.stops_count = 2;
+    dsc.bg_grad.stops[0].color = bg;
+    dsc.bg_grad.stops[0].opa = LV_OPA_TRANSP;
+    dsc.bg_grad.stops[0].frac = 0;
+    dsc.bg_grad.stops[1].color = bg;
+    dsc.bg_grad.stops[1].opa = LV_OPA_COVER;
+    dsc.bg_grad.stops[1].frac = 255;
+
+    lv_area_t right = area;
+    right.x1 = area.x2 - TEXT_FADE_W + 1;
+    lv_draw_rect(lv_event_get_layer(e), &dsc, &right);
+
+}
+
+static void text_fade_cb(lv_event_t * e)
+{
+    if(lv_event_get_code(e) == LV_EVENT_DRAW_POST) text_fade_draw_cb(e);
+}
+
+/* List text: no wrapping, cut-off end fades out on the right. */
+static void ui_text_fade(lv_obj_t * label)
+{
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_add_event_cb(label, text_fade_cb, LV_EVENT_DRAW_POST, NULL);
+}
+
+/* Secondary columns: no wrapping, hard cut at the column edge. */
+static void ui_text_clip(lv_obj_t * label)
+{
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+}
+
+static lv_obj_t * g_marquee_label;
+
+static void marquee_exec(void * obj, int32_t v)
+{
+    lv_label_t * label = (lv_label_t *)obj;
+    label->offset.x = v;
+    lv_obj_invalidate(obj);
+}
+
+/* Stops the running marquee and restores the label to its start position.
+ * Call with NULL before the owning page is torn down. */
+static void ui_marquee_stop(void)
+{
+    if(g_marquee_label == NULL) return;
+    lv_anim_delete(g_marquee_label, marquee_exec);
+    if(lv_obj_is_in_widget_tree(g_marquee_label)) {
+        ((lv_label_t *)g_marquee_label)->offset.x = 0;
+        lv_obj_invalidate(g_marquee_label);
+    }
+    g_marquee_label = NULL;
+}
+
+/* Idle-triggered marquee: after MARQUEE_IDLE_MS the overflowing text scrolls
+ * right to left until its last character is visible, holds, then returns to
+ * the start.  Only one label scrolls at a time. */
+static void ui_marquee_start(lv_obj_t * label)
+{
+    ui_marquee_stop();
+    if(label == NULL) return;
+
+    lv_point_t size;
+    lv_text_get_size(&size, lv_label_get_text(label),
+                     lv_obj_get_style_text_font(label, 0), 0, 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_area_t area;
+    lv_obj_get_coords(label, &area);
+    int overflow = size.x - lv_area_get_width(&area);
+    if(overflow <= 0) return;
+
+    g_marquee_label = label;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, label);
+    lv_anim_set_exec_cb(&a, marquee_exec);
+    lv_anim_set_values(&a, 0, -overflow);
+    lv_anim_set_duration(&a, (uint32_t)overflow * 1000 / MARQUEE_SPEED_PX);
+    lv_anim_set_delay(&a, MARQUEE_IDLE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);
+    lv_anim_set_reverse_delay(&a, MARQUEE_HOLD_MS);
+    lv_anim_set_reverse_duration(&a, MARQUEE_BACK_MS);
+    lv_anim_set_repeat_count(&a, 1);
+    lv_anim_start(&a);
+}
+
+/* List counter: "current | total" as two boxes split by a dashed rule.  Both
+ * boxes share the width the total needs, so the counter never changes width
+ * while the selection moves. */
+#define COUNTER_H       36
+#define COUNTER_PAD     10
+#define COUNTER_DASHES   6
+typedef struct {
+    lv_obj_t * group;
+    lv_obj_t * cur_box;
+    lv_obj_t * cur_label;
+    lv_obj_t * tot_box;
+    lv_obj_t * tot_label;
+    int digits;
+} counter_t;
+
+static lv_obj_t * counter_box(lv_obj_t * parent, lv_obj_t ** label_out)
+{
+    lv_obj_t * box = lv_obj_create(parent);
+    lv_obj_set_size(box, 0, COUNTER_H);
+    lv_obj_set_style_bg_color(box, lv_color_hex(COL_ACCENT_DARK), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_radius(box, 0, 0);
+    lv_obj_set_style_pad_hor(box, COUNTER_PAD, 0);
+    lv_obj_set_style_pad_ver(box, 0, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(box, false);
+    lv_obj_t * label = make_label(box, "0", FONT_NUM, COL_MUTED);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, 0);
+    if(label_out) *label_out = label;
+    return box;
+}
+
+static void counter_create(lv_obj_t * parent, counter_t * c)
+{
+    c->digits = 0;
+    c->group = lv_obj_create(parent);
+    lv_obj_set_size(c->group, LV_SIZE_CONTENT, COUNTER_H);
+    lv_obj_set_style_bg_opa(c->group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(c->group, 0, 0);
+    lv_obj_set_style_pad_all(c->group, 0, 0);
+    lv_obj_set_style_pad_column(c->group, 0, 0);
+    lv_obj_set_flex_flow(c->group, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c->group, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(c->group, false);
+
+    c->cur_box = counter_box(c->group, &c->cur_label);
+
+    lv_obj_t * dash = lv_obj_create(c->group);
+    lv_obj_set_size(dash, 2, COUNTER_H);
+    lv_obj_set_style_bg_opa(dash, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(dash, 0, 0);
+    lv_obj_set_style_pad_all(dash, 0, 0);
+    lv_obj_set_style_pad_row(dash, 3, 0);
+    lv_obj_set_flex_flow(dash, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(dash, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(dash, false);
+    for(int i = 0; i < COUNTER_DASHES; i++) {
+        lv_obj_t * d = lv_obj_create(dash);
+        lv_obj_set_size(d, 2, 3);
+        lv_obj_set_style_bg_color(d, lv_color_hex(COL_DIM), 0);
+        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(d, 0, 0);
+        lv_obj_set_style_radius(d, 0, 0);
+        lv_obj_set_style_pad_all(d, 0, 0);
+        lv_obj_set_scrollable(d, false);
+    }
+
+    c->tot_box = counter_box(c->group, &c->tot_label);
+}
+
+static void counter_set(counter_t * c, int current, int total)
+{
+    if(c == NULL || c->group == NULL) return;
+    char text[16];
+    snprintf(text, sizeof(text), "%d", total);
+    int digits = (int)strlen(text);
+    if(digits < 1) digits = 1;
+    if(digits != c->digits) {
+        c->digits = digits;
+        lv_point_t glyph;
+        lv_text_get_size(&glyph, "0", FONT_NUM, 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_NONE);
+        int w = digits * glyph.x + 2 * COUNTER_PAD;
+        lv_obj_set_width(c->cur_box, w);
+        lv_obj_set_width(c->tot_box, w);
+    }
+    snprintf(text, sizeof(text), "%d", current);
+    lv_label_set_text(c->cur_label, text);
+    snprintf(text, sizeof(text), "%d", total);
+    lv_label_set_text(c->tot_label, text);
 }
 
 static lv_obj_t * make_icon(lv_obj_t * parent, const char * icon, uint32_t color)
@@ -1218,23 +1452,6 @@ static void format_time(uint32_t seconds, char * buffer, size_t size)
 
 static bool find_album(uint64_t album_id, player_album_t * out);
 
-static const char * battery_icon_for(int level, bool charging)
-{
-    if(charging) return ICON_BATTERY_CHARGING;
-    if(level < 0) return ICON_BATTERY;
-    if(level <= 15) return ICON_BATTERY;
-    if(level <= 40) return ICON_BATTERY_LOW;
-    if(level <= 75) return ICON_BATTERY_HALF;
-    return ICON_BATTERY_FULL;
-}
-
-static uint32_t battery_color_for(int level, bool charging)
-{
-    (void)charging;
-    if(level < 0) return COL_DIM;
-    return COL_MENU_BODY_FG;
-}
-
 /* -------------------------------------------------------------------------
  * Shell: status bar + vertical menubar
  * ------------------------------------------------------------------------- */
@@ -1258,7 +1475,6 @@ static int g_mini_queue_count = -999;
 static lv_obj_t * g_status_time;
 static bool g_clock_12h;
 static int g_clock_offset_min;
-static lv_obj_t * g_status_battery;
 static lv_obj_t * g_menubar;
 static lv_obj_t * g_menu_items[SCR_COUNT];
 static lv_obj_t * g_menu_icons[SCR_COUNT];
@@ -1370,6 +1586,15 @@ static void ui_mini_update(void)
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
 
+    bool has_track = snapshot.track.title[0] != '\0';
+    if(g_mini_star != NULL) {
+        lv_obj_set_hidden(g_mini_star, !has_track);
+    }
+    if(!has_track && g_mini_title != NULL) {
+        lv_label_set_text(g_mini_title, "");
+        if(g_mini_artist != NULL) lv_obj_set_hidden(g_mini_artist, true);
+    }
+
     uint32_t art_rev = player_artwork_revision();
     /* The mini player lives on every non-Now-Playing screen.  Re-writing its
      * labels and styles every 500 ms invalidates a large part of the screen
@@ -1396,8 +1621,7 @@ static void ui_mini_update(void)
 
     if(snapshot.track.id != g_mini_track_id || art_changed) {
         g_mini_track_id = snapshot.track.id;
-        lv_label_set_text(g_mini_title,
-                          snapshot.track.title[0] ? snapshot.track.title : "No track");
+        lv_label_set_text(g_mini_title, has_track ? snapshot.track.title : "");
         const char * artist = snapshot.track.artist;
         const char * album_text = snapshot.track.album;
         char second_line[192] = "";
@@ -1514,14 +1738,14 @@ static void build_mini_now(lv_obj_t * parent)
                           LV_FLEX_ALIGN_START);
     lv_obj_set_scrollable(text, false);
 
-    g_mini_title = make_label(text, "No track", FONT_H2, COL_MINI_FG);
+    g_mini_title = make_label(text, "", FONT_H2, COL_MINI_FG);
     lv_obj_set_width(g_mini_title, LV_PCT(100));
     lv_obj_set_height(g_mini_title, 34);
-    lv_label_set_long_mode(g_mini_title, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(g_mini_title);
     g_mini_artist = make_label(text, "", FONT_CAPTION, COL_MINI_MUTED);
     lv_obj_set_width(g_mini_artist, LV_PCT(100));
     lv_obj_set_height(g_mini_artist, 24);
-    lv_label_set_long_mode(g_mini_artist, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(g_mini_artist);
 
     /* Queue position and elapsed/duration: 2 x 80 px time block. */
     lv_obj_t * meta = lv_obj_create(g_mini);
@@ -1542,14 +1766,14 @@ static void build_mini_now(lv_obj_t * parent)
     lv_obj_set_width(g_mini_queue, LV_PCT(100));
     lv_obj_set_height(g_mini_queue, 24);
     lv_obj_set_style_text_align(g_mini_queue, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_label_set_long_mode(g_mini_queue, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(g_mini_queue);
 
     g_mini_time = make_label(meta, "0:00 / 0:00", FONT_NUM,
                              COL_MINI_MUTED);
     lv_obj_set_width(g_mini_time, LV_PCT(100));
     lv_obj_set_height(g_mini_time, 24);
     lv_obj_set_style_text_align(g_mini_time, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_label_set_long_mode(g_mini_time, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(g_mini_time);
 
     /* Three status icons with a 23 px visual gap between them. */
     lv_obj_t * modes = lv_obj_create(g_mini);
@@ -1643,7 +1867,7 @@ static void build_menubar(lv_obj_t * parent)
     for(int slot = 0; slot < 6; slot++) {
         int screen = menu_order[slot];
         lv_obj_t * item = lv_obj_create(menu_area);
-        lv_obj_set_size(item, MENUBAR_W, MENUBAR_W);
+        lv_obj_set_size(item, MENUBAR_W, MENUBAR_TILE_H);
         lv_obj_set_style_radius(item, 0, 0);
         lv_obj_set_style_bg_opa(item, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(item, 0, 0);
@@ -1661,22 +1885,6 @@ static void build_menubar(lv_obj_t * parent)
                                           &bootstrap_icons_40, COL_MUTED);
     }
 
-    /* iOS device battery sits below the menu icons. */
-    lv_obj_t * battery_area = lv_obj_create(g_menubar);
-    lv_obj_set_size(battery_area, LV_PCT(100), MENUBAR_BATTERY_H);
-    lv_obj_set_style_bg_color(battery_area, lv_color_hex(COL_MENU_BATT_BG), 0);
-    lv_obj_set_style_bg_opa(battery_area, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(battery_area, 0, 0);
-    lv_obj_set_style_radius(battery_area, 0, 0);
-    lv_obj_set_style_pad_all(battery_area, 0, 0);
-    lv_obj_set_style_pad_all(battery_area, 0, 0);
-    lv_obj_set_flex_flow(battery_area, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(battery_area, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(battery_area, false);
-
-    g_status_battery = make_label(battery_area, ICON_BATTERY_FULL,
-                                  &bootstrap_icons_32, COL_MENU_BODY_FG);
 
 }
 
@@ -1727,6 +1935,11 @@ void ui_set_system_config(const ui_system_config_t * cfg)
 void ui_set_system_config_changed_cb(void (*cb)(const ui_system_config_t * cfg))
 {
     g_system_config_changed_cb = cb;
+}
+
+void ui_set_time_changed_cb(void (*cb)(time_t now))
+{
+    g_time_changed_cb = cb;
 }
 
 void ui_set_network_status(const char * status, const char * ip)
@@ -1817,25 +2030,6 @@ static void update_clock(void)
     }
 }
 
-static void update_status(void)
-{
-    static int last_level = -999;
-    static bool last_charging = false;
-
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
-
-    if(snapshot.battery != last_level || snapshot.charging != last_charging) {
-        last_level = snapshot.battery;
-        last_charging = snapshot.charging;
-        lv_label_set_text(g_status_battery,
-                          battery_icon_for(snapshot.battery, snapshot.charging));
-        lv_obj_set_style_text_color(g_status_battery,
-                                    lv_color_hex(battery_color_for(snapshot.battery,
-                                                                   snapshot.charging)), 0);
-    }
-}
-
 static void settings_time_blink_tick(void);
 
 static void ui_tick_cb(lv_timer_t * timer)
@@ -1848,7 +2042,6 @@ static void ui_tick_cb(lv_timer_t * timer)
 
     update_clock();
     if(g_ui_trace) perf_t1 = perf_now();
-    update_status();
     if(g_ui_trace) perf_t2 = perf_now();
     ui_menu_play_update();
     if(g_ui_trace) perf_t3 = perf_now();
@@ -1906,6 +2099,10 @@ static void ui_show_screen(screen_id_t id)
 
     if(g_ctx_menu_open) context_menu_close();
 
+    if(g_current_screen == SCR_SETTINGS && id != SCR_SETTINGS) {
+        ble_remote_scan_stop();
+    }
+
     if(id == g_current_screen) {
         if(g_pages[id].same_key) g_pages[id].same_key();
         return;
@@ -1915,6 +2112,7 @@ static void ui_show_screen(screen_id_t id)
     g_current_screen = id;
     ui_exit_edit();
     focus_clear();
+    ui_page_teardown();
     lv_obj_clean(g_page);
     ui_set_hint("");
     ui_layout_page_area();
@@ -1931,6 +2129,7 @@ static void ui_rebuild_page(void)
 {
     ui_exit_edit();
     focus_clear();
+    ui_page_teardown();
     lv_obj_clean(g_page);
     ui_set_hint("");
     uint32_t trace_start = lv_tick_get();
@@ -2113,6 +2312,12 @@ void ui_handle_key(ui_key_t key)
             ui_list_page(1);
             break;
         case UI_KEY_SCREEN_PREV: {
+            /* The controller's "previous page" button opens the queue on
+             * Now Playing, matching the Page Up shortcut. */
+            if(g_current_screen == SCR_NOW_PLAYING) {
+                np_toggle_queue();
+                break;
+            }
             int target = (int)g_current_screen - 1;
             if(target == SCR_BLUETOOTH) target--;
             if(target >= 0) ui_show_screen((screen_id_t)target);
@@ -2141,6 +2346,8 @@ void ui_select_screen(int index)
  * ------------------------------------------------------------------------- */
 static lv_obj_t * np_title;
 static lv_obj_t * np_meta;
+static lv_obj_t * np_artist;
+static lv_obj_t * np_album;
 static lv_obj_t * np_time_cur;
 static lv_obj_t * np_time_dur;
 static lv_obj_t * np_progress;
@@ -2150,25 +2357,33 @@ static lv_obj_t * np_repeat_btn;
 static lv_obj_t * np_shuffle_icon;
 static lv_obj_t * np_repeat_icon;
 static lv_obj_t * np_star_icon;
+static lv_obj_t * np_star_btn;
 static lv_obj_t * np_cover_widget;
 static uint32_t g_np_cover_rev;
 static uint64_t g_np_cover_track_id;
-#define NP_QUEUE_ROW_H        54
+#define NP_QUEUE_ROW_H        56
 #define NP_QUEUE_VISIBLE_ROWS  11
-#define NP_QUEUE_LIST_H       (NP_QUEUE_VISIBLE_ROWS * NP_QUEUE_ROW_H + \
-                              (NP_QUEUE_VISIBLE_ROWS - 1) * LIST_ROW_GAP)
+#define NP_QUEUE_LIST_H       (NP_QUEUE_VISIBLE_ROWS * NP_QUEUE_ROW_H)
 
-/* Golden-ratio Now Playing layout: the info column is 1.618x the cover
- * width, and the two main vertical gaps are distributed around 1.618:1. */
+/* Default Now Playing layout: cover on the left; title (with the star at
+ * its right edge), artist and album occupy three separate lines.  The
+ * progress bar and the five transport/mode buttons span the full column
+ * width below the cover. */
 #define NP_COVER_SIZE         360
 #define NP_INFO_W             582
-#define NP_TOP_W             (NP_COVER_SIZE + 20 + NP_INFO_W)
-#define NP_GAP_PROGRESS       48
-#define NP_GAP_MODES          30
-#define NP_BOTTOM_SPACER      60
+#define NP_COVER_GAP           24
+#define NP_TOP_W             (NP_COVER_SIZE + NP_COVER_GAP + NP_INFO_W)
+#define NP_TOP_SPACER         72
+#define NP_GAP_PROGRESS       36
+#define NP_BUTTON_W            96
+#define NP_BUTTON_H            84
+#define NP_BUTTON_GAP          28
+/* Vertical rhythm for the three metadata lines: 26:16 ≈ 1.625 (~φ). */
+#define NP_TEXT_GAP_TITLE      26
+#define NP_TEXT_GAP_ARTIST     16
 
 static lv_obj_t * np_queue_list;
-static lv_obj_t * np_queue_count;
+static counter_t np_queue_counter;
 static bool np_queue_visible = false;
 static int np_queue_focus_start;
 static uint64_t np_last_track;
@@ -2272,28 +2487,60 @@ static void np_refresh_ui(void)
     player_get_snapshot(&snapshot);
 
     bool has_track = snapshot.track.title[0] != '\0';
-    lv_label_set_text(np_title, has_track ? snapshot.track.title : "No track");
-    char meta_text[192] = "";
-    if(has_track) {
-        const char * artist = snapshot.track.artist;
-        const char * album = snapshot.track.album;
-        if(artist[0] != '\0' && album[0] != '\0') {
-            snprintf(meta_text, sizeof(meta_text), "%s - %s", artist, album);
+    const char * title = has_track ? snapshot.track.title : "";
+    if(np_title != NULL) {
+        if(strcmp(lv_label_get_text(np_title), title) != 0) {
+            lv_label_set_text(np_title, title);
+            if(!np_queue_visible) {
+                /* Keep the star hugging the end of the title.  Measure the
+                 * rendered text so long titles stop before the star and
+                 * ellipsize instead of pushing it out of the column. */
+                lv_point_t title_size;
+                lv_text_get_size(&title_size, title, FONT_NP_TITLE, 0, 0,
+                                 LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+                int32_t title_w = title_size.x;
+                int32_t max_w = NP_INFO_W;
+                if(title_w > max_w) title_w = max_w;
+                lv_obj_set_width(np_title, title_w);
+            }
         }
-        else if(artist[0] != '\0') {
-            snprintf(meta_text, sizeof(meta_text), "%s", artist);
-        }
-        else if(album[0] != '\0') {
-            snprintf(meta_text, sizeof(meta_text), "%s", album);
-        }
+        lv_obj_set_hidden(np_title, !has_track);
     }
-    if(meta_text[0] != '\0') {
-        lv_label_set_text(np_meta, meta_text);
-        lv_obj_set_hidden(np_meta, false);
+    if(np_star_btn != NULL) {
+        lv_obj_set_hidden(np_star_btn, !has_track);
+    }
+
+    if(np_queue_visible) {
+        char meta_text[192] = "";
+        if(has_track) {
+            const char * artist = snapshot.track.artist;
+            const char * album = snapshot.track.album;
+            if(artist[0] != '\0' && album[0] != '\0') {
+                snprintf(meta_text, sizeof(meta_text), "%s - %s", artist, album);
+            }
+            else if(artist[0] != '\0') {
+                snprintf(meta_text, sizeof(meta_text), "%s", artist);
+            }
+            else if(album[0] != '\0') {
+                snprintf(meta_text, sizeof(meta_text), "%s", album);
+            }
+        }
+        if(meta_text[0] != '\0') {
+            lv_label_set_text(np_meta, meta_text);
+            lv_obj_set_hidden(np_meta, false);
+        }
+        else {
+            lv_label_set_text(np_meta, "");
+            lv_obj_set_hidden(np_meta, true);
+        }
     }
     else {
-        lv_label_set_text(np_meta, "");
-        lv_obj_set_hidden(np_meta, true);
+        const char * artist = has_track ? snapshot.track.artist : "";
+        const char * album = has_track ? snapshot.track.album : "";
+        lv_label_set_text(np_artist, artist);
+        lv_obj_set_hidden(np_artist, artist[0] == '\0');
+        lv_label_set_text(np_album, album);
+        lv_obj_set_hidden(np_album, album[0] == '\0');
     }
 
     /* The NP cache is keyed by the iAP2 song ID (track_key).  A track
@@ -2345,14 +2592,14 @@ static void np_refresh_ui(void)
     lv_obj_set_style_text_color(np_star_icon,
                                 lv_color_hex(snapshot.starred ? COL_ACCENT : COL_MUTED), 0);
 
-    if(np_queue_count) {
+    if(np_queue_counter.group) {
         int index = player_queue_index();
         int count = player_queue_count();
         if(index >= 0 && count > 0) {
-            lv_label_set_text_fmt(np_queue_count, "%d/%d", index + 1, count);
+            counter_set(&np_queue_counter, index + 1, count);
         }
         else {
-            lv_label_set_text(np_queue_count, "0/0");
+            counter_set(&np_queue_counter, 0, 0);
         }
     }
 }
@@ -2384,7 +2631,11 @@ static void np_same_key(void)
 
 static bool np_back(void)
 {
-    if(np_queue_visible && g_focus_count > 0) focus_select(0);
+    /* Back closes the Up Next panel when it is open. Now Playing is the
+     * root screen, so with the panel hidden there is nowhere to go. */
+    if(np_queue_visible) {
+        np_toggle_queue();
+    }
     return true;
 }
 
@@ -2394,7 +2645,8 @@ static void np_queue_row(lv_obj_t * parent, int queue_index, bool current)
     if(!player_queue_at(queue_index, &track)) return;
 
     lv_obj_t * row = make_row(parent, NP_QUEUE_ROW_H);
-    lv_obj_set_style_pad_column(row, 8, 0);
+    lv_obj_set_style_pad_right(row, 16, 0);
+    lv_obj_set_style_pad_column(row, 10, 0);
     lv_obj_t * marker = make_label(row, "", FONT_NUM, COL_MUTED);
     lv_obj_set_width(marker, 30);
     if(current) {
@@ -2408,34 +2660,21 @@ static void np_queue_row(lv_obj_t * parent, int queue_index, bool current)
         lv_label_set_text(marker, number);
     }
 
-    lv_obj_t * text = lv_obj_create(row);
-    lv_obj_set_height(text, 46);
-    lv_obj_set_flex_grow(text, 1);
-    lv_obj_set_style_bg_opa(text, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(text, 0, 0);
-    lv_obj_set_style_pad_all(text, 0, 0);
-    lv_obj_set_style_pad_row(text, 0, 0);
-    lv_obj_set_flex_flow(text, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(text, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
-    lv_obj_set_scrollable(text, false);
-
-    lv_obj_t * title = make_label(text, track.title, FONT_QUEUE,
+    lv_obj_t * title = make_label(row, track.title, FONT_H2,
                                   current ? COL_ACCENT : COL_TEXT);
-    lv_obj_set_width(title, LV_PCT(100));
-    lv_obj_set_height(title, 26);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_flex_grow(title, 1);
+    lv_obj_set_height(title, 34);
+    ui_text_fade(title);
 
-    lv_obj_t * artist = make_label(text, track.artist, FONT_QUEUE_SUB, COL_MUTED);
-    lv_obj_set_width(artist, LV_PCT(100));
-    lv_obj_set_height(artist, 20);
-    lv_label_set_long_mode(artist, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_t * artist = make_label(row, track.artist, FONT_H2, COL_MUTED);
+    lv_obj_set_width(artist, 200);
+    lv_obj_set_height(artist, 34);
+    ui_text_clip(artist);
 
     char duration[16];
     format_time(track.duration_sec, duration, sizeof(duration));
     lv_obj_t * length = make_label(row, duration, FONT_NUM, COL_MUTED);
-    lv_obj_set_width(length, 52);
+    lv_obj_set_width(length, 56);
     lv_obj_set_style_text_align(length, LV_TEXT_ALIGN_RIGHT, 0);
 
     focus_add_clickable(row, np_queue_action, NULL, (void *)(intptr_t)queue_index, true);
@@ -2724,6 +2963,14 @@ static lv_obj_t * np_vertical_gap(lv_obj_t * parent, int height)
     return gap;
 }
 
+/* Flexible spacer: splits the remaining vertical space with its sibling. */
+static lv_obj_t * np_flex_gap(lv_obj_t * parent)
+{
+    lv_obj_t * gap = np_vertical_gap(parent, 1);
+    lv_obj_set_flex_grow(gap, 1);
+    return gap;
+}
+
 /* Queue-open layout: cover on top, then title + star, artist - album,
  * progress, and one transport row (shuffle / prev / play / next / repeat). */
 static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
@@ -2746,13 +2993,14 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(title_row, false);
 
-    np_title = make_label(title_row, "No track", FONT_H2, COL_TEXT);
+    np_title = make_label(title_row, "", FONT_H2, COL_TEXT);
     lv_obj_set_flex_grow(np_title, 1);
     lv_obj_set_height(np_title, 44);
-    lv_label_set_long_mode(np_title, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(np_title);
 
     lv_obj_t * star = make_flat_icon_button(title_row, ICON_STAR, 56, 56,
                                             COL_MUTED, &bootstrap_icons_32);
+    np_star_btn = star;
     np_star_icon = lv_obj_get_child(star, 0);
     lv_obj_add_event_cb(star, np_star_click_cb, LV_EVENT_CLICKED, NULL);
 
@@ -2771,7 +3019,7 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     np_meta = make_label(meta_row, "", FONT_H2, COL_MUTED);
     lv_obj_set_width(np_meta, LV_PCT(100));
     lv_obj_set_height(np_meta, 40);
-    lv_label_set_long_mode(np_meta, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(np_meta);
 
     np_vertical_gap(left, 12);
 
@@ -2842,8 +3090,12 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
 
 static void np_create(lv_obj_t * parent)
 {
-    np_queue_count = NULL;
+    np_queue_counter.group = NULL;
     np_queue_list = NULL;
+    np_meta = NULL;
+    np_artist = NULL;
+    np_album = NULL;
+    np_star_btn = NULL;
     np_cover_widget = NULL;
     if(player_queue_count() <= 0) np_queue_visible = false;
 
@@ -2934,7 +3186,7 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_style_bg_opa(left, LV_OPA_TRANSP, 0);
     }
     if(np_queue_visible) {
-        lv_obj_set_size(left, 700, LV_PCT(100));
+        lv_obj_set_size(left, 620, LV_PCT(100));
     }
     else {
         lv_obj_set_size(left, LV_PCT(100), LV_PCT(100));
@@ -2948,176 +3200,147 @@ static void np_create(lv_obj_t * parent)
         np_build_vertical_left(left, now_cover, cover_color);
     }
     else {
+        /* Keep the cover/progress block where it was; the transport row is
+         * centred by the two flexible spacers below the progress bar. */
+        np_vertical_gap(left, NP_TOP_SPACER);
 
-    lv_obj_t * top_spacer = lv_obj_create(left);
-    lv_obj_set_width(top_spacer, LV_PCT(100));
-    lv_obj_set_height(top_spacer, 1);
-    lv_obj_set_flex_grow(top_spacer, 1);
-    lv_obj_set_style_bg_opa(top_spacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(top_spacer, 0, 0);
-    lv_obj_set_style_pad_all(top_spacer, 0, 0);
-    lv_obj_set_scrollable(top_spacer, false);
+        lv_obj_t * top = lv_obj_create(left);
+        lv_obj_set_size(top, NP_TOP_W, NP_COVER_SIZE);
+        lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(top, 0, 0);
+        lv_obj_set_style_pad_all(top, 0, 0);
+        lv_obj_set_style_pad_column(top, NP_COVER_GAP, 0);
+        lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollable(top, false);
 
-    lv_obj_t * top = lv_obj_create(left);
-    lv_obj_set_size(top, np_queue_visible ? LV_PCT(100) : NP_TOP_W,
-                    NP_COVER_SIZE);
-    lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(top, 0, 0);
-    lv_obj_set_style_pad_all(top, 0, 0);
-    lv_obj_set_style_pad_column(top, 20, 0);
-    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(top, false);
+        np_cover_widget = make_cover(top, now_cover, cover_color, NP_COVER_SIZE);
 
-    np_cover_widget = make_cover(top, now_cover, cover_color, NP_COVER_SIZE);
+        lv_obj_t * info = lv_obj_create(top);
+        lv_obj_set_height(info, NP_COVER_SIZE);
+        lv_obj_set_flex_grow(info, 1);
+        lv_obj_set_style_bg_opa(info, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(info, 0, 0);
+        lv_obj_set_style_pad_all(info, 0, 0);
+        lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(info, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_set_style_pad_row(info, 0, 0);
+        lv_obj_set_scrollable(info, false);
 
-    lv_obj_t * info = lv_obj_create(top);
-    lv_obj_set_height(info, NP_COVER_SIZE);
-    lv_obj_set_flex_grow(info, 1);
-    lv_obj_set_style_bg_opa(info, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(info, 0, 0);
-    lv_obj_set_style_pad_all(info, 0, 0);
-    lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(info, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(info, 0, 0);
-    lv_obj_set_style_pad_ver(info, 6, 0);
-    lv_obj_set_scrollable(info, false);
+        lv_obj_t * title_row = lv_obj_create(info);
+        lv_obj_set_size(title_row, LV_PCT(100), 60);
+        lv_obj_set_style_bg_opa(title_row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(title_row, 0, 0);
+        lv_obj_set_style_pad_all(title_row, 0, 0);
+        lv_obj_set_style_pad_column(title_row, 12, 0);
+        lv_obj_set_flex_flow(title_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(title_row, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollable(title_row, false);
 
-    /* Keep the title and metadata together as one text group, and place the
-     * group's optical center near the golden-section point (38.2%) of the
-     * cover height instead of pinning the title to the top edge. */
-    lv_obj_t * text_top_gap = lv_obj_create(info);
-    lv_obj_set_size(text_top_gap, LV_PCT(100), 82);
-    lv_obj_set_style_bg_opa(text_top_gap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(text_top_gap, 0, 0);
-    lv_obj_set_style_pad_all(text_top_gap, 0, 0);
-    lv_obj_set_scrollable(text_top_gap, false);
+        np_title = make_label(title_row, "", FONT_NP_TITLE, COL_TEXT);
+        lv_obj_set_width(np_title, 300);
+        lv_obj_set_height(np_title, 50);
+        ui_text_fade(np_title);
 
-    np_title = make_label(info, "No track", FONT_NP_TITLE, COL_TEXT);
-    lv_obj_set_width(np_title, LV_PCT(100));
-    lv_obj_set_height(np_title, 50);
-    lv_label_set_long_mode(np_title, LV_LABEL_LONG_MODE_DOTS);
+        np_vertical_gap(info, NP_TEXT_GAP_TITLE);
 
-    lv_obj_t * title_meta_gap = lv_obj_create(info);
-    lv_obj_set_size(title_meta_gap, LV_PCT(100), 12);
-    lv_obj_set_style_bg_opa(title_meta_gap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(title_meta_gap, 0, 0);
-    lv_obj_set_style_pad_all(title_meta_gap, 0, 0);
-    lv_obj_set_scrollable(title_meta_gap, false);
+        np_artist = make_label(info, "", FONT_NP_ARTIST, COL_MUTED);
+        lv_obj_set_width(np_artist, LV_PCT(100));
+        lv_obj_set_height(np_artist, 44);
+        ui_text_fade(np_artist);
 
-    np_meta = make_label(info, "", np_queue_visible ? FONT_H2 : FONT_NP_ARTIST,
-                         COL_MUTED);
-    lv_obj_set_width(np_meta, LV_PCT(100));
-    lv_obj_set_height(np_meta, 40);
-    lv_label_set_long_mode(np_meta, LV_LABEL_LONG_MODE_DOTS);
+        np_vertical_gap(info, NP_TEXT_GAP_ARTIST);
 
-    lv_obj_t * meta_controls_gap = lv_obj_create(info);
-    lv_obj_set_size(meta_controls_gap, LV_PCT(100), 80);
-    lv_obj_set_style_bg_opa(meta_controls_gap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(meta_controls_gap, 0, 0);
-    lv_obj_set_style_pad_all(meta_controls_gap, 0, 0);
-    lv_obj_set_scrollable(meta_controls_gap, false);
+        np_album = make_label(info, "", FONT_NP_ALBUM, COL_MUTED);
+        lv_obj_set_width(np_album, LV_PCT(100));
+        lv_obj_set_height(np_album, 44);
+        ui_text_fade(np_album);
 
-    lv_obj_t * controls = lv_obj_create(info);
-    lv_obj_set_size(controls, LV_PCT(100), 84);
-    lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(controls, 0, 0);
-    lv_obj_set_style_pad_all(controls, 0, 0);
-    /* Queue view narrows the info column to 280 px: keep the enlarged
-     * transport buttons inside it. */
-    lv_obj_set_style_pad_column(controls, np_queue_visible ? 0 : 10, 0);
-    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(controls, false);
+        lv_obj_t * star = make_flat_icon_button(info, ICON_STAR, 56, 56,
+                                                COL_MUTED, &bootstrap_icons_40);
+        lv_obj_set_style_margin_left(star, -8, 0);
+        np_star_btn = star;
+        np_star_icon = lv_obj_get_child(star, 0);
+        lv_obj_add_event_cb(star, np_star_click_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t * prev = make_flat_icon_button(controls, ICON_PREV, 84, 70,
-                                            COL_TEXT, &bootstrap_icons_48);
-    lv_obj_t * play = make_flat_icon_button(controls, ICON_PLAY, 108, 80,
-                                            COL_ACCENT, &bootstrap_icons_48);
-    lv_obj_t * next = make_flat_icon_button(controls, ICON_NEXT, 84, 70,
-                                            COL_TEXT, &bootstrap_icons_48);
-    np_play_icon = lv_obj_get_child(play, 0);
-    lv_obj_add_event_cb(prev, np_prev_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(play, np_play_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(next, np_next_click_cb, LV_EVENT_CLICKED, NULL);
+        np_vertical_gap(left, NP_GAP_PROGRESS);
 
-    lv_obj_t * gap_before_progress = lv_obj_create(left);
-    lv_obj_set_size(gap_before_progress, LV_PCT(100), NP_GAP_PROGRESS);
-    lv_obj_set_style_bg_opa(gap_before_progress, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(gap_before_progress, 0, 0);
-    lv_obj_set_style_pad_all(gap_before_progress, 0, 0);
-    lv_obj_set_scrollable(gap_before_progress, false);
+        lv_obj_t * progress_row = lv_obj_create(left);
+        lv_obj_set_size(progress_row, NP_TOP_W, 32);
+        lv_obj_set_style_bg_opa(progress_row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(progress_row, 0, 0);
+        lv_obj_set_style_pad_all(progress_row, 0, 0);
+        lv_obj_set_style_pad_column(progress_row, 12, 0);
+        lv_obj_set_flex_flow(progress_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(progress_row, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollable(progress_row, false);
 
-    lv_obj_t * progress_row = lv_obj_create(left);
-    lv_obj_set_size(progress_row, np_queue_visible ? LV_PCT(100) : NP_TOP_W, 28);
-    lv_obj_set_style_bg_opa(progress_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(progress_row, 0, 0);
-    lv_obj_set_style_pad_all(progress_row, 0, 0);
-    lv_obj_set_style_pad_column(progress_row, 8, 0);
-    lv_obj_set_flex_flow(progress_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(progress_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(progress_row, false);
+        np_time_cur = make_label(progress_row, "0:00", FONT_NP_TIME, COL_MUTED);
+        lv_obj_set_width(np_time_cur, 88);
+        lv_obj_set_style_text_align(np_time_cur, LV_TEXT_ALIGN_LEFT, 0);
+        np_progress = lv_bar_create(progress_row);
+        lv_obj_set_height(np_progress, 10);
+        lv_obj_set_flex_grow(np_progress, 1);
+        lv_obj_set_style_bg_color(np_progress, lv_color_hex(0x22303F),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(np_progress, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(np_progress, lv_color_hex(COL_ACCENT),
+                                  LV_PART_INDICATOR);
+        lv_obj_set_style_radius(np_progress, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(np_progress, 0, LV_PART_INDICATOR);
+        np_time_dur = make_label(progress_row, "0:00", FONT_NP_TIME, COL_MUTED);
+        lv_obj_set_width(np_time_dur, 88);
+        lv_obj_set_style_text_align(np_time_dur, LV_TEXT_ALIGN_RIGHT, 0);
 
-    np_time_cur = make_label(progress_row, "0:00", FONT_NP_TIME, COL_MUTED);
-    lv_obj_set_width(np_time_cur, 72);
-    lv_obj_set_style_text_align(np_time_cur, LV_TEXT_ALIGN_LEFT, 0);
-    np_progress = lv_bar_create(progress_row);
-    lv_obj_set_height(np_progress, 8);
-    lv_obj_set_flex_grow(np_progress, 1);
-    lv_obj_set_style_bg_color(np_progress, lv_color_hex(0x22303F), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(np_progress, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(np_progress, lv_color_hex(COL_ACCENT), LV_PART_INDICATOR);
-    lv_obj_set_style_radius(np_progress, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(np_progress, 0, LV_PART_INDICATOR);
-    np_time_dur = make_label(progress_row, "0:00", FONT_NP_TIME, COL_MUTED);
-    lv_obj_set_width(np_time_dur, 72);
-    lv_obj_set_style_text_align(np_time_dur, LV_TEXT_ALIGN_RIGHT, 0);
+        np_flex_gap(left);
 
-    lv_obj_t * gap_before_modes = lv_obj_create(left);
-    lv_obj_set_size(gap_before_modes, LV_PCT(100), NP_GAP_MODES);
-    lv_obj_set_style_bg_opa(gap_before_modes, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(gap_before_modes, 0, 0);
-    lv_obj_set_style_pad_all(gap_before_modes, 0, 0);
-    lv_obj_set_scrollable(gap_before_modes, false);
+        /* One transport row: shuffle, prev, play, next, repeat. Every button
+         * uses the same 96x84 target and 48 px icon so the row reads evenly
+         * and the touch targets are comfortable on the 5" panel. */
+        lv_obj_t * controls = lv_obj_create(left);
+        lv_obj_set_size(controls, NP_TOP_W, NP_BUTTON_H);
+        lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(controls, 0, 0);
+        lv_obj_set_style_pad_all(controls, 0, 0);
+        lv_obj_set_style_pad_column(controls, NP_BUTTON_GAP, 0);
+        lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollable(controls, false);
 
-    lv_obj_t * modes = lv_obj_create(left);
-    lv_obj_set_size(modes, np_queue_visible ? LV_PCT(100) : NP_TOP_W, 56);
-    lv_obj_set_style_bg_opa(modes, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(modes, 0, 0);
-    lv_obj_set_style_pad_all(modes, 0, 0);
-    lv_obj_set_style_pad_column(modes, 40, 0);
-    lv_obj_set_flex_flow(modes, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(modes, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(modes, false);
+        lv_obj_t * shuffle = make_flat_icon_button(controls, ICON_SHUFFLE,
+                                                    NP_BUTTON_W, NP_BUTTON_H,
+                                                    COL_MUTED,
+                                                    &bootstrap_icons_48);
+        lv_obj_t * prev = make_flat_icon_button(controls, ICON_PREV,
+                                                NP_BUTTON_W, NP_BUTTON_H,
+                                                COL_TEXT, &bootstrap_icons_48);
+        lv_obj_t * play = make_flat_icon_button(controls, ICON_PLAY,
+                                                NP_BUTTON_W, NP_BUTTON_H,
+                                                COL_ACCENT, &bootstrap_icons_48);
+        lv_obj_t * next = make_flat_icon_button(controls, ICON_NEXT,
+                                                NP_BUTTON_W, NP_BUTTON_H,
+                                                COL_TEXT, &bootstrap_icons_48);
+        lv_obj_t * repeat = make_flat_icon_button(controls, ICON_REPEAT,
+                                                  NP_BUTTON_W, NP_BUTTON_H,
+                                                  COL_MUTED,
+                                                  &bootstrap_icons_48);
+        np_shuffle_btn = shuffle;
+        np_repeat_btn = repeat;
+        np_shuffle_icon = lv_obj_get_child(shuffle, 0);
+        np_repeat_icon = lv_obj_get_child(repeat, 0);
+        np_play_icon = lv_obj_get_child(play, 0);
+        lv_obj_add_event_cb(shuffle, np_shuffle_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(prev, np_prev_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(play, np_play_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(next, np_next_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(repeat, np_repeat_click_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t * shuffle = make_flat_icon_button(modes, ICON_SHUFFLE, 56, 56,
-                                                COL_MUTED, &bootstrap_icons_32);
-    lv_obj_t * repeat = make_flat_icon_button(modes, ICON_REPEAT, 56, 56,
-                                               COL_MUTED, &bootstrap_icons_32);
-    lv_obj_t * star = make_flat_icon_button(modes, ICON_STAR, 56, 56,
-                                            COL_MUTED, &bootstrap_icons_32);
-    np_shuffle_btn = shuffle;
-    np_repeat_btn = repeat;
-    np_shuffle_icon = lv_obj_get_child(shuffle, 0);
-    np_repeat_icon = lv_obj_get_child(repeat, 0);
-    np_star_icon = lv_obj_get_child(star, 0);
-    lv_obj_add_event_cb(shuffle, np_shuffle_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(repeat, np_repeat_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(star, np_star_click_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t * bottom_spacer = lv_obj_create(left);
-    lv_obj_set_width(bottom_spacer, LV_PCT(100));
-    lv_obj_set_height(bottom_spacer, NP_BOTTOM_SPACER);
-    lv_obj_set_style_bg_opa(bottom_spacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bottom_spacer, 0, 0);
-    lv_obj_set_style_pad_all(bottom_spacer, 0, 0);
-    lv_obj_set_scrollable(bottom_spacer, false);
-
+        np_flex_gap(left);
     }
 
     np_queue_focus_start = g_focus_count;
@@ -3128,6 +3351,7 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_flex_grow(right, 1);
         lv_obj_set_height(right, LV_PCT(100));
         lv_obj_set_style_pad_all(right, 18, 0);
+        lv_obj_set_style_pad_right(right, 16, 0);
 
         lv_obj_t * queue_head = lv_obj_create(right);
         lv_obj_set_size(queue_head, LV_PCT(100), LV_SIZE_CONTENT);
@@ -3139,13 +3363,13 @@ static void np_create(lv_obj_t * parent)
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollable(queue_head, false);
         make_label(queue_head, "Up Next", FONT_H2, COL_TEXT);
-        np_queue_count = make_label(queue_head, "0/0", FONT_NUM,
-                                    COL_MUTED);
+        counter_create(queue_head, &np_queue_counter);
 
         np_queue_list = make_scroll(right);
         lv_obj_set_flex_grow(np_queue_list, 0);
         lv_obj_set_height(np_queue_list, NP_QUEUE_LIST_H);
-        lv_obj_set_style_pad_right(np_queue_list, 14, 0);
+        lv_obj_set_style_pad_right(np_queue_list, 0, 0);
+        lv_obj_set_style_pad_row(np_queue_list, 0, 0);
         int total = player_queue_count();
         int start = player_queue_index();
         if(start < 0) start = 0;
@@ -3164,14 +3388,17 @@ static void np_create(lv_obj_t * parent)
 /* -------------------------------------------------------------------------
  * Albums
  * ------------------------------------------------------------------------- */
-#define ALBUMS_ROW_H       77
-#define ALBUMS_VISIBLE_ROWS 7
-#define ALBUMS_LIST_H      (ALBUMS_VISIBLE_ROWS * ALBUMS_ROW_H + \
-                            (ALBUMS_VISIBLE_ROWS - 1) * LIST_ROW_GAP)
-#define ALBUMS_STRIDE      (ALBUMS_ROW_H + LIST_ROW_GAP)
-#define ALBUMS_POOL        8
-#define ALBUM_TRACK_ROW_H  52
-#define ALBUM_HEADER_H     (34 + ALBUM_TRACK_ROW_H)
+/* Albums layout (content area 1172 x 648, below the 72 px mini bar):
+ *   left : 16 pad + 56 header + 8 x 70 rows + 16 pad = 648
+ *   right: 16 pad + 112 header + 9 x 56 rows + 16 pad = 648 */
+#define ALBUMS_HEADER_H    56
+#define ALBUMS_ROW_H       70
+#define ALBUMS_VISIBLE_ROWS 8
+#define ALBUMS_LIST_H      (ALBUMS_VISIBLE_ROWS * ALBUMS_ROW_H)
+#define ALBUMS_STRIDE      ALBUMS_ROW_H
+#define ALBUMS_POOL        10
+#define ALBUM_TRACK_ROW_H  56
+#define ALBUM_HEADER_H     112
 #define ALBUM_TRACK_ROWS   9
 #define ALBUM_TRACK_LIST_H (ALBUM_TRACK_ROWS * ALBUM_TRACK_ROW_H)
 #define ALBUM_DETAIL_MAX_TRACKS 18
@@ -3180,7 +3407,9 @@ static int albums_selected;
 static bool albums_detail_open;
 static lv_obj_t * albums_right_content;
 static lv_obj_t * albums_left_list;
-static lv_obj_t * albums_count_label;
+static counter_t albums_counter;
+static lv_obj_t * albums_shuffle_icon;
+static int albums_play_focus = -1;
 static int albums_left_scroll_y;
 static lv_obj_t * albums_rows[ALBUMS_POOL];
 static lv_obj_t * albums_row_covers[ALBUMS_POOL];
@@ -3196,16 +3425,20 @@ static int albums_view_h;
 static int albums_first_index = -1;
 static bool albums_detail_dirty;
 static lv_timer_t * albums_detail_timer;
+static lv_obj_t * albums_detail_title;
+static lv_obj_t * artists_detail_name;
+static lv_obj_t * playlists_detail_title;
+static lv_obj_t * playlists_name_labels[64];
 
 static void albums_update_count(void)
 {
-    if(albums_count_label == NULL) return;
+    if(albums_counter.group == NULL) return;
     int count = player_album_count();
     if(count <= 0) {
-        lv_label_set_text(albums_count_label, "0/0");
+        counter_set(&albums_counter, 0, 0);
         return;
     }
-    lv_label_set_text_fmt(albums_count_label, "%d/%d", albums_selected + 1, count);
+    counter_set(&albums_counter, albums_selected + 1, count);
 }
 
 static void albums_rebuild(void)
@@ -3216,8 +3449,22 @@ static void albums_rebuild(void)
     ui_rebuild_page();
 }
 
+/* Snap touch scrolling to whole track rows without forcing the focused row
+ * to the top of the viewport. */
+static void albums_track_scroll_end_cb(lv_event_t * event)
+{
+    lv_obj_t * list = lv_event_get_target(event);
+    int top = lv_obj_get_scroll_top(list);
+    int snapped = ((top + ALBUM_TRACK_ROW_H / 2) / ALBUM_TRACK_ROW_H) *
+                  ALBUM_TRACK_ROW_H;
+    if(snapped != top) {
+        lv_obj_scroll_to_y(list, snapped, LV_ANIM_ON);
+    }
+}
+
 static void albums_render_detail(lv_obj_t * parent, bool interactive);
 static void albums_select(int index);
+
 static void albums_scroll_to_selected(void);
 
 static void albums_apply_row_style(lv_obj_t * row, int index)
@@ -3366,6 +3613,7 @@ static void albums_scroll_cb(lv_event_t * event)
 static void albums_detail_timer_cb(lv_timer_t * timer)
 {
     lv_timer_pause(timer);
+    if(g_current_screen != SCR_ALBUMS) return;
     if(albums_detail_dirty && albums_right_content != NULL) {
         albums_detail_dirty = false;
         uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
@@ -3431,7 +3679,7 @@ static void albums_scroll_to_selected(void)
     else if(row_top + ALBUMS_ROW_H > top + view) {
         new_top = row_top + ALBUMS_ROW_H - view;
     }
-    int max_top = count * ALBUMS_STRIDE - LIST_ROW_GAP - view;
+    int max_top = count * ALBUMS_STRIDE - view;
     if(max_top < 0) max_top = 0;
     if(new_top < 0) new_top = 0;
     if(new_top > max_top) new_top = max_top;
@@ -3473,7 +3721,12 @@ static void albums_open(void * user)
     albums_update_count();
     albums_detail_open = true;
     albums_rebuild();
-    if(g_focus_count > 0) focus_select(0);
+    if(albums_play_focus >= 0) {
+        focus_select(albums_play_focus);
+    }
+    else if(g_focus_count > 0) {
+        focus_select(0);
+    }
 }
 
 static void albums_track_action(void * user)
@@ -3539,6 +3792,20 @@ static void albums_play_all_action(void * user)
     player_play_album(album.id);
 }
 
+static void albums_shuffle_action(void * user)
+{
+    LV_UNUSED(user);
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+    bool on = !snapshot.shuffle;
+    player_set_shuffle(on);
+    if(albums_shuffle_icon != NULL) {
+        lv_obj_set_style_text_color(albums_shuffle_icon,
+                                    lv_color_hex(on ? COL_ACCENT : COL_MUTED),
+                                    0);
+    }
+}
+
 static void albums_play_async(void * arg)
 {
     albums_play_all_action(arg);
@@ -3548,6 +3815,17 @@ static void albums_play_touch_cb(lv_event_t * event)
 {
     LV_UNUSED(event);
     ui_call_async(albums_play_async, NULL);
+}
+
+static void albums_shuffle_async(void * arg)
+{
+    albums_shuffle_action(arg);
+}
+
+static void albums_shuffle_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    ui_call_async(albums_shuffle_async, NULL);
 }
 
 static bool albums_back(void)
@@ -3576,12 +3854,15 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
 {
     if(parent == NULL) return;
     lv_obj_clean(parent);
+    albums_shuffle_icon = NULL;
+    albums_play_focus = -1;
 
     player_album_t album;
     if(!player_album_get(albums_selected, &album)) return;
 
     lv_obj_t * detail_head = lv_obj_create(parent);
-    /* Left page header (34) + one track row (52) = 86 px. */
+    /* 108 px top: 80 px cover + title/subtitle on the left, icon controls
+     * on the right, all vertically centred against the cover. */
     lv_obj_set_size(detail_head, LV_PCT(100), ALBUM_HEADER_H);
     lv_obj_set_style_bg_opa(detail_head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(detail_head, 0, 0);
@@ -3596,15 +3877,16 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
     make_cover(detail_head, detail_cover_src, album.color, 80);
 
     lv_obj_t * detail_text = lv_obj_create(detail_head);
-    lv_obj_set_size(detail_text, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_width(detail_text, 0);
+    lv_obj_set_height(detail_text, LV_PCT(100));
     lv_obj_set_flex_grow(detail_text, 1);
     lv_obj_set_style_bg_opa(detail_text, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(detail_text, 0, 0);
     lv_obj_set_style_pad_all(detail_text, 0, 0);
     lv_obj_set_style_pad_row(detail_text, 3, 0);
     lv_obj_set_flex_flow(detail_text, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(detail_text, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
+    lv_obj_set_flex_align(detail_text, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scrollable(detail_text, false);
 
     lv_obj_t * title_row = lv_obj_create(detail_text);
@@ -3619,22 +3901,61 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_scrollable(title_row, false);
     lv_obj_t * title = make_label(title_row, album.title, FONT_DETAIL_TITLE,
                                   COL_TEXT);
+    lv_obj_set_width(title, 0);
+    lv_obj_set_height(title, 34);
     lv_obj_set_flex_grow(title, 1);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
+    ui_text_fade(title);
+    albums_detail_title = title;
 
     char subtitle[96];
-    snprintf(subtitle, sizeof(subtitle), "%s  |  %u  |  %u tracks",
-             album.artist, album.year, album.track_count);
-    make_label(detail_text, subtitle, FONT_CAPTION, COL_MUTED);
-
-    lv_obj_t * play_row = make_row(parent, 48);
-    make_icon(play_row, ICON_PLAY_OUTLINE, COL_ACCENT);
-    make_label(play_row, "Play album", FONT_H2, COL_TEXT);
-    if(interactive) {
-        focus_add_clickable(play_row, albums_play_all_action, NULL, NULL, true);
+    if(album.year > 0) {
+        snprintf(subtitle, sizeof(subtitle), "%s  |  %u  |  %u tracks",
+                 album.artist, album.year, album.track_count);
     }
     else {
-        touch_add_clickable(play_row, albums_play_touch_cb, NULL);
+        snprintf(subtitle, sizeof(subtitle), "%s  |  %u tracks",
+                 album.artist, album.track_count);
+    }
+    lv_obj_t * subtitle_label = make_label(detail_text, subtitle,
+                                           FONT_GROUP, COL_MUTED);
+    lv_obj_set_width(subtitle_label, LV_PCT(100));
+    lv_obj_set_height(subtitle_label, 24);
+    ui_text_fade(subtitle_label);
+
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+
+    lv_obj_t * controls = lv_obj_create(detail_head);
+    lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_PCT(100));
+    lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(controls, 0, 0);
+    lv_obj_set_style_pad_all(controls, 0, 0);
+    lv_obj_set_style_pad_column(controls, 6, 0);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(controls, false);
+
+    lv_obj_t * shuffle = make_flat_icon_button(
+        controls, ICON_SHUFFLE, 56, 56,
+        snapshot.shuffle ? COL_ACCENT : COL_MUTED, &bootstrap_icons_32);
+    albums_shuffle_icon = lv_obj_get_child(shuffle, 0);
+    if(interactive) {
+        focus_add_clickable(shuffle, albums_shuffle_action, NULL, NULL, true);
+    }
+    else {
+        touch_add_clickable(shuffle, albums_shuffle_touch_cb, NULL);
+    }
+
+    lv_obj_t * play = make_flat_icon_button(
+        controls, ICON_PLAY_OUTLINE, 56, 56, COL_TEXT, &bootstrap_icons_32);
+    if(interactive) {
+        albums_play_focus = focus_add_clickable(play, albums_play_all_action,
+                                                NULL, NULL, true);
+    }
+    else {
+        touch_add_clickable(play, albums_play_touch_cb, NULL);
+        albums_play_focus = -1;
     }
 
     lv_obj_t * track_list = make_scroll(parent);
@@ -3642,11 +3963,14 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_height(track_list, ALBUM_TRACK_LIST_H);
     lv_obj_set_style_pad_row(track_list, 0, 0);
     lv_obj_set_style_pad_right(track_list, 14, 0);
+    lv_obj_add_event_cb(track_list, albums_track_scroll_end_cb,
+                        LV_EVENT_SCROLL_END, NULL);
     int track_count = player_album_track_count(album.id);
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
 
-    int max_tracks = interactive ? ALBUM_DETAIL_MAX_TRACKS : 3;
+    /* The right-hand preview must show the same track list as the opened
+     * detail; the old 3-row preview made long albums look truncated until
+     * Enter was pressed. */
+    int max_tracks = ALBUM_DETAIL_MAX_TRACKS;
     if(max_tracks > track_count) max_tracks = track_count;
     for(int i = 0; i < max_tracks; i++) {
         player_track_t track;
@@ -3668,7 +3992,10 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
         }
         lv_obj_t * title = make_label(row, track.title, FONT_H2,
                                       current ? COL_ACCENT : COL_TEXT);
+        lv_obj_set_width(title, 0);
+        lv_obj_set_height(title, 34);
         lv_obj_set_flex_grow(title, 1);
+        ui_text_fade(title);
         char duration[16];
         format_time(track.duration_sec, duration, sizeof(duration));
         make_label(row, duration, FONT_NUM, COL_MUTED);
@@ -3680,7 +4007,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
             touch_add_clickable(row, albums_track_touch_cb, (void *)(intptr_t)i);
         }
     }
-    if(interactive && max_tracks < track_count) {
+    if(max_tracks < track_count) {
         lv_obj_t * more = make_label(track_list, "More tracks not shown",
                                      FONT_CAPTION, COL_MUTED);
         lv_obj_set_height(more, 32);
@@ -3691,7 +4018,7 @@ static void albums_create(lv_obj_t * parent)
 {
     albums_right_content = NULL;
     albums_left_list = NULL;
-    albums_count_label = NULL;
+    albums_counter.group = NULL;
     albums_first_index = -1;
     for(int i = 0; i < ALBUMS_POOL; i++) {
         albums_row_album_ids[i] = 0;
@@ -3701,6 +4028,8 @@ static void albums_create(lv_obj_t * parent)
     }
     albums_detail_dirty = false;
     if(albums_detail_timer) lv_timer_pause(albums_detail_timer);
+
+    player_sort_albums(g_sort_field, g_sort_desc);
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
@@ -3714,11 +4043,11 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_t * left = make_panel(root);
     lv_obj_set_size(left, SIDE_PANEL_W, LV_PCT(100));
     lv_obj_set_style_pad_all(left, 0, 0);
-    lv_obj_t * left_content = make_panel_content(left, 18);
-    lv_obj_set_style_pad_row(left_content, 8, 0);
+    lv_obj_t * left_content = make_panel_content(left, 16);
+    lv_obj_set_style_pad_row(left_content, 0, 0);
 
     lv_obj_t * head = lv_obj_create(left_content);
-    lv_obj_set_size(head, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(head, LV_PCT(100), ALBUMS_HEADER_H);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
@@ -3727,7 +4056,7 @@ static void albums_create(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
     make_label(head, "Albums", FONT_PAGE_TITLE, COL_TEXT);
-    albums_count_label = make_label(head, "0/0", FONT_NUM, COL_MUTED);
+    counter_create(head, &albums_counter);
     albums_update_count();
 
     lv_obj_t * list = lv_obj_create(left_content);
@@ -3750,7 +4079,7 @@ static void albums_create(lv_obj_t * parent)
     int count = player_album_count();
     if(albums_selected >= count) albums_selected = 0;
 
-    int content_h = count > 0 ? count * ALBUMS_STRIDE - LIST_ROW_GAP : ALBUMS_ROW_H;
+    int content_h = count > 0 ? count * ALBUMS_STRIDE : ALBUMS_ROW_H;
     lv_obj_t * spacer = lv_obj_create(list);
     lv_obj_set_size(spacer, LV_PCT(100), content_h);
     lv_obj_set_pos(spacer, 0, 0);
@@ -3785,7 +4114,13 @@ static void albums_create(lv_obj_t * parent)
         lv_obj_set_event_bubble(text, true);
 
         albums_row_titles[i] = make_label(text, "", FONT_H2, COL_TEXT);
-        albums_row_artists[i] = make_label(text, "", FONT_CAPTION, COL_MUTED);
+        lv_obj_set_width(albums_row_titles[i], LV_PCT(100));
+        lv_obj_set_height(albums_row_titles[i], 34);
+        ui_text_fade(albums_row_titles[i]);
+        albums_row_artists[i] = make_label(text, "", FONT_GROUP, COL_MUTED);
+        lv_obj_set_width(albums_row_artists[i], LV_PCT(100));
+        lv_obj_set_height(albums_row_artists[i], 24);
+        ui_text_fade(albums_row_artists[i]);
         lv_obj_set_hidden(row, true);
         albums_rows[i] = row;
     }
@@ -3795,7 +4130,7 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_set_flex_grow(right, 1);
     lv_obj_set_height(right, LV_PCT(100));
     lv_obj_set_style_pad_all(right, 0, 0);
-    albums_right_content = make_panel_content(right, 18);
+    albums_right_content = make_panel_content(right, 16);
     lv_obj_set_style_pad_row(albums_right_content, 0, 0);
     albums_render_detail(albums_right_content, albums_detail_open);
 
@@ -3804,7 +4139,7 @@ static void albums_create(lv_obj_t * parent)
     albums_refresh_rows();
 
     if(albums_detail_open) {
-        focus_select(0);
+        focus_select(albums_play_focus >= 0 ? albums_play_focus : 0);
         ui_set_hint("UP/DOWN Select   ENTER Play   7 Play/Pause");
     }
     else {
@@ -3820,6 +4155,9 @@ static void albums_create(lv_obj_t * parent)
 #define ARTISTS_LIST_H      (ARTISTS_VISIBLE_ROWS * ARTISTS_ROW_H)
 #define ARTIST_ALBUM_HEADER_H 56
 #define ARTIST_TRACK_ROW_H    56
+#define ARTIST_HEADER_H       56
+#define ARTIST_DETAIL_ROWS    10
+#define ARTIST_DETAIL_LIST_H  (ARTIST_DETAIL_ROWS * ARTIST_TRACK_ROW_H)
 #define ARTIST_ALBUM_MAX      4
 #define ARTIST_TRACKS_PER_ALBUM 6
 #define ARTIST_DETAIL_MAX_ROWS  24
@@ -3831,7 +4169,9 @@ static bool artists_detail_dirty;
 static lv_timer_t * artists_detail_timer;
 static lv_obj_t * artists_right_content;
 static lv_obj_t * artists_left_list;
-static lv_obj_t * artists_count_label;
+static counter_t artists_counter;
+static lv_obj_t * artists_shuffle_icon;
+static int artists_play_focus = -1;
 static int artists_left_scroll_y;
 static lv_obj_t * artists_rows[ARTISTS_POOL];
 static lv_obj_t * artists_names[ARTISTS_POOL];
@@ -3842,13 +4182,13 @@ static int artists_first_index = -1;
 
 static void artists_update_count(void)
 {
-    if(artists_count_label == NULL) return;
+    if(artists_counter.group == NULL) return;
     int count = player_artist_count();
     if(count <= 0) {
-        lv_label_set_text(artists_count_label, "0/0");
+        counter_set(&artists_counter, 0, 0);
         return;
     }
-    lv_label_set_text_fmt(artists_count_label, "%d/%d", artists_selected + 1, count);
+    counter_set(&artists_counter, artists_selected + 1, count);
 }
 
 static void artists_render_detail(lv_obj_t * parent, bool interactive);
@@ -3883,10 +4223,8 @@ static void artists_fill_row(int slot, int index)
     if(artists_row_ids[slot] != artist.id ||
        artists_row_indices[slot] != index) {
         lv_label_set_text(artists_names[slot], artist.name);
-        char albums_text[32];
-        snprintf(albums_text, sizeof(albums_text),
-                 artist.album_count == 1 ? "%u album" : "%u albums",
-                 artist.album_count);
+        char albums_text[16];
+        snprintf(albums_text, sizeof(albums_text), "%u", artist.album_count);
         lv_label_set_text(artists_metas[slot], albums_text);
         artists_row_ids[slot] = artist.id;
         artists_row_indices[slot] = index;
@@ -3982,6 +4320,7 @@ static void artists_scroll_to_selected(void)
 static void artists_detail_timer_cb(lv_timer_t * timer)
 {
     lv_timer_pause(timer);
+    if(g_current_screen != SCR_ARTISTS) return;
     if(artists_detail_dirty && artists_right_content != NULL) {
         artists_detail_dirty = false;
         uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
@@ -4040,6 +4379,25 @@ static bool artists_key(ui_key_t key)
     }
 }
 
+static uint32_t artists_swipe_guard;
+
+static void artists_swipe_page(int direction)
+{
+    if(artists_left_list == NULL) return;
+    int rows = lv_obj_get_height(artists_left_list) / ARTISTS_ROW_H;
+    if(rows < 2) rows = 2;
+    int page = (rows - 1) * ARTISTS_ROW_H;
+    int top = lv_obj_get_scroll_top(artists_left_list);
+    if(top < 0) top = 0;
+    lv_obj_scroll_to_y(artists_left_list, top + direction * page,
+                       LV_ANIM_OFF);
+
+    int actual = lv_obj_get_scroll_top(artists_left_list);
+    if(actual < 0) actual = 0;
+    artists_select(actual / ARTISTS_ROW_H);
+    artists_swipe_guard = lv_tick_get();
+}
+
 static void artists_rebuild(void)
 {
     if(artists_left_list) {
@@ -4057,7 +4415,12 @@ static void artists_open(void * user)
     artists_update_count();
     artists_detail_open = true;
     artists_rebuild();
-    if(g_focus_count > 0) focus_select(0);
+    if(artists_play_focus >= 0) {
+        focus_select(artists_play_focus);
+    }
+    else if(g_focus_count > 0) {
+        focus_select(0);
+    }
 }
 
 static void artists_album_action(void * user)
@@ -4078,6 +4441,29 @@ static void artists_track_action(void * user)
     }
 }
 
+static void artists_play_all_action(void * user)
+{
+    LV_UNUSED(user);
+    player_artist_t artist;
+    if(player_artist_get(artists_selected, &artist)) {
+        player_play_artist(artist.id);
+    }
+}
+
+static void artists_shuffle_action(void * user)
+{
+    LV_UNUSED(user);
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+    bool on = !snapshot.shuffle;
+    player_set_shuffle(on);
+    if(artists_shuffle_icon != NULL) {
+        lv_obj_set_style_text_color(artists_shuffle_icon,
+                                    lv_color_hex(on ? COL_ACCENT : COL_MUTED),
+                                    0);
+    }
+}
+
 static void artists_open_async(void * arg)
 {
     artists_open(arg);
@@ -4095,6 +4481,10 @@ static void artists_track_async(void * arg)
 
 static void artists_row_touch_cb(lv_event_t * event)
 {
+    if(artists_swipe_guard != 0 &&
+       (uint32_t)(lv_tick_get() - artists_swipe_guard) < 1000) {
+        return;
+    }
     lv_obj_t * row = lv_event_get_current_target(event);
     ui_call_async(artists_open_async, lv_obj_get_user_data(row));
 }
@@ -4107,6 +4497,28 @@ static void artists_album_touch_cb(lv_event_t * event)
 static void artists_track_touch_cb(lv_event_t * event)
 {
     ui_call_async(artists_track_async, lv_event_get_user_data(event));
+}
+
+static void artists_play_async(void * arg)
+{
+    artists_play_all_action(arg);
+}
+
+static void artists_play_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    ui_call_async(artists_play_async, NULL);
+}
+
+static void artists_shuffle_async(void * arg)
+{
+    artists_shuffle_action(arg);
+}
+
+static void artists_shuffle_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    ui_call_async(artists_shuffle_async, NULL);
 }
 
 static bool artists_back(void)
@@ -4135,48 +4547,99 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
 {
     if(parent == NULL) return;
     lv_obj_clean(parent);
+    artists_shuffle_icon = NULL;
+    artists_play_focus = -1;
 
     player_artist_t artist;
     if(!player_artist_get(artists_selected, &artist)) return;
 
-    /* Header row: name + stats + Back share the same 56 px rhythm as the
-     * left list, leaving the full 9-row viewport below. */
+    /* 108 px header: artist name/stats on the left, Shuffle/Play icons on
+     * the right, vertically centred in the header. */
     lv_obj_t * head = lv_obj_create(parent);
-    lv_obj_set_size(head, LV_PCT(100), 34);
+    lv_obj_set_size(head, LV_PCT(100), ARTIST_HEADER_H);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_style_pad_column(head, 10, 0);
+    lv_obj_set_style_pad_column(head, 16, 0);
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
-    make_label(head, artist.name, FONT_DETAIL_TITLE, COL_TEXT);
+
+    lv_obj_t * head_text = lv_obj_create(head);
+    lv_obj_set_width(head_text, 0);
+    lv_obj_set_height(head_text, LV_PCT(100));
+    lv_obj_set_flex_grow(head_text, 1);
+    lv_obj_set_style_bg_opa(head_text, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(head_text, 0, 0);
+    lv_obj_set_style_pad_all(head_text, 0, 0);
+    lv_obj_set_style_pad_column(head_text, 14, 0);
+    lv_obj_set_flex_flow(head_text, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(head_text, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(head_text, false);
+
+    lv_obj_t * artist_name = make_label(head_text, artist.name,
+                                        FONT_DETAIL_TITLE, COL_TEXT);
+    lv_obj_set_width(artist_name, 0);
+    lv_obj_set_flex_grow(artist_name, 1);
+    lv_obj_set_height(artist_name, 34);
+    ui_text_fade(artist_name);
+    artists_detail_name = artist_name;
+
     char subtitle[96];
     snprintf(subtitle, sizeof(subtitle), "%u songs  |  %u albums",
              artist.song_count, artist.album_count);
-    make_label(head, subtitle, FONT_CAPTION, COL_MUTED);
+    lv_obj_t * stats = make_label(head_text, subtitle, FONT_GROUP, COL_MUTED);
+    lv_obj_set_width(stats, 220);
+    lv_obj_set_height(stats, 24);
+    lv_obj_set_style_text_align(stats, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_text_fade(stats);
 
-    lv_obj_t * spacer = lv_obj_create(head);
-    lv_obj_set_size(spacer, 1, 1);
-    lv_obj_set_flex_grow(spacer, 1);
-    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(spacer, 0, 0);
-    lv_obj_set_style_pad_all(spacer, 0, 0);
-    lv_obj_set_scrollable(spacer, false);
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
 
-    if(!interactive) {
-        make_label(parent, "Press ENTER to open artist", FONT_CAPTION,
-                   COL_MUTED);
-        return;
+    lv_obj_t * controls = lv_obj_create(head);
+    lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_PCT(100));
+    lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(controls, 0, 0);
+    lv_obj_set_style_pad_all(controls, 0, 0);
+    lv_obj_set_style_pad_column(controls, 6, 0);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(controls, false);
+
+    lv_obj_t * shuffle = make_flat_icon_button(
+        controls, ICON_SHUFFLE, 56, 56,
+        snapshot.shuffle ? COL_ACCENT : COL_MUTED, &bootstrap_icons_32);
+    artists_shuffle_icon = lv_obj_get_child(shuffle, 0);
+    if(interactive) {
+        focus_add_clickable(shuffle, artists_shuffle_action, NULL, NULL, true);
+    }
+    else {
+        touch_add_clickable(shuffle, artists_shuffle_touch_cb, NULL);
+    }
+
+    lv_obj_t * play = make_flat_icon_button(
+        controls, ICON_PLAY_OUTLINE, 56, 56, COL_TEXT, &bootstrap_icons_32);
+    if(interactive) {
+        artists_play_focus = focus_add_clickable(play, artists_play_all_action,
+                                                 NULL, NULL, true);
+    }
+    else {
+        touch_add_clickable(play, artists_play_touch_cb, NULL);
+        artists_play_focus = -1;
     }
 
     lv_obj_t * album_list = make_scroll(parent);
-    /* 10 rows x 56 px = 560 px viewport. */
     lv_obj_set_flex_grow(album_list, 0);
-    lv_obj_set_height(album_list, 560);
+    lv_obj_set_height(album_list, ARTIST_DETAIL_LIST_H);
     lv_obj_set_style_pad_row(album_list, 0, 0);
     lv_obj_set_style_pad_right(album_list, 14, 0);
+    lv_obj_add_event_cb(album_list, albums_track_scroll_end_cb,
+                        LV_EVENT_SCROLL_END, NULL);
+
     /* Collect a bounded set of albums/tracks in one pass.  The previous
      * version scanned every artist song for every album, which made prolific
      * artists (hundreds of tracks) block the UI for several seconds. */
@@ -4185,9 +4648,6 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
     int album_track_counts[ARTIST_ALBUM_MAX] = {0};
     int album_total = 0;
     int track_rows = 0;
-
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
 
     int songs = player_song_count();
     for(int i = 0; i < songs && track_rows < ARTIST_DETAIL_MAX_ROWS; i++) {
@@ -4229,15 +4689,21 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
         make_cover(header, thumb_for_album(&album, 34), album.color, 34);
 
         lv_obj_t * album_title = make_label(header, album.title, FONT_H2, COL_TEXT);
+        lv_obj_set_width(album_title, 0);
         lv_obj_set_flex_grow(album_title, 1);
         lv_obj_set_height(album_title, 34);
-        lv_label_set_long_mode(album_title, LV_LABEL_LONG_MODE_DOTS);
+        ui_text_fade(album_title);
 
         char meta[64];
-        snprintf(meta, sizeof(meta), "%u  |  %u tracks",
-                 album.year, album.track_count);
-        lv_obj_t * album_meta = make_label(header, meta, FONT_CAPTION, COL_MUTED);
-        lv_obj_set_height(album_meta, 22);
+        if(album.year > 0) {
+            snprintf(meta, sizeof(meta), "%u  |  %u tracks",
+                     album.year, album.track_count);
+        }
+        else {
+            snprintf(meta, sizeof(meta), "%u tracks", album.track_count);
+        }
+        lv_obj_t * album_meta = make_label(header, meta, FONT_GROUP, COL_MUTED);
+        lv_obj_set_height(album_meta, 24);
         make_icon(header, ICON_PLAY, COL_MUTED);
 
         if(interactive) {
@@ -4271,9 +4737,10 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
 
             lv_obj_t * title = make_label(row, track.title, FONT_H2,
                                           current ? COL_ACCENT : COL_TEXT);
+            lv_obj_set_width(title, 0);
             lv_obj_set_flex_grow(title, 1);
             lv_obj_set_height(title, 34);
-            lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
+            ui_text_fade(title);
 
             char duration[16];
             format_time(track.duration_sec, duration, sizeof(duration));
@@ -4303,7 +4770,7 @@ static void artists_create(lv_obj_t * parent)
     artists_detail_dirty = false;
     artists_right_content = NULL;
     artists_left_list = NULL;
-    artists_count_label = NULL;
+    artists_counter.group = NULL;
     artists_first_index = -1;
     for(int i = 0; i < ARTISTS_POOL; i++) {
         artists_row_ids[i] = 0;
@@ -4321,11 +4788,11 @@ static void artists_create(lv_obj_t * parent)
 
     lv_obj_t * left = make_panel(root);
     lv_obj_set_size(left, SIDE_PANEL_W, LV_PCT(100));
-    lv_obj_set_style_pad_all(left, 18, 0);
-    lv_obj_set_style_pad_row(left, 8, 0);
+    lv_obj_set_style_pad_all(left, 16, 0);
+    lv_obj_set_style_pad_row(left, 0, 0);
 
     lv_obj_t * head = lv_obj_create(left);
-    lv_obj_set_size(head, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(head, LV_PCT(100), 56);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
@@ -4334,7 +4801,7 @@ static void artists_create(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
     make_label(head, "Artists", FONT_PAGE_TITLE, COL_TEXT);
-    artists_count_label = make_label(head, "0/0", FONT_NUM, COL_MUTED);
+    counter_create(head, &artists_counter);
     artists_update_count();
 
     lv_obj_t * list = make_scroll(left);
@@ -4374,13 +4841,15 @@ static void artists_create(lv_obj_t * parent)
         lv_obj_set_style_border_width(text, 0, 0);
         lv_obj_set_style_pad_all(text, 0, 0);
         lv_obj_set_style_pad_column(text, 10, 0);
+        lv_obj_set_style_pad_right(text, 14, 0);
         lv_obj_set_flex_flow(text, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(text, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollable(text, false);
         artists_names[i] = make_label(text, "", FONT_H2, COL_TEXT);
-        lv_obj_set_width(artists_names[i], 320);
-        lv_label_set_long_mode(artists_names[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_width(artists_names[i], 0);
+        lv_obj_set_flex_grow(artists_names[i], 1);
+        ui_text_fade(artists_names[i]);
         artists_metas[i] = make_label(text, "", FONT_CAPTION, COL_MUTED);
         lv_obj_set_hidden(row, true);
         artists_rows[i] = row;
@@ -4393,8 +4862,8 @@ static void artists_create(lv_obj_t * parent)
     lv_obj_set_flex_grow(right, 1);
     lv_obj_set_height(right, LV_PCT(100));
     lv_obj_set_style_pad_all(right, 0, 0);
-    artists_right_content = make_panel_content(right, 18);
-    lv_obj_set_style_pad_row(artists_right_content, 8, 0);
+    artists_right_content = make_panel_content(right, 16);
+    lv_obj_set_style_pad_row(artists_right_content, 0, 0);
     artists_render_detail(artists_right_content, artists_detail_open);
 
     lv_obj_update_layout(list);
@@ -4402,7 +4871,7 @@ static void artists_create(lv_obj_t * parent)
     artists_refresh_rows();
 
     if(artists_detail_open) {
-        focus_select(0);
+        focus_select(artists_play_focus >= 0 ? artists_play_focus : 0);
         ui_set_hint("UP/DOWN Select   ENTER Play   7 Play/Pause");
     }
     else {
@@ -4790,9 +5259,8 @@ static bool context_menu_key(ui_key_t key)
 
 static int songs_selected;
 static lv_obj_t * songs_list;
-static lv_obj_t * songs_count_label;
+static counter_t songs_counter;
 static lv_obj_t * songs_rows[SONGS_POOL];
-static lv_obj_t * songs_markers[SONGS_POOL];
 static lv_obj_t * songs_titles[SONGS_POOL];
 static lv_obj_t * songs_artists[SONGS_POOL];
 static lv_obj_t * songs_albums[SONGS_POOL];
@@ -4814,22 +5282,6 @@ static void songs_apply_selection(lv_obj_t * row, bool selected)
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
 }
 
-static void songs_set_marker(int slot, bool current, int index)
-{
-    if(current) {
-        lv_label_set_text(songs_markers[slot], ICON_PLAY);
-        lv_obj_set_style_text_font(songs_markers[slot], &bootstrap_icons_24, 0);
-        lv_obj_set_style_text_color(songs_markers[slot], lv_color_hex(COL_ACCENT), 0);
-    }
-    else {
-        char number[16];
-        snprintf(number, sizeof(number), "%02d", index + 1);
-        lv_label_set_text(songs_markers[slot], number);
-        lv_obj_set_style_text_font(songs_markers[slot], FONT_NUM, 0);
-        lv_obj_set_style_text_color(songs_markers[slot], lv_color_hex(COL_MUTED), 0);
-    }
-}
-
 static void songs_fill_row(int slot, int index,
                            const player_snapshot_t * snapshot)
 {
@@ -4847,21 +5299,20 @@ static void songs_fill_row(int slot, int index,
     lv_obj_set_pos(row, 0, index * SONGS_ROW_H);
     lv_obj_set_user_data(row, (void *)(intptr_t)index);
 
+    bool current = (track.id == snapshot->track.id);
     if(songs_row_indices[slot] == index && songs_row_ids[slot] == track.id) {
-        bool current = (track.id == snapshot->track.id);
         if(songs_row_current[slot] != current) {
             songs_row_current[slot] = current;
-            songs_set_marker(slot, current, index);
+            lv_obj_set_style_text_color(songs_titles[slot],
+                                        lv_color_hex(current ? COL_ACCENT
+                                                             : COL_TEXT), 0);
         }
         songs_apply_selection(row, index == songs_selected);
         songs_row_selected[slot] = (index == songs_selected);
         return;
     }
 
-    bool current = (track.id == snapshot->track.id);
     if(true) {
-        songs_set_marker(slot, current, index);
-
         lv_label_set_text(songs_titles[slot], track.title);
         lv_obj_set_style_text_color(songs_titles[slot],
                                     lv_color_hex(current ? COL_ACCENT : COL_TEXT), 0);
@@ -4956,6 +5407,7 @@ static void songs_scroll_cb(lv_event_t * event)
 }
 
 static void songs_select(int index);
+static void playlists_swipe_page(int direction);
 
 static void songs_swipe_page(int direction)
 {
@@ -4982,8 +5434,16 @@ static bool ui_list_page(int direction)
         albums_swipe_page(direction);
         return true;
     }
+    if(g_current_screen == SCR_ARTISTS) {
+        artists_swipe_page(direction);
+        return true;
+    }
     if(g_current_screen == SCR_SONGS) {
         songs_swipe_page(direction);
+        return true;
+    }
+    if(g_current_screen == SCR_PLAYLISTS) {
+        playlists_swipe_page(direction);
         return true;
     }
     return false;
@@ -5023,16 +5483,16 @@ static void songs_scroll_to_selected(void)
 
 static void songs_update_count(void)
 {
-    if(songs_count_label == NULL) return;
+    if(songs_counter.group == NULL) return;
     int count = player_song_count();
     if(count <= 0) {
-        lv_label_set_text(songs_count_label, "0/0");
+        counter_set(&songs_counter, 0, 0);
         return;
     }
     int position = songs_selected + 1;
     if(position < 1) position = 1;
     if(position > count) position = count;
-    lv_label_set_text_fmt(songs_count_label, "%d/%d", position, count);
+    counter_set(&songs_counter, position, count);
 }
 
 static void songs_select(int index)
@@ -5117,23 +5577,24 @@ static void songs_same_key(void)
 
 static void songs_create(lv_obj_t * parent)
 {
-    songs_count_label = NULL;
+    songs_counter.group = NULL;
     lv_obj_t * panel = make_panel(parent);
     lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_pad_all(panel, 18, 0);
-    lv_obj_set_style_pad_row(panel, 8, 0);
+    lv_obj_set_style_pad_all(panel, 16, 0);
+    lv_obj_set_style_pad_row(panel, 0, 0);
 
     lv_obj_t * head = lv_obj_create(panel);
-    lv_obj_set_size(head, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(head, LV_PCT(100), 56);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
+    lv_obj_set_style_pad_right(head, 14, 0);
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
     make_label(head, "Songs", FONT_PAGE_TITLE, COL_TEXT);
-    songs_count_label = make_label(head, "0/0", FONT_NUM, COL_MUTED);
+    counter_create(head, &songs_counter);
 
     songs_list = lv_obj_create(panel);
     lv_obj_set_width(songs_list, LV_PCT(100));
@@ -5166,25 +5627,24 @@ static void songs_create(lv_obj_t * parent)
     for(int i = 0; i < SONGS_POOL; i++) {
         lv_obj_t * row = make_row(songs_list, SONGS_ROW_H);
         lv_obj_set_width(row, LV_PCT(100));
+        lv_obj_set_style_pad_right(row, 12, 0);
         lv_obj_set_clickable(row, true);
         lv_obj_set_gesture_bubble(row, false);
         enable_event_bubble(row);
         lv_obj_add_event_cb(row, songs_row_click_cb, LV_EVENT_CLICKED, NULL);
 
-        songs_markers[i] = make_label(row, "", FONT_NUM, COL_MUTED);
-        lv_obj_set_width(songs_markers[i], 30);
         songs_titles[i] = make_label(row, "", FONT_H2, COL_TEXT);
         lv_obj_set_flex_grow(songs_titles[i], 1);
         lv_obj_set_height(songs_titles[i], 34);
-        lv_label_set_long_mode(songs_titles[i], LV_LABEL_LONG_MODE_DOTS);
-        songs_artists[i] = make_label(row, "", FONT_CAPTION, COL_MUTED);
+        ui_text_fade(songs_titles[i]);
+        songs_artists[i] = make_label(row, "", FONT_H2, COL_MUTED);
         lv_obj_set_width(songs_artists[i], 230);
-        lv_obj_set_height(songs_artists[i], 22);
-        lv_label_set_long_mode(songs_artists[i], LV_LABEL_LONG_MODE_DOTS);
-        songs_albums[i] = make_label(row, "", FONT_CAPTION, COL_DIM);
+        lv_obj_set_height(songs_artists[i], 34);
+        ui_text_clip(songs_artists[i]);
+        songs_albums[i] = make_label(row, "", FONT_H2, COL_MUTED);
         lv_obj_set_width(songs_albums[i], 250);
-        lv_obj_set_height(songs_albums[i], 22);
-        lv_label_set_long_mode(songs_albums[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_height(songs_albums[i], 34);
+        ui_text_clip(songs_albums[i]);
         songs_lengths[i] = make_label(row, "", FONT_NUM, COL_MUTED);
         lv_obj_set_width(songs_lengths[i], 56);
         lv_obj_set_style_text_align(songs_lengths[i], LV_TEXT_ALIGN_RIGHT, 0);
@@ -5218,29 +5678,31 @@ static void songs_create(lv_obj_t * parent)
 #define PLAYLISTS_VISIBLE_ROWS 10
 #define PLAYLISTS_LIST_H       (PLAYLISTS_VISIBLE_ROWS * PLAYLISTS_ROW_H)
 #define PLAYLIST_TRACK_ROW_H   56
-#define PLAYLIST_TRACK_ROWS    9
+#define PLAYLIST_TRACK_ROWS    10
+#define PLAYLIST_HEADER_H      56
 #define PLAYLIST_TRACK_LIST_H  (PLAYLIST_TRACK_ROWS * PLAYLIST_TRACK_ROW_H)
 #define PLAYLIST_DETAIL_MAX_TRACKS 24
 
 static int playlists_selected;
 static bool playlists_detail_open;
+static int playlists_play_focus = -1;
 static bool playlists_detail_dirty;
 static lv_timer_t * playlists_detail_timer;
 static lv_obj_t * playlists_left_list;
 static lv_obj_t * playlists_right_content;
-static lv_obj_t * playlists_count_label;
+static counter_t playlists_counter;
 static int playlists_left_scroll_y;
+static uint32_t playlists_swipe_guard;
 
 static void playlists_update_count(void)
 {
-    if(playlists_count_label == NULL) return;
+    if(playlists_counter.group == NULL) return;
     int count = player_playlist_count();
     if(count <= 0) {
-        lv_label_set_text(playlists_count_label, "0/0");
+        counter_set(&playlists_counter, 0, 0);
         return;
     }
-    lv_label_set_text_fmt(playlists_count_label, "%d/%d",
-                          playlists_selected + 1, count);
+    counter_set(&playlists_counter, playlists_selected + 1, count);
 }
 
 static void playlists_render_detail(lv_obj_t * parent, bool interactive);
@@ -5248,6 +5710,7 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive);
 static void playlists_detail_timer_cb(lv_timer_t * timer)
 {
     lv_timer_pause(timer);
+    if(g_current_screen != SCR_PLAYLISTS) return;
     if(playlists_detail_dirty && playlists_right_content != NULL) {
         playlists_detail_dirty = false;
         uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
@@ -5295,7 +5758,12 @@ static void playlists_open(void * user)
     playlists_update_count();
     playlists_detail_open = true;
     playlists_rebuild();
-    if(g_focus_count > 0) focus_select(0);
+    if(playlists_play_focus >= 0) {
+        focus_select(playlists_play_focus);
+    }
+    else if(g_focus_count > 0) {
+        focus_select(0);
+    }
 }
 
 static void playlists_play_action(void * user)
@@ -5330,6 +5798,10 @@ static void playlists_track_async(void * arg)
 
 static void playlists_row_touch_cb(lv_event_t * event)
 {
+    if(playlists_swipe_guard != 0 &&
+       (uint32_t)(lv_tick_get() - playlists_swipe_guard) < 1000) {
+        return;
+    }
     ui_call_async(playlists_open_async, lv_event_get_user_data(event));
 }
 
@@ -5367,28 +5839,68 @@ static void playlists_same_key(void)
     if(g_focus_count > 0) focus_select(0);
 }
 
+static void playlists_shuffle_action(void * user)
+{
+    LV_UNUSED(user);
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+    player_set_shuffle(!snapshot.shuffle);
+    if(playlists_right_content) playlists_schedule_detail();
+}
+
+static void playlists_shuffle_async(void * arg)
+{
+    playlists_shuffle_action(arg);
+}
+
+static void playlists_shuffle_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    ui_call_async(playlists_shuffle_async, NULL);
+}
+
 static void playlists_render_detail(lv_obj_t * parent, bool interactive)
 {
     if(parent == NULL) return;
     lv_obj_clean(parent);
+    playlists_play_focus = -1;
 
     player_playlist_t playlist;
     if(!player_playlist_get(playlists_selected, &playlist)) return;
 
+    /* 112 px header: name and track count on the left, Shuffle / Play
+     * icons on the right, matching the Albums and Artists detail pages. */
     lv_obj_t * head = lv_obj_create(parent);
-    lv_obj_set_size(head, LV_PCT(100), 34);
+    lv_obj_set_size(head, LV_PCT(100), PLAYLIST_HEADER_H);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_style_pad_column(head, 10, 0);
+    lv_obj_set_style_pad_column(head, 16, 0);
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
-    lv_obj_t * title = make_label(head, playlist.name, FONT_DETAIL_TITLE,
+
+    lv_obj_t * head_text = lv_obj_create(head);
+    lv_obj_set_width(head_text, 0);
+    lv_obj_set_height(head_text, LV_PCT(100));
+    lv_obj_set_flex_grow(head_text, 1);
+    lv_obj_set_style_bg_opa(head_text, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(head_text, 0, 0);
+    lv_obj_set_style_pad_all(head_text, 0, 0);
+    lv_obj_set_style_pad_column(head_text, 14, 0);
+    lv_obj_set_flex_flow(head_text, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(head_text, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(head_text, false);
+
+    lv_obj_t * title = make_label(head_text, playlist.name, FONT_DETAIL_TITLE,
                                   COL_TEXT);
-    lv_obj_set_flex_grow(title, 0);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_width(title, 0);
+    lv_obj_set_height(title, 34);
+    lv_obj_set_flex_grow(title, 1);
+    ui_text_fade(title);
+    playlists_detail_title = title;
 
     char meta[64];
     const char * noun = playlist.track_count == 1 ? "track" : "tracks";
@@ -5399,25 +5911,43 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
     else {
         snprintf(meta, sizeof(meta), "%u %s", playlist.track_count, noun);
     }
-    make_label(head, meta, FONT_CAPTION, COL_MUTED);
+    lv_obj_t * meta_label = make_label(head_text, meta, FONT_GROUP, COL_MUTED);
+    lv_obj_set_height(meta_label, 24);
+    ui_text_clip(meta_label);
 
-    lv_obj_t * spacer = lv_obj_create(head);
-    lv_obj_set_size(spacer, 1, 1);
-    lv_obj_set_flex_grow(spacer, 1);
-    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(spacer, 0, 0);
-    lv_obj_set_style_pad_all(spacer, 0, 0);
-    lv_obj_set_scrollable(spacer, false);
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
 
+    lv_obj_t * controls = lv_obj_create(head);
+    lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_PCT(100));
+    lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(controls, 0, 0);
+    lv_obj_set_style_pad_all(controls, 0, 0);
+    lv_obj_set_style_pad_column(controls, 6, 0);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(controls, false);
 
-    lv_obj_t * play_row = make_row(parent, 48);
-    make_icon(play_row, ICON_PLAY_OUTLINE, COL_ACCENT);
-    make_label(play_row, "Play playlist", FONT_H2, COL_TEXT);
+    lv_obj_t * shuffle = make_flat_icon_button(
+        controls, ICON_SHUFFLE, 56, 56,
+        snapshot.shuffle ? COL_ACCENT : COL_MUTED, &bootstrap_icons_32);
     if(interactive) {
-        focus_add_clickable(play_row, playlists_play_action, NULL, NULL, true);
+        focus_add_clickable(shuffle, playlists_shuffle_action, NULL, NULL, true);
     }
     else {
-        touch_add_clickable(play_row, playlists_play_touch_cb, NULL);
+        touch_add_clickable(shuffle, playlists_shuffle_touch_cb, NULL);
+    }
+
+    lv_obj_t * play = make_flat_icon_button(
+        controls, ICON_PLAY_OUTLINE, 56, 56, COL_TEXT, &bootstrap_icons_32);
+    if(interactive) {
+        playlists_play_focus = focus_add_clickable(play, playlists_play_action,
+                                                   NULL, NULL, true);
+    }
+    else {
+        touch_add_clickable(play, playlists_play_touch_cb, NULL);
+        playlists_play_focus = -1;
     }
 
     lv_obj_t * track_list = make_scroll(parent);
@@ -5425,9 +5955,6 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_height(track_list, PLAYLIST_TRACK_LIST_H);
     lv_obj_set_style_pad_row(track_list, 0, 0);
     lv_obj_set_style_pad_right(track_list, 14, 0);
-
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
     int count = player_playlist_track_count(playlists_selected);
     int max_tracks = interactive ? PLAYLIST_DETAIL_MAX_TRACKS : 3;
     int shown = 0;
@@ -5454,7 +5981,7 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
                                             current ? COL_ACCENT : COL_TEXT);
         lv_obj_set_flex_grow(track_title, 1);
         lv_obj_set_height(track_title, 34);
-        lv_label_set_long_mode(track_title, LV_LABEL_LONG_MODE_DOTS);
+        ui_text_fade(track_title);
 
         char duration[16];
         format_time(track.duration_sec, duration, sizeof(duration));
@@ -5477,13 +6004,25 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
     }
 }
 
+static void playlists_swipe_page(int direction)
+{
+    if(playlists_left_list == NULL) return;
+    focus_move(direction * (PLAYLISTS_VISIBLE_ROWS - 1));
+    if(!playlists_detail_open) {
+        playlists_selected = g_focus_index;
+        playlists_update_count();
+        playlists_schedule_detail();
+    }
+    playlists_swipe_guard = lv_tick_get();
+}
+
 static void playlists_create(lv_obj_t * parent)
 {
     if(playlists_detail_timer) lv_timer_pause(playlists_detail_timer);
     playlists_detail_dirty = false;
     playlists_right_content = NULL;
     playlists_left_list = NULL;
-    playlists_count_label = NULL;
+    playlists_counter.group = NULL;
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
@@ -5496,11 +6035,11 @@ static void playlists_create(lv_obj_t * parent)
 
     lv_obj_t * left = make_panel(root);
     lv_obj_set_size(left, SIDE_PANEL_W, LV_PCT(100));
-    lv_obj_set_style_pad_all(left, 18, 0);
-    lv_obj_set_style_pad_row(left, 8, 0);
+    lv_obj_set_style_pad_all(left, 16, 0);
+    lv_obj_set_style_pad_row(left, 0, 0);
 
     lv_obj_t * head = lv_obj_create(left);
-    lv_obj_set_size(head, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(head, LV_PCT(100), 56);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
@@ -5509,14 +6048,14 @@ static void playlists_create(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
     make_label(head, "Playlists", FONT_PAGE_TITLE, COL_TEXT);
-    playlists_count_label = make_label(head, "0/0", FONT_NUM, COL_MUTED);
+    counter_create(head, &playlists_counter);
 
     lv_obj_t * list = make_scroll(left);
     lv_obj_set_flex_grow(list, 0);
     lv_obj_set_height(list, PLAYLISTS_LIST_H);
     lv_obj_set_style_pad_row(list, 0, 0);
-    lv_obj_set_style_pad_right(list, 14, 0);
     playlists_left_list = list;
+    for(int i = 0; i < 64; i++) playlists_name_labels[i] = NULL;
 
     int count = player_playlist_count();
     if(playlists_selected >= count) playlists_selected = 0;
@@ -5532,22 +6071,20 @@ static void playlists_create(lv_obj_t * parent)
         lv_obj_set_style_border_width(text, 0, 0);
         lv_obj_set_style_pad_all(text, 0, 0);
         lv_obj_set_style_pad_column(text, 10, 0);
+        lv_obj_set_style_pad_right(text, 14, 0);
         lv_obj_set_flex_flow(text, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(text, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollable(text, false);
 
         lv_obj_t * name = make_label(text, playlist.name, FONT_H2, COL_TEXT);
-        lv_point_t name_size;
-        lv_text_get_size(&name_size, playlist.name, FONT_H2, 0, 0,
-                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        int32_t name_w = name_size.x > 300 ? 300 : name_size.x;
-        lv_obj_set_width(name, name_w);
-        lv_label_set_long_mode(name, LV_LABEL_LONG_MODE_DOTS);
+        if(i < 64) playlists_name_labels[i] = name;
+        lv_obj_set_width(name, 0);
+        lv_obj_set_flex_grow(name, 1);
+        ui_text_fade(name);
 
-        char meta[32];
-        const char * noun = playlist.track_count == 1 ? "track" : "tracks";
-        snprintf(meta, sizeof(meta), "%u %s", playlist.track_count, noun);
+        char meta[16];
+        snprintf(meta, sizeof(meta), "%u", playlist.track_count);
         make_label(text, meta, FONT_CAPTION, COL_MUTED);
 
         if(i == playlists_selected) {
@@ -5571,8 +6108,8 @@ static void playlists_create(lv_obj_t * parent)
     lv_obj_set_flex_grow(right, 1);
     lv_obj_set_height(right, LV_PCT(100));
     lv_obj_set_style_pad_all(right, 0, 0);
-    playlists_right_content = make_panel_content(right, 18);
-    lv_obj_set_style_pad_row(playlists_right_content, 8, 0);
+    playlists_right_content = make_panel_content(right, 16);
+    lv_obj_set_style_pad_row(playlists_right_content, 0, 0);
     playlists_render_detail(playlists_right_content, playlists_detail_open);
 
     lv_obj_update_layout(list);
@@ -5580,7 +6117,7 @@ static void playlists_create(lv_obj_t * parent)
 
     playlists_update_count();
     if(playlists_detail_open) {
-        focus_select(0);
+        focus_select(playlists_play_focus >= 0 ? playlists_play_focus : 0);
         ui_set_hint("UP/DOWN Select   ENTER Play   7 Play/Pause");
     }
     else {
@@ -5829,34 +6366,55 @@ static void ble_tick(void)
  * Settings
  * ------------------------------------------------------------------------- */
 enum {
-    SETTING_GENERAL = 0,
+    SETTING_AFC_IAP2 = 0,
     SETTING_BLUETOOTH,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
-    SETTING_DEVICE,
     SETTING_USB,
-    SETTING_AFC,
-    SETTING_BACKEND,
+    SETTING_BOOT,
     SETTING_ABOUT,
+    SETTING_DATETIME,
     SETTING_COUNT,
 };
 
 static int settings_selected;
 static bool settings_detail_open;
 static lv_obj_t * settings_right_content;
-static lv_obj_t * settings_count_label;
+static counter_t settings_counter;
 static lv_obj_t * settings_detail_time_format_value;
 static lv_obj_t * settings_detail_set_time_value;
+static lv_obj_t * settings_detail_ble_value;
+static lv_obj_t * settings_detail_usb_a_check;
+static lv_obj_t * settings_detail_usb_both_check;
+static lv_obj_t * settings_detail_boot_off_check;
+static lv_obj_t * settings_detail_boot_anim1_check;
+static lv_obj_t * settings_detail_theme_gray_check;
+static lv_obj_t * settings_detail_theme_aqua_check;
+static lv_obj_t * settings_detail_theme_win95_check;
+static lv_obj_t * settings_time_ampm_value;
+static lv_obj_t * settings_time_ampm_column;
+static lv_obj_t * settings_time_ampm_spacer;
+static lv_obj_t * settings_time_year_value;
+static lv_obj_t * settings_time_month_value;
+static lv_obj_t * settings_time_day_value;
 static lv_obj_t * settings_time_hour_value;
 static lv_obj_t * settings_time_minute_value;
-static lv_obj_t * settings_time_ampm_value;
+static lv_obj_t * settings_time_up_button;
+static lv_obj_t * settings_time_down_button;
+static lv_obj_t * settings_time_up_icon;
+static lv_obj_t * settings_time_down_icon;
 static bool settings_time_open;
 static bool settings_time_editing;
 static bool settings_time_blink_on;
 static bool settings_detail_dirty;
 static lv_timer_t * settings_detail_timer;
+static uint32_t settings_ble_rev;
+static int settings_restore_focus = -1;
 enum {
     SETTINGS_TIME_NONE = 0,
+    SETTINGS_TIME_YEAR,
+    SETTINGS_TIME_MONTH,
+    SETTINGS_TIME_DAY,
     SETTINGS_TIME_HOUR,
     SETTINGS_TIME_MINUTE,
     SETTINGS_TIME_AMPM,
@@ -5868,7 +6426,6 @@ static lv_obj_t * settings_detail_brightness_value;
 static lv_obj_t * settings_detail_sort_value;
 static lv_obj_t * settings_detail_order_value;
 static lv_obj_t * settings_detail_np_bg_theme_check;
-static lv_obj_t * settings_detail_np_bg_blur_check;
 static lv_obj_t * settings_detail_np_bg_mesh_check;
 static lv_obj_t * settings_detail_screen_value;
 static lv_obj_t * settings_detail_wifi_mode_value;
@@ -5879,19 +6436,10 @@ static int settings_brightness = 70;
 
 typedef enum {
     USB_MODE_HOST = 0,
-    USB_MODE_OTG,
+    USB_MODE_BOTH = 2,
 } usb_mode_t;
 
 static usb_mode_t g_usb_mode = USB_MODE_HOST;
-
-enum {
-    SORT_FIELD_ADD_DATE = 0,
-    SORT_FIELD_NAME,
-    SORT_FIELD_YEAR,
-    SORT_FIELD_COUNT,
-};
-static int g_sort_field = SORT_FIELD_ADD_DATE;
-static bool g_sort_desc = true;
 
 void ui_apply_saved_settings(const ui_system_config_t * cfg)
 {
@@ -5910,7 +6458,10 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     settings_brightness = cfg->brightness;
     if(settings_brightness < 0) settings_brightness = 0;
     if(settings_brightness > 100) settings_brightness = 100;
-    g_usb_mode = cfg->usb_mode == 1 ? USB_MODE_OTG : USB_MODE_HOST;
+    g_usb_mode = cfg->usb_mode == 2 ? USB_MODE_BOTH : USB_MODE_HOST;
+    g_system_config.theme = cfg->theme;
+    g_system_config.boot_screen = cfg->boot_screen;
+    g_system_config.ble_enabled = cfg->ble_enabled;
 
     ui_set_menubar_left(cfg->menubar_left != 0);
     ui_set_touch_enabled(cfg->touch_enabled != 0);
@@ -5919,33 +6470,36 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
 static void settings_rebuild(void);
 
 static const char * const settings_names[SETTING_COUNT] = {
-    "General",
+    "Apple File Conduit & IAP2",
     "Bluetooth",
     "Theme",
     "Now Playing Background",
-    "Device",
-    "USB-C",
-    "Apple File Conduit Sync",
-    "Backend",
+    "USB Options",
+    "Boot Screen",
     "About",
+    "Clock",
 };
 
 static int settings_initial_focus(int index)
 {
     if(index == SETTING_NOW_PLAYING_BG) {
-        return (int)g_np_bg_mode;
+        return g_np_bg_mode == NP_BG_BLURRED_COVER
+                   ? NP_BG_COVER_GRADIENT : (int)g_np_bg_mode;
     }
     if(index == SETTING_USB) {
-        return (int)g_usb_mode;
+        return g_usb_mode == USB_MODE_BOTH ? 1 : 0;
+    }
+    if(index == SETTING_THEME) {
+        return g_system_config.theme >= 0 && g_system_config.theme <= 2
+                   ? g_system_config.theme : 0;
     }
     return 0;
 }
 
 static void settings_update_count(void)
 {
-    if(settings_count_label == NULL) return;
-    lv_label_set_text_fmt(settings_count_label, "%d/%d",
-                          settings_selected + 1, SETTING_COUNT);
+    if(settings_counter.group == NULL) return;
+    counter_set(&settings_counter, settings_selected + 1, SETTING_COUNT);
 }
 
 static void settings_current_time(int * hour, int * minute)
@@ -5973,39 +6527,68 @@ static void settings_format_time(char * buffer, size_t size)
     }
 }
 
+static void settings_current_datetime(struct tm * out)
+{
+    if(out == NULL) return;
+    time_t now = time(NULL) + (time_t)g_clock_offset_min * 60;
+    localtime_r(&now, out);
+}
+
+static int settings_hour12(int hour)
+{
+    int h = hour % 12;
+    return h == 0 ? 12 : h;
+}
+
 static void settings_update_time_labels(void)
 {
+    struct tm tm_now;
+    settings_current_datetime(&tm_now);
     if(settings_detail_set_time_value) {
-        char text[16];
-        settings_format_time(text, sizeof(text));
+        char text[64];
+        snprintf(text, sizeof(text), "%04d-%02d-%02d %02d:%02d",
+                 tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
+                 tm_now.tm_hour, tm_now.tm_min);
         lv_label_set_text(settings_detail_set_time_value, text);
     }
-    if(settings_time_hour_value || settings_time_minute_value) {
-        int hour;
-        int minute;
-        settings_current_time(&hour, &minute);
-        if(settings_time_hour_value) {
-            char text[8];
-            if(g_clock_12h) {
-                int hour12 = hour % 12;
-                if(hour12 == 0) hour12 = 12;
-                snprintf(text, sizeof(text), "%d", hour12);
-            }
-            else {
-                snprintf(text, sizeof(text), "%02d", hour);
-            }
-            lv_label_set_text(settings_time_hour_value, text);
-        }
-        if(settings_time_minute_value) {
-            char text[8];
-            snprintf(text, sizeof(text), "%02d", minute);
-            lv_label_set_text(settings_time_minute_value, text);
-        }
-        if(settings_time_ampm_value) {
-            lv_label_set_text(settings_time_ampm_value,
-                              hour < 12 ? "AM" : "PM");
-        }
+    if(settings_time_year_value) {
+        lv_label_set_text_fmt(settings_time_year_value, "%04d",
+                              tm_now.tm_year + 1900);
     }
+    if(settings_time_month_value) {
+        lv_label_set_text_fmt(settings_time_month_value, "%02d",
+                              tm_now.tm_mon + 1);
+    }
+    if(settings_time_day_value) {
+        lv_label_set_text_fmt(settings_time_day_value, "%02d",
+                              tm_now.tm_mday);
+    }
+    if(settings_time_hour_value) {
+        lv_label_set_text_fmt(settings_time_hour_value, "%02d",
+                              g_clock_12h ? settings_hour12(tm_now.tm_hour)
+                                          : tm_now.tm_hour);
+    }
+    if(settings_time_minute_value) {
+        lv_label_set_text_fmt(settings_time_minute_value, "%02d",
+                              tm_now.tm_min);
+    }
+    if(settings_time_ampm_value) {
+        lv_label_set_text(settings_time_ampm_value,
+                          tm_now.tm_hour < 12 ? "AM" : "PM");
+    }
+    if(settings_time_ampm_column) {
+        lv_obj_set_hidden(settings_time_ampm_column, !g_clock_12h);
+    }
+    if(settings_time_ampm_spacer) {
+        lv_obj_set_hidden(settings_time_ampm_spacer, g_clock_12h);
+    }
+}
+
+void ui_clock_synced(void)
+{
+    g_clock_offset_min = 0;
+    update_clock();
+    settings_update_time_labels();
 }
 
 static void settings_update_time_format_labels(void)
@@ -6085,7 +6668,7 @@ static void settings_system_changed(void)
     g_system_config.touch_enabled = ui_touch_enabled() ? 1 : 0;
     g_system_config.np_bg_mode = (int)g_np_bg_mode;
     g_system_config.brightness = settings_brightness;
-    g_system_config.usb_mode = (g_usb_mode == USB_MODE_OTG) ? 1 : 0;
+    g_system_config.usb_mode = (int)g_usb_mode;
 
     settings_update_system_labels();
     if(g_system_config_changed_cb != NULL) {
@@ -6135,10 +6718,6 @@ static void settings_update_np_bg_checks(void)
         lv_label_set_text(settings_detail_np_bg_theme_check,
                           g_np_bg_mode == NP_BG_THEME ? ICON_CHECK : "");
     }
-    if(settings_detail_np_bg_blur_check) {
-        lv_label_set_text(settings_detail_np_bg_blur_check,
-                          g_np_bg_mode == NP_BG_BLURRED_COVER ? ICON_CHECK : "");
-    }
     if(settings_detail_np_bg_mesh_check) {
         lv_label_set_text(settings_detail_np_bg_mesh_check,
                           g_np_bg_mode == NP_BG_COVER_GRADIENT ? ICON_CHECK : "");
@@ -6186,6 +6765,22 @@ static void settings_time_format_action(void * user)
     g_clock_12h = !g_clock_12h;
     settings_update_time_format_labels();
     update_clock();
+    settings_system_changed();
+}
+
+static void settings_time_format_touch_cb(lv_event_t * event)
+{
+    settings_time_format_action(lv_event_get_user_data(event));
+}
+
+static void settings_time_apply_blink(void);
+
+static void settings_time_format_focus_cb(void * user)
+{
+    LV_UNUSED(user);
+    settings_time_segment = SETTINGS_TIME_NONE;
+    settings_time_editing = false;
+    settings_time_apply_blink();
 }
 
 static void settings_time_apply_blink(void);
@@ -6208,33 +6803,66 @@ static void settings_time_start_edit(void * user)
 
 static void settings_time_adjust(int direction)
 {
-    if(settings_time_segment == SETTINGS_TIME_HOUR) {
-        settings_clock_adjust_minutes(direction * 60);
+    struct tm tm_now;
+    settings_current_datetime(&tm_now);
+    time_t old_time = time(NULL) + (time_t)g_clock_offset_min * 60;
+
+    switch(settings_time_segment) {
+        case SETTINGS_TIME_YEAR:
+            tm_now.tm_year += direction;
+            break;
+        case SETTINGS_TIME_MONTH:
+            tm_now.tm_mon += direction;
+            break;
+        case SETTINGS_TIME_DAY:
+            tm_now.tm_mday += direction;
+            break;
+        case SETTINGS_TIME_HOUR:
+            if(g_clock_12h) {
+                int pm = tm_now.tm_hour >= 12 ? 12 : 0;
+                int hour12 = settings_hour12(tm_now.tm_hour);
+                hour12 = ((hour12 - 1 + direction) % 12 + 12) % 12 + 1;
+                tm_now.tm_hour = (hour12 % 12) + pm;
+            }
+            else {
+                tm_now.tm_hour += direction;
+            }
+            break;
+        case SETTINGS_TIME_AMPM:
+            tm_now.tm_hour = (tm_now.tm_hour + 12) % 24;
+            break;
+        case SETTINGS_TIME_MINUTE:
+            tm_now.tm_min += direction;
+            break;
+        default:
+            return;
     }
-    else if(settings_time_segment == SETTINGS_TIME_MINUTE) {
-        settings_clock_adjust_minutes(direction);
+    tm_now.tm_isdst = -1;
+    time_t new_time = mktime(&tm_now);
+    if(new_time == (time_t)-1) return;
+    if(g_time_changed_cb != NULL) {
+        /* Real hardware: commit immediately so the RTC keeps the new time. */
+        g_time_changed_cb(new_time);
+        g_clock_offset_min = 0;
     }
-    else if(settings_time_segment == SETTINGS_TIME_AMPM) {
-        int hour;
-        int minute;
-        settings_current_time(&hour, &minute);
-        bool is_pm = hour >= 12;
-        bool target_pm = direction < 0; /* up = AM, down = PM */
-        if(target_pm != is_pm) {
-            settings_clock_adjust_minutes(target_pm ? 12 * 60 : -12 * 60);
-        }
+    else {
+        /* Simulator: keep the old in-memory offset behaviour. */
+        int64_t delta = (int64_t)new_time - (int64_t)old_time;
+        g_clock_offset_min += (int)(delta / 60);
     }
+    settings_update_time_labels();
+    update_clock();
 }
 
 static bool settings_key(ui_key_t key)
 {
     if(!settings_time_open) return false;
     if(!settings_time_editing) {
-        if(key == UI_KEY_ENTER) {
+        if(key == UI_KEY_ENTER && settings_time_segment != SETTINGS_TIME_NONE) {
             settings_time_start_edit((void *)(intptr_t)settings_time_segment);
             return true;
         }
-        return false; /* Up/Down move focus between Back/Hour/Minute/AM-PM */
+        return false; /* Up/Down move focus; Enter acts on the focused row */
     }
     switch(key) {
         case UI_KEY_UP:
@@ -6254,53 +6882,74 @@ static bool settings_key(ui_key_t key)
 
 static void settings_time_up_cb(lv_event_t * event)
 {
-    if(settings_time_editing) {
-        settings_time_adjust(1);
+    if(!settings_time_editing) {
+        if(settings_time_segment == SETTINGS_TIME_NONE) {
+            settings_time_segment = SETTINGS_TIME_YEAR;
+        }
+        settings_time_start_edit((void *)(intptr_t)settings_time_segment);
     }
-    else {
-        focus_move(-1);
-    }
+    settings_time_adjust(1);
     lv_event_stop_bubbling(event);
 }
 
 static void settings_time_down_cb(lv_event_t * event)
 {
-    if(settings_time_editing) {
-        settings_time_adjust(-1);
+    if(!settings_time_editing) {
+        if(settings_time_segment == SETTINGS_TIME_NONE) {
+            settings_time_segment = SETTINGS_TIME_YEAR;
+        }
+        settings_time_start_edit((void *)(intptr_t)settings_time_segment);
     }
-    else {
-        focus_move(1);
-    }
+    settings_time_adjust(-1);
     lv_event_stop_bubbling(event);
 }
 
 static void settings_time_apply_blink(void)
 {
+    bool active = settings_time_open && settings_detail_open;
     bool edit = settings_time_editing;
-    if(settings_time_hour_value) {
-        bool on = settings_time_segment == SETTINGS_TIME_HOUR &&
-                  (!edit || settings_time_blink_on);
-        lv_obj_set_style_bg_opa(settings_time_hour_value,
-                                on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    bool blink = !edit || settings_time_blink_on;
+    lv_obj_t * fields[] = {
+        settings_time_year_value, settings_time_month_value,
+        settings_time_day_value, settings_time_hour_value,
+        settings_time_minute_value, settings_time_ampm_value,
+    };
+    int segments[] = {
+        SETTINGS_TIME_YEAR, SETTINGS_TIME_MONTH, SETTINGS_TIME_DAY,
+        SETTINGS_TIME_HOUR, SETTINGS_TIME_MINUTE, SETTINGS_TIME_AMPM,
+    };
+    for(size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        if(fields[i] == NULL) continue;
+        bool on = active && settings_time_segment == segments[i] && blink;
+        lv_obj_set_style_bg_opa(fields[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     }
-    if(settings_time_minute_value) {
-        bool on = settings_time_segment == SETTINGS_TIME_MINUTE &&
-                  (!edit || settings_time_blink_on);
-        lv_obj_set_style_bg_opa(settings_time_minute_value,
-                                on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    }
-    if(settings_time_ampm_value) {
-        bool on = settings_time_segment == SETTINGS_TIME_AMPM &&
-                  (!edit || settings_time_blink_on);
-        lv_obj_set_style_bg_opa(settings_time_ampm_value,
-                                on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+
+    uint32_t arrow_fg = edit ? COL_TEXT : COL_DIM;
+    uint32_t arrow_bg = edit ? COL_FOCUS : COL_ACCENT_DARK;
+    lv_obj_t * buttons[] = {
+        settings_time_down_button,
+        settings_time_up_button,
+    };
+    lv_obj_t * icons[] = {
+        settings_time_down_icon,
+        settings_time_up_icon,
+    };
+    for(size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
+        if(buttons[i] != NULL) {
+            lv_obj_set_style_bg_color(buttons[i], lv_color_hex(arrow_bg), 0);
+        }
+        if(icons[i] != NULL) {
+            lv_obj_set_style_text_color(icons[i],
+                                        lv_color_hex(arrow_fg), 0);
+        }
     }
 }
 
 static void settings_time_blink_tick(void)
 {
     if(g_current_screen != SCR_SETTINGS || !settings_time_open ||
-       !settings_time_editing || settings_time_segment == SETTINGS_TIME_NONE) {
+       !settings_detail_open || !settings_time_editing ||
+       settings_time_segment == SETTINGS_TIME_NONE) {
         return;
     }
     settings_time_blink_on = !settings_time_blink_on;
@@ -6309,7 +6958,8 @@ static void settings_time_blink_tick(void)
 
 static lv_obj_t * settings_time_touch_button(lv_obj_t * parent,
                                              const char * icon,
-                                             lv_event_cb_t callback)
+                                             lv_event_cb_t callback,
+                                             lv_obj_t ** icon_out)
 {
     lv_obj_t * button = lv_obj_create(parent);
     lv_obj_set_size(button, 64, 56);
@@ -6322,195 +6972,19 @@ static lv_obj_t * settings_time_touch_button(lv_obj_t * parent,
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(button, false);
-    lv_obj_set_clickable(button, true);
-    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
-    make_label(button, icon, &bootstrap_icons_32, COL_MINI_FG);
+    if(callback != NULL) {
+        lv_obj_set_clickable(button, true);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
+    }
+    else {
+        lv_obj_clear_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    }
+    lv_obj_t * label = make_label(button, icon, &bootstrap_icons_32, COL_DIM);
+    if(icon_out != NULL) *icon_out = label;
     return button;
 }
 
-static void settings_render_detail(lv_obj_t * parent, bool interactive);
-static void settings_render_time_editor(lv_obj_t * parent, bool interactive)
-{
-    LV_UNUSED(interactive);
-    settings_detail_set_time_value = NULL;
-    settings_time_hour_value = NULL;
-    settings_time_minute_value = NULL;
-    settings_time_ampm_value = NULL;
-
-    lv_obj_t * head = lv_obj_create(parent);
-    lv_obj_set_size(head, LV_PCT(100), 34);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_style_pad_column(head, 10, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    lv_obj_t * title = make_label(head, "Set time", FONT_DETAIL_TITLE, COL_TEXT);
-    lv_obj_set_flex_grow(title, 1);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
-    make_label(parent, "UP/DOWN select  ENTER edit/confirm  DOWN next",
-               FONT_CAPTION, COL_MUTED);
-
-    lv_obj_t * buttons = lv_obj_create(parent);
-    lv_obj_set_size(buttons, LV_PCT(100), 64);
-    lv_obj_set_style_bg_opa(buttons, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(buttons, 0, 0);
-    lv_obj_set_style_pad_all(buttons, 0, 0);
-    lv_obj_set_style_pad_column(buttons, 16, 0);
-    lv_obj_set_flex_flow(buttons, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(buttons, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(buttons, false);
-    settings_time_touch_button(buttons, ICON_CHEVRON_UP, settings_time_up_cb);
-    settings_time_touch_button(buttons, ICON_CHEVRON_DOWN, settings_time_down_cb);
-
-    lv_obj_t * time_wrap = lv_obj_create(parent);
-    lv_obj_set_size(time_wrap, LV_PCT(100), 88);
-    lv_obj_set_style_bg_opa(time_wrap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(time_wrap, 0, 0);
-    lv_obj_set_style_pad_all(time_wrap, 0, 0);
-    lv_obj_set_flex_flow(time_wrap, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(time_wrap, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(time_wrap, false);
-
-    lv_obj_t * time_box = lv_obj_create(time_wrap);
-    lv_obj_set_size(time_box, LV_SIZE_CONTENT, 80);
-    lv_obj_set_style_bg_opa(time_box, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(time_box, 2, 0);
-    lv_obj_set_style_border_color(time_box, lv_color_hex(COL_TEXT), 0);
-    lv_obj_set_style_border_opa(time_box, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(time_box, 0, 0);
-    lv_obj_set_style_pad_all(time_box, 0, 0);
-    lv_obj_set_style_pad_column(time_box, 14, 0);
-    lv_obj_set_flex_flow(time_box, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(time_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(time_box, false);
-
-    settings_time_hour_value = make_label(time_box, "00", FONT_CLOCK_LG, COL_TEXT);
-    lv_obj_set_size(settings_time_hour_value, 110, 76);
-    lv_obj_set_style_pad_top(settings_time_hour_value, 16, 0);
-    lv_obj_set_style_text_align(settings_time_hour_value, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_bg_color(settings_time_hour_value, lv_color_hex(COL_FOCUS), 0);
-    lv_obj_set_style_bg_opa(settings_time_hour_value, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(settings_time_hour_value, 0, 0);
-    int hour_focus = focus_add_clickable(settings_time_hour_value,
-                                         settings_time_start_edit, NULL,
-                                         (void *)(intptr_t)SETTINGS_TIME_HOUR,
-                                         false);
-    focus_set_silent(hour_focus, true);
-    focus_set_on_focus(hour_focus, settings_time_segment_focus_cb);
-
-    make_label(time_box, ":", FONT_CLOCK_LG, COL_TEXT);
-
-    settings_time_minute_value = make_label(time_box, "00", FONT_CLOCK_LG, COL_TEXT);
-    lv_obj_set_size(settings_time_minute_value, 110, 76);
-    lv_obj_set_style_pad_top(settings_time_minute_value, 16, 0);
-    lv_obj_set_style_text_align(settings_time_minute_value, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_bg_color(settings_time_minute_value, lv_color_hex(COL_FOCUS), 0);
-    lv_obj_set_style_bg_opa(settings_time_minute_value, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(settings_time_minute_value, 0, 0);
-    int minute_focus = focus_add_clickable(settings_time_minute_value,
-                                           settings_time_start_edit, NULL,
-                                           (void *)(intptr_t)SETTINGS_TIME_MINUTE,
-                                           false);
-    focus_set_silent(minute_focus, true);
-    focus_set_on_focus(minute_focus, settings_time_segment_focus_cb);
-
-    if(g_clock_12h) {
-        settings_time_ampm_value = make_label(time_box, "AM", FONT_CLOCK, COL_TEXT);
-        lv_obj_set_size(settings_time_ampm_value, 80, 76);
-        lv_obj_set_style_pad_top(settings_time_ampm_value, 21, 0);
-        lv_obj_set_style_text_align(settings_time_ampm_value, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_bg_color(settings_time_ampm_value, lv_color_hex(COL_FOCUS), 0);
-        lv_obj_set_style_bg_opa(settings_time_ampm_value, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_radius(settings_time_ampm_value, 0, 0);
-        int ampm_focus = focus_add_clickable(settings_time_ampm_value,
-                                             settings_time_start_edit, NULL,
-                                             (void *)(intptr_t)SETTINGS_TIME_AMPM,
-                                             false);
-        focus_set_silent(ampm_focus, true);
-        focus_set_on_focus(ampm_focus, settings_time_segment_focus_cb);
-    }
-
-    settings_update_time_labels();
-    settings_time_apply_blink();
-}
-
-static void settings_open_time_action(void * user)
-{
-    LV_UNUSED(user);
-    settings_detail_open = true;
-    settings_time_open = true;
-    settings_time_editing = false;
-    settings_time_segment = SETTINGS_TIME_NONE;
-    settings_time_blink_on = true;
-    settings_rebuild();
-    if(g_focus_count > 0) focus_select(0);
-}
-
-static void settings_open_time_async(void * arg)
-{
-    LV_UNUSED(arg);
-    settings_open_time_action(NULL);
-}
-
-static void settings_open_time_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    ui_call_async(settings_open_time_async, NULL);
-}
-
-static void settings_touch_action(void * user)
-{
-    LV_UNUSED(user);
-    ui_set_touch_enabled(!ui_touch_enabled());
-    settings_update_touch_labels();
-    settings_system_changed();
-}
-
-static void settings_menubar_action(void * user)
-{
-    LV_UNUSED(user);
-    ui_set_menubar_left(!ui_menubar_left());
-    settings_update_menubar_labels();
-    settings_system_changed();
-}
-
-static void settings_brightness_adjust(int delta, void * user)
-{
-    LV_UNUSED(user);
-    settings_brightness += delta * 5;
-    if(settings_brightness < 0) settings_brightness = 0;
-    if(settings_brightness > 100) settings_brightness = 100;
-    settings_update_brightness_labels();
-    settings_system_changed();
-}
-
-static void settings_brightness_action(void * user)
-{
-    LV_UNUSED(user);
-    ui_enter_edit("UP/DOWN Adjust   ENTER Confirm   6 Cancel");
-}
-
-static void settings_sort_field_action(void * user)
-{
-    LV_UNUSED(user);
-    g_sort_field = (g_sort_field + 1) % SORT_FIELD_COUNT;
-    settings_update_sort_labels();
-    settings_system_changed();
-}
-
-static void settings_sort_order_action(void * user)
-{
-    LV_UNUSED(user);
-    g_sort_desc = !g_sort_desc;
-    settings_update_sort_labels();
-    settings_system_changed();
-}
+#define SETTINGS_ROW_H 64
 
 static lv_obj_t * settings_make_value_row(lv_obj_t * parent, const char * label,
                                           const char * value, uint32_t color,
@@ -6537,7 +7011,7 @@ static lv_obj_t * settings_make_choice_row(lv_obj_t * parent, const char * label
                                            bool selected,
                                            lv_obj_t ** check_out)
 {
-    lv_obj_t * row = make_row(parent, 64);
+    lv_obj_t * row = make_row(parent, SETTINGS_ROW_H);
     lv_obj_set_style_pad_left(row, 16, 0);
     make_label(row, label, FONT_H2, COL_TEXT);
     lv_obj_t * spacer = lv_obj_create(row);
@@ -6554,185 +7028,6 @@ static lv_obj_t * settings_make_choice_row(lv_obj_t * parent, const char * label
     lv_obj_set_style_text_align(check, LV_TEXT_ALIGN_CENTER, 0);
     if(check_out) *check_out = check;
     return row;
-}
-
-static void settings_detail_timer_cb(lv_timer_t * timer)
-{
-    lv_timer_pause(timer);
-    if(settings_detail_dirty && settings_right_content != NULL) {
-        settings_detail_dirty = false;
-        settings_render_detail(settings_right_content, false);
-    }
-}
-
-static void settings_schedule_detail(void)
-{
-    settings_detail_dirty = true;
-    if(settings_detail_timer == NULL) {
-        settings_detail_timer = lv_timer_create(settings_detail_timer_cb, 140,
-                                                NULL);
-        if(settings_detail_timer == NULL) return;
-        lv_timer_pause(settings_detail_timer);
-    }
-    lv_timer_reset(settings_detail_timer);
-    lv_timer_resume(settings_detail_timer);
-}
-
-static void settings_row_focus(void * user)
-{
-    int index = (int)(intptr_t)user;
-    if(index == settings_selected) return;
-    settings_selected = index;
-    settings_time_open = false;
-    settings_update_count();
-    if(settings_right_content) settings_schedule_detail();
-}
-
-static void settings_rebuild(void)
-{
-    ui_rebuild_page();
-}
-
-static void settings_open(void * user)
-{
-    int index = (int)(intptr_t)user;
-    if(index < 0 || index >= SETTING_COUNT) return;
-    settings_selected = index;
-    settings_time_open = false;
-    settings_update_count();
-    settings_detail_open = true;
-    settings_rebuild();
-    if(g_focus_count > 0) {
-        focus_select(settings_initial_focus(index));
-    }
-}
-
-static bool settings_back(void)
-{
-    if(settings_time_open) {
-        settings_time_open = false;
-        settings_rebuild();
-        if(g_focus_count > 0) focus_select(1);
-        return true;
-    }
-    if(settings_detail_open) {
-        settings_detail_open = false;
-        settings_rebuild();
-        return true;
-    }
-    return false;
-}
-
-static void settings_same_key(void)
-{
-    if(settings_time_open) {
-        settings_time_open = false;
-        settings_rebuild();
-        if(g_focus_count > 0) focus_select(1);
-        return;
-    }
-    if(settings_detail_open) {
-        settings_detail_open = false;
-        settings_rebuild();
-        return;
-    }
-    settings_selected = 0;
-    settings_update_count();
-    if(g_focus_count > 0) focus_select(0);
-}
-
-static void settings_open_async(void * arg)
-{
-    settings_open(arg);
-}
-
-static void settings_row_touch_cb(lv_event_t * event)
-{
-    ui_call_async(settings_open_async, lv_event_get_user_data(event));
-}
-
-static void settings_ble_open_action(void * user)
-{
-    LV_UNUSED(user);
-    g_ble_return_screen = SCR_SETTINGS;
-    ui_show_screen(SCR_BLUETOOTH);
-}
-
-static void settings_ble_open_async(void * arg)
-{
-    LV_UNUSED(arg);
-    settings_ble_open_action(NULL);
-}
-
-static void settings_ble_open_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    ui_call_async(settings_ble_open_async, NULL);
-}
-
-static void settings_time_format_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_time_format_action(NULL);
-}
-
-static void settings_touch_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_touch_action(NULL);
-}
-
-static void settings_menubar_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_menubar_action(NULL);
-}
-
-static void settings_brightness_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_brightness_action(NULL);
-}
-
-static void settings_screen_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_screen_action(NULL);
-}
-
-static void settings_wifi_mode_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_wifi_mode_action(NULL);
-}
-
-static void settings_sound_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_sound_action(NULL);
-}
-
-static void settings_volume_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_volume_action(NULL);
-}
-
-static void settings_np_bg_touch_cb(lv_event_t * event)
-{
-    settings_np_bg_action(lv_event_get_user_data(event));
-}
-
-static void settings_sort_field_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_sort_field_action(NULL);
-}
-
-static void settings_sort_order_touch_cb(lv_event_t * event)
-{
-    LV_UNUSED(event);
-    settings_sort_order_action(NULL);
 }
 
 static void settings_format_bytes(uint64_t bytes, char * out, size_t out_len)
@@ -6781,7 +7076,8 @@ static lv_obj_t * settings_afc_action_row(lv_obj_t * parent, const char * label,
                                           bool interactive)
 {
     lv_obj_t * row = settings_make_value_row(parent, label, value, COL_ACCENT,
-                                             60, FONT_H2, FONT_CAPTION, NULL);
+                                             SETTINGS_ROW_H, FONT_H2,
+                                             FONT_H2, NULL);
     if(interactive) {
         focus_add_clickable(row, settings_afc_action, NULL,
                             (void *)(intptr_t)action, true);
@@ -6793,6 +7089,418 @@ static lv_obj_t * settings_afc_action_row(lv_obj_t * parent, const char * label,
     return row;
 }
 
+static lv_obj_t * settings_make_info_row(lv_obj_t * parent,
+                                         const char * label,
+                                         const char * value,
+                                         const lv_font_t * label_font,
+                                         const lv_font_t * value_font,
+                                         int height)
+{
+    lv_obj_t * row = make_row(parent, height);
+    lv_obj_set_style_pad_left(row, 16, 0);
+    lv_obj_t * name = make_label(row, label, label_font, COL_MUTED);
+    lv_obj_set_flex_grow(name, 1);
+    ui_text_fade(name);
+    lv_obj_t * val = make_label(row, value, value_font, COL_MUTED);
+    lv_obj_set_width(val, 360);
+    lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_text_fade(val);
+    return row;
+}
+
+static void settings_make_separator(lv_obj_t * parent, const char * left,
+                                    const char * right)
+{
+    lv_obj_t * row = make_row(parent, 34);
+    lv_obj_set_style_pad_left(row, 16, 0);
+    lv_obj_t * l = make_label(row, left, FONT_CAPTION, COL_MUTED);
+    lv_obj_set_flex_grow(l, 1);
+    ui_text_fade(l);
+    lv_obj_t * r = make_label(row, right, FONT_CAPTION, COL_DIM);
+    lv_obj_set_width(r, 430);
+    lv_obj_set_style_text_align(r, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_text_fade(r);
+}
+
+static void settings_update_theme_checks(void)
+{
+    int theme = g_system_config.theme;
+    if(settings_detail_theme_gray_check) {
+        lv_label_set_text(settings_detail_theme_gray_check,
+                          theme == 0 ? ICON_CHECK : "");
+    }
+    if(settings_detail_theme_aqua_check) {
+        lv_label_set_text(settings_detail_theme_aqua_check,
+                          theme == 1 ? ICON_CHECK : "");
+    }
+    if(settings_detail_theme_win95_check) {
+        lv_label_set_text(settings_detail_theme_win95_check,
+                          theme == 2 ? ICON_CHECK : "");
+    }
+}
+
+static void settings_theme_action(void * user)
+{
+    int theme = (int)(intptr_t)user;
+    if(theme < 0 || theme > 2) return;
+    g_system_config.theme = theme;
+    settings_update_theme_checks();
+    settings_system_changed();
+}
+
+static void settings_theme_touch_cb(lv_event_t * event)
+{
+    settings_theme_action(lv_event_get_user_data(event));
+}
+
+static void settings_ble_toggle_action(void * user)
+{
+    LV_UNUSED(user);
+    bool enabled = !g_system_config.ble_enabled;
+    g_system_config.ble_enabled = enabled ? 1 : 0;
+    ble_remote_set_enabled(enabled);
+    if(enabled) {
+        ble_remote_scan_start();
+    }
+    settings_system_changed();
+    settings_ble_rev = ble_remote_revision();
+    settings_restore_focus = g_focus_index;
+    ui_rebuild_page();
+}
+
+static void settings_ble_toggle_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    settings_ble_toggle_action(NULL);
+}
+
+static void settings_ble_device_action(void * user)
+{
+    int index = (int)(intptr_t)user;
+    ble_remote_device_t dev;
+    if(ble_remote_paired_get(index, &dev)) {
+        ble_remote_connect(dev.addr);
+    }
+    settings_rebuild();
+}
+
+static void settings_ble_device_async(void * arg)
+{
+    settings_ble_device_action(arg);
+}
+
+static void settings_ble_device_click_cb(lv_event_t * event)
+{
+    settings_ble_device_action(lv_event_get_user_data(event));
+}
+
+static void settings_ble_forget_action(void * user)
+{
+    int index = (int)(intptr_t)user;
+    ble_remote_device_t dev;
+    if(ble_remote_paired_get(index, &dev)) {
+        ble_remote_unpair(dev.addr);
+    }
+    settings_rebuild();
+}
+
+static void settings_ble_forget_async(void * arg)
+{
+    settings_ble_forget_action(arg);
+}
+
+static void settings_ble_forget_cb(lv_event_t * event)
+{
+    ui_call_async(settings_ble_forget_async,
+                  lv_event_get_user_data(event));
+}
+
+static void settings_ble_pair_action(void * user)
+{
+    LV_UNUSED(user);
+    g_ble_return_screen = SCR_SETTINGS;
+    ui_show_screen(SCR_BLUETOOTH);
+}
+
+static void settings_ble_pair_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    settings_ble_pair_action(NULL);
+}
+
+static void settings_ble_scan_connect_action(void * user)
+{
+    int index = (int)(intptr_t)user;
+    ble_remote_device_t dev;
+    if(ble_remote_scan_get(index, &dev)) {
+        ble_remote_connect(dev.addr);
+    }
+    settings_ble_rev = ble_remote_revision();
+    settings_restore_focus = g_focus_index;
+    ui_rebuild_page();
+}
+
+static void settings_ble_scan_connect_async(void * arg)
+{
+    settings_ble_scan_connect_action(arg);
+}
+
+static void settings_ble_scan_connect_cb(lv_event_t * event)
+{
+    ui_call_async(settings_ble_scan_connect_async,
+                  lv_event_get_user_data(event));
+}
+
+static void settings_tick(void)
+{
+    if(g_current_screen != SCR_SETTINGS ||
+       settings_selected != SETTING_BLUETOOTH || !settings_detail_open) {
+        return;
+    }
+    uint32_t rev = ble_remote_revision();
+    if(rev == settings_ble_rev) return;
+    settings_ble_rev = rev;
+    settings_restore_focus = g_focus_index;
+    ui_rebuild_page();
+}
+
+static void settings_update_usb_checks(void)
+{
+    if(settings_detail_usb_a_check) {
+        lv_label_set_text(settings_detail_usb_a_check,
+                          g_usb_mode == USB_MODE_HOST ? ICON_CHECK : "");
+    }
+    if(settings_detail_usb_both_check) {
+        lv_label_set_text(settings_detail_usb_both_check,
+                          g_usb_mode == USB_MODE_BOTH ? ICON_CHECK : "");
+    }
+}
+
+static void settings_usb_mode_action(void * user)
+{
+    int mode = (int)(intptr_t)user;
+    g_usb_mode = mode == 2 ? USB_MODE_BOTH : USB_MODE_HOST;
+    settings_update_usb_checks();
+    settings_system_changed();
+    ui_set_hint("Reboot to apply USB mode");
+}
+
+static void settings_usb_mode_touch_cb(lv_event_t * event)
+{
+    settings_usb_mode_action(lv_event_get_user_data(event));
+}
+
+static void settings_boot_screen_action(void * user)
+{
+    g_system_config.boot_screen = (int)(intptr_t)user;
+    if(settings_detail_boot_off_check) {
+        lv_label_set_text(settings_detail_boot_off_check,
+                          g_system_config.boot_screen == 0 ? ICON_CHECK : "");
+    }
+    if(settings_detail_boot_anim1_check) {
+        lv_label_set_text(settings_detail_boot_anim1_check,
+                          g_system_config.boot_screen == 1 ? ICON_CHECK : "");
+    }
+    settings_system_changed();
+}
+
+static void settings_boot_screen_touch_cb(lv_event_t * event)
+{
+    settings_boot_screen_action(lv_event_get_user_data(event));
+}
+
+static const char * settings_compile_time(void)
+{
+    static char text[48];
+    if(text[0] != '\0') return text;
+    char month[4] = "Jan";
+    int day = 1, year = 2026, hour = 0, minute = 0, second = 0;
+    sscanf(__DATE__, "%3s %d %d", month, &day, &year);
+    sscanf(__TIME__, "%d:%d:%d", &hour, &minute, &second);
+    int hour12 = hour % 12;
+    if(hour12 == 0) hour12 = 12;
+    snprintf(text, sizeof(text), "%s %d %d  %d:%02d %s", month, day, year,
+             hour12, minute, hour < 12 ? "AM" : "PM");
+    return text;
+}
+
+static const char * settings_commit(void)
+{
+    static char text[32];
+    if(text[0] != '\0') return text;
+#if defined(ESP_PLATFORM)
+    const esp_app_desc_t * app = esp_app_get_description();
+    snprintf(text, sizeof(text), "%s", app != NULL ? app->version : "unknown");
+    char * dash = strchr(text, '-');
+    if(dash != NULL) *dash = '\0';
+#else
+    snprintf(text, sizeof(text), "local");
+#endif
+    return text;
+}
+
+static void settings_time_field(lv_obj_t * parent, const char * caption,
+                                int width, int segment, bool interactive,
+                                lv_obj_t ** value_out)
+{
+    lv_obj_t * column = lv_obj_create(parent);
+    lv_obj_set_size(column, width, 104);
+    lv_obj_set_style_bg_opa(column, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(column, 0, 0);
+    lv_obj_set_style_pad_all(column, 0, 0);
+    lv_obj_set_style_pad_row(column, 2, 0);
+    lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(column, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(column, false);
+
+    lv_obj_t * value = make_label(column, "00", FONT_CLOCK_LG, COL_TEXT);
+    lv_obj_set_size(value, width, 72);
+    lv_obj_set_style_pad_top(value, 12, 0);
+    lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(value, lv_color_hex(COL_FOCUS), 0);
+    lv_obj_set_style_bg_opa(value, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(value, 0, 0);
+    if(interactive) {
+        int index = focus_add_clickable(value, settings_time_start_edit, NULL,
+                                        (void *)(intptr_t)segment, false);
+        focus_set_silent(index, true);
+        focus_set_on_focus(index, settings_time_segment_focus_cb);
+    }
+    make_label(column, caption, FONT_CAPTION, COL_MUTED);
+    if(value_out != NULL) *value_out = value;
+}
+
+static void settings_render_time_editor(lv_obj_t * parent, bool interactive)
+{
+    settings_time_year_value = NULL;
+    settings_time_month_value = NULL;
+    settings_time_day_value = NULL;
+    settings_time_hour_value = NULL;
+    settings_time_minute_value = NULL;
+    settings_time_ampm_value = NULL;
+    settings_time_ampm_column = NULL;
+    settings_time_ampm_spacer = NULL;
+    settings_time_up_button = NULL;
+    settings_time_down_button = NULL;
+    settings_time_up_icon = NULL;
+    settings_time_down_icon = NULL;
+
+    lv_obj_t * format_row = settings_make_value_row(
+        parent, "FORMAT", g_clock_12h ? "12H" : "24H", COL_ACCENT,
+        SETTINGS_ROW_H, FONT_H2, FONT_H2, &settings_detail_time_format_value);
+    if(interactive) {
+        int index = focus_add_clickable(format_row, settings_time_format_action,
+                                        NULL, NULL, true);
+        focus_set_on_focus(index, settings_time_format_focus_cb);
+    }
+    else {
+        touch_add_clickable(format_row, settings_time_format_touch_cb, NULL);
+    }
+
+    lv_obj_t * hint = make_label(parent, "UP/DOWN select   ENTER edit/confirm   BACK close",
+                                 FONT_CAPTION, COL_MUTED);
+    lv_obj_set_style_pad_left(hint, 16, 0);
+
+    lv_obj_t * editor = lv_obj_create(parent);
+    lv_obj_set_size(editor, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(editor, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(editor, 0, 0);
+    lv_obj_set_style_pad_all(editor, 0, 0);
+    lv_obj_set_style_pad_row(editor, 12, 0);
+    lv_obj_set_flex_flow(editor, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(editor, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(editor, false);
+
+    lv_obj_t * box = lv_obj_create(editor);
+    lv_obj_set_size(box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(COL_TEXT), 0);
+    lv_obj_set_style_border_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 8, 0);
+    lv_obj_set_style_pad_row(box, 4, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(box, false);
+
+    lv_obj_t * date_row = lv_obj_create(box);
+    lv_obj_set_size(date_row, LV_PCT(100), 108);
+    lv_obj_set_style_bg_opa(date_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(date_row, 0, 0);
+    lv_obj_set_style_pad_all(date_row, 0, 0);
+    lv_obj_set_style_pad_column(date_row, 18, 0);
+    lv_obj_set_flex_flow(date_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(date_row, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(date_row, false);
+    settings_time_field(date_row, "YEAR", 180, SETTINGS_TIME_YEAR,
+                        interactive, &settings_time_year_value);
+    settings_time_field(date_row, "MONTH", 180, SETTINGS_TIME_MONTH,
+                        interactive, &settings_time_month_value);
+    settings_time_field(date_row, "DAY", 180, SETTINGS_TIME_DAY,
+                        interactive, &settings_time_day_value);
+
+    lv_obj_t * time_row = lv_obj_create(box);
+    lv_obj_set_size(time_row, LV_PCT(100), 108);
+    lv_obj_set_style_bg_opa(time_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(time_row, 0, 0);
+    lv_obj_set_style_pad_all(time_row, 0, 0);
+    lv_obj_set_style_pad_column(time_row, 18, 0);
+    lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(time_row, false);
+    settings_time_field(time_row, "HOUR", 180, SETTINGS_TIME_HOUR,
+                        interactive, &settings_time_hour_value);
+    settings_time_field(time_row, "MINUTE", 180, SETTINGS_TIME_MINUTE,
+                        interactive, &settings_time_minute_value);
+    settings_time_field(time_row, "AM/PM", 180, SETTINGS_TIME_AMPM,
+                        interactive, &settings_time_ampm_value);
+    settings_time_ampm_column = lv_obj_get_parent(settings_time_ampm_value);
+    settings_time_ampm_spacer = lv_obj_create(time_row);
+    lv_obj_set_size(settings_time_ampm_spacer, 180, 104);
+    lv_obj_set_style_bg_opa(settings_time_ampm_spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(settings_time_ampm_spacer, 0, 0);
+    lv_obj_set_style_pad_all(settings_time_ampm_spacer, 0, 0);
+    lv_obj_set_scrollable(settings_time_ampm_spacer, false);
+    lv_obj_clear_flag(settings_time_ampm_spacer, LV_OBJ_FLAG_CLICKABLE);
+
+    /* Down on the left, up on the right.  Both stay visible and turn grey
+     * while the editor is not in adjustment mode. */
+    lv_obj_t * arrows = lv_obj_create(editor);
+    lv_obj_set_size(arrows, LV_PCT(100), 64);
+    lv_obj_set_style_bg_opa(arrows, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(arrows, 0, 0);
+    lv_obj_set_style_pad_all(arrows, 0, 0);
+    lv_obj_set_style_pad_top(arrows, 16, 0);
+    lv_obj_set_style_pad_column(arrows, 28, 0);
+    lv_obj_set_flex_flow(arrows, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(arrows, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(arrows, false);
+
+    settings_time_down_button = settings_time_touch_button(
+        arrows, ICON_CHEVRON_DOWN, settings_time_down_cb,
+        &settings_time_down_icon);
+    settings_time_up_button = settings_time_touch_button(
+        arrows, ICON_CHEVRON_UP, settings_time_up_cb,
+        &settings_time_up_icon);
+    lv_obj_set_size(settings_time_down_button, 220, 64);
+    lv_obj_set_size(settings_time_up_button, 220, 64);
+
+    settings_update_time_labels();
+    settings_time_apply_blink();
+}
+
+static void settings_np_bg_touch_cb(lv_event_t * event)
+{
+    settings_np_bg_action(lv_event_get_user_data(event));
+}
+
 static void settings_render_detail(lv_obj_t * parent, bool interactive)
 {
     if(parent == NULL) return;
@@ -6800,11 +7508,22 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
 
     settings_detail_time_format_value = NULL;
     settings_detail_set_time_value = NULL;
+    settings_detail_ble_value = NULL;
+    settings_detail_usb_a_check = NULL;
+    settings_detail_usb_both_check = NULL;
+    settings_detail_boot_off_check = NULL;
+    settings_detail_boot_anim1_check = NULL;
+    settings_detail_theme_gray_check = NULL;
+    settings_detail_theme_aqua_check = NULL;
+    settings_detail_theme_win95_check = NULL;
     settings_detail_screen_value = NULL;
     settings_detail_wifi_mode_value = NULL;
     settings_detail_wifi_status_value = NULL;
     settings_detail_sound_value = NULL;
     settings_detail_volume_value = NULL;
+    settings_time_year_value = NULL;
+    settings_time_month_value = NULL;
+    settings_time_day_value = NULL;
     settings_time_hour_value = NULL;
     settings_time_minute_value = NULL;
     settings_detail_touch_value = NULL;
@@ -6813,207 +7532,173 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_sort_value = NULL;
     settings_detail_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
-    settings_detail_np_bg_blur_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
-
-    if(settings_time_open) {
-        settings_render_time_editor(parent, interactive);
-        return;
-    }
 
     int index = settings_selected;
     if(index < 0 || index >= SETTING_COUNT) index = 0;
 
-    lv_obj_t * head = lv_obj_create(parent);
-    lv_obj_set_size(head, LV_PCT(100), 34);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_style_pad_column(head, 10, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    lv_obj_t * title = make_label(head, settings_names[index],
-                                  FONT_DETAIL_TITLE, COL_TEXT);
-    lv_obj_set_flex_grow(title, 1);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
-
     switch(index) {
+        case SETTING_AFC_IAP2: {
+            ui_afc_status_t st;
+            settings_afc_read_status(&st);
+            if(st.afc_mode) {
+                settings_afc_action_row(parent, "Enter iAP2 Mode", "Reboot",
+                                        UI_AFC_ACTION_IPOD_MODE, interactive);
+            }
+            else {
+                settings_afc_action_row(parent, "Enter AFC Mode", "Reboot",
+                                        UI_AFC_ACTION_PAIR, interactive);
+            }
+
+            char value[96];
+            char size[24];
+            int total_albums = player_library_album_count();
+            snprintf(value, sizeof(value), "%d/%d", st.cached_albums,
+                     total_albums);
+            settings_make_info_row(parent, "Albums (Cached/Total)", value,
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
+            if(st.library_db_bytes > 0) {
+                settings_format_bytes(st.library_db_bytes, size, sizeof(size));
+            }
+            else {
+                snprintf(size, sizeof(size), "—");
+            }
+            settings_make_info_row(parent, "Database Size", size,
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
+            if(st.cover_cache_bytes > 0) {
+                settings_format_bytes(st.cover_cache_bytes, size, sizeof(size));
+            }
+            else {
+                snprintf(size, sizeof(size), "—");
+            }
+            settings_make_info_row(parent, "Cover Cache Size", size,
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
+            settings_make_info_row(parent, "Library ID",
+                                   st.library_suffix[0] ? st.library_suffix : "—",
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
+            settings_make_info_row(parent, "iAP2 Status",
+                                   st.iap2_status[0] ? st.iap2_status : "—",
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
+            break;
+        }
         case SETTING_BLUETOOTH: {
+            bool enabled = g_system_config.ble_enabled != 0;
+            lv_obj_t * row = settings_make_value_row(
+                parent, "Bluetooth", enabled ? "On" : "Off",
+                enabled ? COL_GREEN : COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2,
+                &settings_detail_ble_value);
+            if(interactive) {
+                focus_add_clickable(row, settings_ble_toggle_action, NULL,
+                                    NULL, true);
+            }
+            else {
+                touch_add_clickable(row, settings_ble_toggle_touch_cb, NULL);
+            }
+
             ble_remote_state_t state = BLE_REMOTE_OFF;
-            char status[64] = "Off";
-            ble_remote_status(&state, status, sizeof(status));
-            lv_obj_t * open_row = settings_make_value_row(
-                parent, "Bluetooth Remote", "Open", COL_ACCENT, 64,
-                FONT_H2, FONT_H2, NULL);
-            if(interactive) {
-                focus_add_clickable(open_row, settings_ble_open_action,
-                                    NULL, NULL, true);
+            ble_remote_status(&state, NULL, 0);
+            bool scanning = state == BLE_REMOTE_SCANNING;
+            settings_make_separator(parent, "Paired Devices",
+                                    "PRESS: CONNECT   LONG_PRS: FORGET");
+            int count = ble_remote_paired_count();
+            if(count <= 0) {
+                settings_make_info_row(parent, "No paired devices", "",
+                                       FONT_BODY, FONT_CAPTION,
+                                       SETTINGS_ROW_H);
             }
-            else {
-                touch_add_clickable(open_row, settings_ble_open_touch_cb, NULL);
+            for(int i = 0; i < count; i++) {
+                ble_remote_device_t dev;
+                if(!ble_remote_paired_get(i, &dev)) continue;
+                lv_obj_t * device = make_row(parent, SETTINGS_ROW_H);
+                lv_obj_set_style_pad_left(device, 16, 0);
+                lv_obj_t * icon = make_label(device, ICON_BLUETOOTH,
+                                             &bootstrap_icons_24, COL_ACCENT);
+                lv_obj_set_width(icon, 28);
+                lv_obj_t * name = make_label(device,
+                                             dev.name[0] ? dev.name : dev.addr,
+                                             FONT_H2, COL_TEXT);
+                lv_obj_set_flex_grow(name, 1);
+                ui_text_fade(name);
+                bool connected = state == BLE_REMOTE_CONNECTED;
+                lv_obj_t * status = make_label(
+                    device, connected ? "Connected" : "Disconnected",
+                    FONT_H2, connected ? COL_GREEN : COL_MUTED);
+                lv_obj_set_width(status, 170);
+                lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_RIGHT, 0);
+                ui_text_fade(status);
+                if(interactive) {
+                    focus_add_clickable(device, settings_ble_device_action,
+                                        NULL, (void *)(intptr_t)i, true);
+                    lv_obj_add_event_cb(device, settings_ble_forget_cb,
+                                        LV_EVENT_LONG_PRESSED,
+                                        (void *)(intptr_t)i);
+                }
             }
-            settings_make_value_row(parent, "Status", status,
-                                    state == BLE_REMOTE_CONNECTED ? COL_GREEN
-                                                                  : COL_MUTED,
-                                    52, FONT_H2, FONT_CAPTION, NULL);
-            char paired[32];
-            snprintf(paired, sizeof(paired), "%d", ble_remote_paired_count());
-            settings_make_value_row(parent, "Paired devices", paired, COL_TEXT,
-                                    52, FONT_H2, FONT_NUM, NULL);
+            int scan_count = ble_remote_scan_count();
+            settings_make_separator(parent, "Search Devices",
+                                    "PRESS: PAIR");
+            if(scan_count <= 0 && scanning) {
+                settings_make_info_row(parent, "Searching...", "",
+                                       FONT_BODY, FONT_CAPTION,
+                                       SETTINGS_ROW_H);
+            }
+            for(int i = 0; i < scan_count; i++) {
+                ble_remote_device_t dev;
+                if(!ble_remote_scan_get(i, &dev)) continue;
+                lv_obj_t * device = make_row(parent, SETTINGS_ROW_H);
+                lv_obj_set_style_pad_left(device, 16, 0);
+                lv_obj_t * icon = make_label(device, ICON_BLUETOOTH,
+                                             &bootstrap_icons_24,
+                                             COL_MUTED);
+                lv_obj_set_width(icon, 28);
+                lv_obj_t * name = make_label(device,
+                                             dev.name[0] ? dev.name
+                                                         : dev.addr,
+                                             FONT_H2, COL_TEXT);
+                lv_obj_set_flex_grow(name, 1);
+                ui_text_fade(name);
+                lv_obj_t * status = make_label(device, "PAIR",
+                                               FONT_H2, COL_ACCENT);
+                lv_obj_set_width(status, 90);
+                lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_RIGHT,
+                                            0);
+                if(interactive) {
+                    focus_add_clickable(device,
+                                        settings_ble_scan_connect_action,
+                                        NULL, (void *)(intptr_t)i, true);
+                }
+            }
             break;
         }
-        case SETTING_GENERAL: {
-            lv_obj_t * time_row = settings_make_value_row(
-                parent, "Time format", g_clock_12h ? "12H" : "24H",
-                COL_TEXT, 64, FONT_H2, FONT_H2,
-                &settings_detail_time_format_value);
+        case SETTING_THEME: {
+            int theme = g_system_config.theme;
+            lv_obj_t * gray = settings_make_choice_row(
+                parent, "Gray", theme == 0,
+                &settings_detail_theme_gray_check);
+            lv_obj_t * aqua = settings_make_choice_row(
+                parent, "Aqua", theme == 1,
+                &settings_detail_theme_aqua_check);
+            lv_obj_t * win95 = settings_make_choice_row(
+                parent, "Windows 95", theme == 2,
+                &settings_detail_theme_win95_check);
             if(interactive) {
-                focus_add_clickable(time_row, settings_time_format_action,
-                                    NULL, NULL, true);
+                focus_add_clickable(gray, settings_theme_action, NULL,
+                                    (void *)(intptr_t)0, true);
+                focus_add_clickable(aqua, settings_theme_action, NULL,
+                                    (void *)(intptr_t)1, true);
+                focus_add_clickable(win95, settings_theme_action, NULL,
+                                    (void *)(intptr_t)2, true);
             }
             else {
-                touch_add_clickable(time_row, settings_time_format_touch_cb, NULL);
+                touch_add_clickable(gray, settings_theme_touch_cb,
+                                    (void *)(intptr_t)0);
+                touch_add_clickable(aqua, settings_theme_touch_cb,
+                                    (void *)(intptr_t)1);
+                touch_add_clickable(win95, settings_theme_touch_cb,
+                                    (void *)(intptr_t)2);
             }
-
-            char time_text[16];
-            settings_format_time(time_text, sizeof(time_text));
-            lv_obj_t * set_time_row = settings_make_value_row(
-                parent, "Set time", time_text, COL_TEXT, 64,
-                FONT_H2, FONT_H2, &settings_detail_set_time_value);
-            if(interactive) {
-                focus_add_clickable(set_time_row, settings_open_time_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(set_time_row, settings_open_time_touch_cb, NULL);
-            }
-
-            lv_obj_t * sort_row = settings_make_value_row(
-                parent, "Sort order", settings_sort_field_text(), COL_TEXT, 64,
-                FONT_H2, FONT_H2, &settings_detail_sort_value);
-            if(interactive) {
-                focus_add_clickable(sort_row, settings_sort_field_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(sort_row, settings_sort_field_touch_cb, NULL);
-            }
-
-            lv_obj_t * order_row = settings_make_value_row(
-                parent, "Order", settings_sort_order_text(), COL_TEXT, 64,
-                FONT_H2, FONT_H2, &settings_detail_order_value);
-            if(interactive) {
-                focus_add_clickable(order_row, settings_sort_order_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(order_row, settings_sort_order_touch_cb, NULL);
-            }
-
-            lv_obj_t * menubar_row = settings_make_value_row(
-                parent, "Menubar position", ui_menubar_left() ? "Left" : "Right",
-                COL_TEXT, 64, FONT_H2, FONT_H2,
-                &settings_detail_menubar_value);
-            if(interactive) {
-                focus_add_clickable(menubar_row, settings_menubar_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(menubar_row, settings_menubar_touch_cb, NULL);
-            }
-
-            lv_obj_t * touch_row = settings_make_value_row(
-                parent, "Touch input", ui_touch_enabled() ? "On" : "Off",
-                COL_TEXT, 64, FONT_H2, FONT_H2,
-                &settings_detail_touch_value);
-            if(interactive) {
-                focus_add_clickable(touch_row, settings_touch_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(touch_row, settings_touch_touch_cb, NULL);
-            }
-
-            char brightness_value[8];
-            snprintf(brightness_value, sizeof(brightness_value), "%d%%",
-                     settings_brightness);
-            lv_obj_t * brightness_row = settings_make_value_row(
-                parent, "Brightness", brightness_value, COL_TEXT, 64,
-                FONT_H2, FONT_H2, &settings_detail_brightness_value);
-            if(interactive) {
-                focus_add_clickable(brightness_row, settings_brightness_action,
-                                    settings_brightness_adjust, NULL, true);
-            }
-            else {
-                touch_add_clickable(brightness_row, settings_brightness_touch_cb,
-                                    NULL);
-            }
-
-            lv_obj_t * screen_row = settings_make_value_row(
-                parent, "Screen flip",
-                g_system_config.screen_flip == 180 ? "180 deg" : "0 deg",
-                COL_TEXT, 64, FONT_H2, FONT_H2,
-                &settings_detail_screen_value);
-            if(interactive) {
-                focus_add_clickable(screen_row, settings_screen_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(screen_row, settings_screen_touch_cb, NULL);
-            }
-
-            char volume_value[8];
-            snprintf(volume_value, sizeof(volume_value), "%d%%",
-                     g_system_config.volume);
-            lv_obj_t * volume_row = settings_make_value_row(
-                parent, "Prompt volume", volume_value, COL_TEXT, 64,
-                FONT_H2, FONT_H2, &settings_detail_volume_value);
-            if(interactive) {
-                focus_add_clickable(volume_row, settings_volume_action,
-                                    settings_volume_adjust, NULL, true);
-            }
-            else {
-                touch_add_clickable(volume_row, settings_volume_touch_cb, NULL);
-            }
-
-            lv_obj_t * sound_row = settings_make_value_row(
-                parent, "Prompt sound",
-                g_system_config.sound_enabled ? "On" : "Off",
-                COL_TEXT, 64, FONT_H2, FONT_H2,
-                &settings_detail_sound_value);
-            if(interactive) {
-                focus_add_clickable(sound_row, settings_sound_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(sound_row, settings_sound_touch_cb, NULL);
-            }
-
-            lv_obj_t * wifi_row = settings_make_value_row(
-                parent, "WiFi mode",
-                g_system_config.wifi_mode == 1 ? "AP" : "Station",
-                COL_TEXT, 64, FONT_H2, FONT_H2,
-                &settings_detail_wifi_mode_value);
-            if(interactive) {
-                focus_add_clickable(wifi_row, settings_wifi_mode_action,
-                                    NULL, NULL, true);
-            }
-            else {
-                touch_add_clickable(wifi_row, settings_wifi_mode_touch_cb, NULL);
-            }
-
-            char wifi_text[128];
-            snprintf(wifi_text, sizeof(wifi_text), "%s  %s",
-                     g_system_config.wifi_status, g_system_config.wifi_ip);
-            settings_make_value_row(parent, "WiFi status", wifi_text,
-                                    COL_MUTED, 52, FONT_H2, FONT_CAPTION,
-                                    &settings_detail_wifi_status_value);
             break;
         }
-        case SETTING_THEME:
-            break;
         case SETTING_NOW_PLAYING_BG: {
             lv_obj_t * theme_row = settings_make_choice_row(
                 parent, "Theme", g_np_bg_mode == NP_BG_THEME,
@@ -7027,26 +7712,14 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                     (void *)(intptr_t)NP_BG_THEME);
             }
 
-            lv_obj_t * blur_row = settings_make_choice_row(
-                parent, "Blurred cover",
-                g_np_bg_mode == NP_BG_BLURRED_COVER,
-                &settings_detail_np_bg_blur_check);
-            if(interactive) {
-                focus_add_clickable(blur_row, settings_np_bg_action, NULL,
-                                    (void *)(intptr_t)NP_BG_BLURRED_COVER, true);
-            }
-            else {
-                touch_add_clickable(blur_row, settings_np_bg_touch_cb,
-                                    (void *)(intptr_t)NP_BG_BLURRED_COVER);
-            }
-
             lv_obj_t * mesh_row = settings_make_choice_row(
                 parent, "Cover gradient",
                 g_np_bg_mode == NP_BG_COVER_GRADIENT,
                 &settings_detail_np_bg_mesh_check);
             if(interactive) {
                 focus_add_clickable(mesh_row, settings_np_bg_action, NULL,
-                                    (void *)(intptr_t)NP_BG_COVER_GRADIENT, true);
+                                    (void *)(intptr_t)NP_BG_COVER_GRADIENT,
+                                    true);
             }
             else {
                 touch_add_clickable(mesh_row, settings_np_bg_touch_cb,
@@ -7054,133 +7727,223 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             }
             break;
         }
-        case SETTING_AFC: {
-            ui_afc_status_t st;
-            settings_afc_read_status(&st);
-            if(!st.available) {
-                settings_make_value_row(parent, "Apple File Conduit Sync",
-                                        "Unavailable in simulator",
-                                        COL_MUTED, 60, FONT_H2,
-                                        FONT_CAPTION, NULL);
-                break;
-            }
-
-            settings_afc_action_row(parent, "AFC mode",
-                                    st.afc_mode ? "Reconnect"
-                                                : "Switch to AFC",
-                                    UI_AFC_ACTION_PAIR, interactive);
-            settings_afc_action_row(parent, "Switch to iAP2",
-                                    st.afc_mode ? "Reboot" : "Already iAP2",
-                                    UI_AFC_ACTION_IPOD_MODE, interactive);
-
-            char value[96];
-            char size[24];
-            int total_albums = player_album_count();
-            if(total_albums > 0) {
-                snprintf(value, sizeof(value), "%d / %d",
-                         st.cached_albums, total_albums);
-            }
-            else {
-                snprintf(value, sizeof(value), "%d", st.cached_albums);
-            }
-            settings_make_value_row(parent, "Cached albums", value, COL_TEXT,
-                                    52, FONT_H2, FONT_NUM, NULL);
-
-            uint64_t total_bytes = st.thumb_bytes + st.cover_bytes +
-                                   st.original_bytes;
-            settings_format_bytes(total_bytes, size, sizeof(size));
-            settings_make_value_row(parent, "Cache size", size, COL_TEXT,
-                                    52, FONT_H2, FONT_NUM, NULL);
-
-            settings_format_bytes(st.thumb_bytes, size, sizeof(size));
-            snprintf(value, sizeof(value), "%d files, %s",
-                     st.thumb_count, size);
-            settings_make_value_row(parent, "Thumbnails", value, COL_MUTED,
-                                    52, FONT_H2, FONT_CAPTION, NULL);
-
-            settings_make_value_row(parent, "USB mode",
-                                    st.afc_mode ? "AFC (config 4)"
-                                                : "iAP2 (config 2)",
-                                    st.afc_mode ? COL_ACCENT : COL_GREEN,
-                                    52, FONT_H2, FONT_CAPTION, NULL);
-
-            settings_make_value_row(parent, "AFC status",
-                                    st.status[0] ? st.status : "idle",
-                                    st.connected ? COL_GREEN : COL_MUTED,
-                                    52, FONT_H2, FONT_CAPTION, NULL);
-            break;
-        }
         case SETTING_USB: {
-            settings_make_value_row(parent, "USB-A host", "Active (HS)",
-                                    COL_GREEN, 52, FONT_H2, FONT_CAPTION, NULL);
-            settings_make_value_row(parent, "USB-C data", "Device / console",
-                                    COL_TEXT, 52, FONT_H2, FONT_CAPTION, NULL);
-            settings_make_value_row(parent, "USB-C OTG host",
-                                    "Requires board rework", COL_MUTED,
-                                    52, FONT_H2, FONT_CAPTION, NULL);
-            settings_make_value_row(parent, "Console", "USB Serial/JTAG",
-                                    COL_TEXT, 52, FONT_H2, FONT_CAPTION, NULL);
-            break;
-        }
-        case SETTING_DEVICE: {
-            player_snapshot_t snapshot;
-            player_get_snapshot(&snapshot);
-            settings_make_value_row(parent, "Device", snapshot.device_name,
-                                    COL_TEXT, 52, FONT_H2, FONT_H2, NULL);
-            char battery[32];
-            if(snapshot.battery < 0) {
-                snprintf(battery, sizeof(battery), "--%%");
+            lv_obj_t * usb_a = settings_make_choice_row(
+                parent, "USB-A HighSpeed Only", g_usb_mode == USB_MODE_HOST,
+                &settings_detail_usb_a_check);
+            lv_obj_t * both = settings_make_choice_row(
+                parent, "USB-A HS & USB-C OTG", g_usb_mode == USB_MODE_BOTH,
+                &settings_detail_usb_both_check);
+            if(interactive) {
+                focus_add_clickable(usb_a, settings_usb_mode_action, NULL,
+                                    (void *)(intptr_t)0, true);
+                focus_add_clickable(both, settings_usb_mode_action, NULL,
+                                    (void *)(intptr_t)2, true);
             }
             else {
-                snprintf(battery, sizeof(battery), "%d%%", snapshot.battery);
+                touch_add_clickable(usb_a, settings_usb_mode_touch_cb,
+                                    (void *)(intptr_t)0);
+                touch_add_clickable(both, settings_usb_mode_touch_cb,
+                                    (void *)(intptr_t)2);
             }
-            settings_make_value_row(parent, "Battery", battery, COL_TEXT, 52,
-                                    FONT_H2, FONT_H2, NULL);
-            settings_make_value_row(parent, "Connection",
-                                    snapshot.connected ? "Connected" : "Disconnected",
-                                    snapshot.connected ? COL_GREEN : COL_AMBER,
-                                    52, FONT_H2, FONT_H2, NULL);
+            lv_obj_t * note = make_label(parent, "Reboot to apply", FONT_CAPTION,
+                                         COL_DIM);
+            lv_obj_set_style_pad_left(note, 16, 0);
             break;
         }
-        case SETTING_BACKEND: {
-            player_snapshot_t snapshot;
-            player_get_snapshot(&snapshot);
-#if defined(ESP_PLATFORM)
-            const char * backend_name = snapshot.real_device
-                                            ? "iAP2 (USB)" : "AFC (USB)";
-#else
-            const char * backend_name = snapshot.real_device
-                                            ? "iAP2 (USB)" : "Mock library";
-#endif
-            settings_make_value_row(parent, "Backend", backend_name,
-                                    COL_TEXT, 52, FONT_H2, FONT_H2, NULL);
-            settings_make_value_row(parent, "iAP2",
-                                    snapshot.real_device
-                                        ? (snapshot.connected
-                                               ? "Connected" : "Waiting")
-                                        : "Not connected",
-                                    snapshot.real_device && snapshot.connected
-                                        ? COL_GREEN : COL_MUTED,
-                                    52, FONT_H2, FONT_H2, NULL);
+        case SETTING_BOOT: {
+            lv_obj_t * off = settings_make_choice_row(
+                parent, "OFF", g_system_config.boot_screen == 0,
+                &settings_detail_boot_off_check);
+            lv_obj_t * anim1 = settings_make_choice_row(
+                parent, "KCN4M1", g_system_config.boot_screen == 1,
+                &settings_detail_boot_anim1_check);
+            if(interactive) {
+                focus_add_clickable(off, settings_boot_screen_action, NULL,
+                                    (void *)(intptr_t)0, true);
+                focus_add_clickable(anim1, settings_boot_screen_action, NULL,
+                                    (void *)(intptr_t)1, true);
+            }
+            else {
+                touch_add_clickable(off, settings_boot_screen_touch_cb,
+                                    (void *)(intptr_t)0);
+                touch_add_clickable(anim1, settings_boot_screen_touch_cb,
+                                    (void *)(intptr_t)1);
+            }
             break;
         }
         case SETTING_ABOUT:
-            settings_make_value_row(parent, "Model", "IAP2 Tab5",
-                                    COL_TEXT, 52, FONT_H2, FONT_H2, NULL);
-            settings_make_value_row(parent, "Version", "v0.1",
-                                    COL_TEXT, 52, FONT_H2, FONT_H2, NULL);
-            settings_make_value_row(parent, "UI", "LVGL 9.6 / SDL2",
-                                    COL_MUTED, 52, FONT_H2, FONT_H2, NULL);
+            settings_make_value_row(parent, "Compile Time",
+                                    settings_compile_time(), COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2, NULL);
+            settings_make_value_row(parent, "Commit", settings_commit(),
+                                    COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2, NULL);
+            break;
+        case SETTING_DATETIME:
+            settings_render_time_editor(parent, interactive);
             break;
         default:
             break;
     }
 }
 
+static void settings_detail_timer_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    if(g_current_screen != SCR_SETTINGS) return;
+    if(settings_detail_dirty && settings_right_content != NULL) {
+        settings_detail_dirty = false;
+        settings_render_detail(settings_right_content, false);
+    }
+}
+
+static void settings_schedule_detail(void)
+{
+    settings_detail_dirty = true;
+    if(settings_detail_timer == NULL) {
+        settings_detail_timer = lv_timer_create(settings_detail_timer_cb, 140,
+                                                NULL);
+        if(settings_detail_timer == NULL) return;
+        lv_timer_pause(settings_detail_timer);
+    }
+    lv_timer_reset(settings_detail_timer);
+    lv_timer_resume(settings_detail_timer);
+}
+
+/* The master-detail pages defer right-panel rendering to a 140 ms timer.
+ * When a page is left or rebuilt before that timer fires, the callback would
+ * otherwise touch widgets that lv_obj_clean() has already deleted.  Pause
+ * every page timer and drop its dangling content pointer before teardown. */
+static void ui_page_teardown(void)
+{
+    ui_marquee_stop();
+    if(albums_detail_timer) lv_timer_pause(albums_detail_timer);
+    albums_detail_dirty = false;
+    albums_right_content = NULL;
+
+    if(artists_detail_timer) lv_timer_pause(artists_detail_timer);
+    artists_detail_dirty = false;
+    artists_right_content = NULL;
+
+    if(playlists_detail_timer) lv_timer_pause(playlists_detail_timer);
+    playlists_detail_dirty = false;
+    playlists_right_content = NULL;
+
+    if(settings_detail_timer) lv_timer_pause(settings_detail_timer);
+    settings_detail_dirty = false;
+    settings_right_content = NULL;
+}
+
+static void settings_row_focus(void * user)
+{
+    int index = (int)(intptr_t)user;
+    if(index == settings_selected) return;
+    if(settings_selected == SETTING_BLUETOOTH &&
+       index != SETTING_BLUETOOTH) {
+        ble_remote_scan_stop();
+    }
+    settings_selected = index;
+    settings_time_open = false;
+    settings_time_editing = false;
+    settings_update_count();
+    if(settings_right_content) settings_schedule_detail();
+}
+
+static void settings_rebuild(void)
+{
+    ui_rebuild_page();
+}
+
+static void settings_open(void * user)
+{
+    int index = (int)(intptr_t)user;
+    if(index < 0 || index >= SETTING_COUNT) return;
+    settings_selected = index;
+    settings_time_open = index == SETTING_DATETIME;
+    settings_time_editing = false;
+    settings_time_segment = SETTINGS_TIME_YEAR;
+    settings_time_blink_on = true;
+    settings_update_count();
+    settings_detail_open = true;
+    settings_restore_focus = -1;
+    if(index == SETTING_BLUETOOTH) {
+        settings_ble_rev = ble_remote_revision();
+        if(g_system_config.ble_enabled) {
+            ble_remote_state_t state = BLE_REMOTE_OFF;
+            ble_remote_status(&state, NULL, 0);
+            if(state != BLE_REMOTE_CONNECTED &&
+               state != BLE_REMOTE_CONNECTING) {
+                ble_remote_scan_start();
+            }
+        }
+    }
+    settings_rebuild();
+    if(g_focus_count > 0) {
+        focus_select(settings_initial_focus(index));
+    }
+}
+
+static bool settings_back(void)
+{
+    if(settings_selected == SETTING_BLUETOOTH && settings_detail_open) {
+        ble_remote_scan_stop();
+    }
+    if(settings_time_open && settings_time_editing) {
+        settings_time_editing = false;
+        settings_time_blink_on = true;
+        settings_time_apply_blink();
+        return true;
+    }
+    if(settings_time_open) {
+        settings_time_open = false;
+        settings_detail_open = false;
+        settings_rebuild();
+        return true;
+    }
+    if(settings_detail_open) {
+        settings_detail_open = false;
+        settings_rebuild();
+        return true;
+    }
+    return false;
+}
+
+static void settings_same_key(void)
+{
+    if(settings_selected == SETTING_BLUETOOTH && settings_detail_open) {
+        ble_remote_scan_stop();
+    }
+    if(settings_time_open) {
+        settings_time_open = false;
+        settings_detail_open = false;
+        settings_rebuild();
+        return;
+    }
+    if(settings_detail_open) {
+        settings_detail_open = false;
+        settings_rebuild();
+        return;
+    }
+    settings_selected = 0;
+    settings_update_count();
+    if(g_focus_count > 0) focus_select(0);
+}
+
+static void settings_open_async(void * arg)
+{
+    settings_open(arg);
+}
+
+static void settings_row_touch_cb(lv_event_t * event)
+{
+    ui_call_async(settings_open_async, lv_event_get_user_data(event));
+}
+
 static void settings_create(lv_obj_t * parent)
 {
+    if(settings_detail_timer) lv_timer_pause(settings_detail_timer);
+    settings_detail_dirty = false;
     settings_right_content = NULL;
-    settings_count_label = NULL;
+    settings_counter.group = NULL;
     settings_detail_time_format_value = NULL;
     settings_detail_set_time_value = NULL;
     settings_time_hour_value = NULL;
@@ -7191,8 +7954,15 @@ static void settings_create(lv_obj_t * parent)
     settings_detail_sort_value = NULL;
     settings_detail_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
-    settings_detail_np_bg_blur_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
+    settings_detail_ble_value = NULL;
+    settings_detail_usb_a_check = NULL;
+    settings_detail_usb_both_check = NULL;
+    settings_detail_boot_off_check = NULL;
+    settings_detail_boot_anim1_check = NULL;
+    settings_detail_theme_gray_check = NULL;
+    settings_detail_theme_aqua_check = NULL;
+    settings_detail_theme_win95_check = NULL;
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
@@ -7205,11 +7975,11 @@ static void settings_create(lv_obj_t * parent)
 
     lv_obj_t * left = make_panel(root);
     lv_obj_set_size(left, SIDE_PANEL_W, LV_PCT(100));
-    lv_obj_set_style_pad_all(left, 18, 0);
+    lv_obj_set_style_pad_all(left, 16, 0);
     lv_obj_set_style_pad_row(left, 0, 0);
 
     lv_obj_t * head = lv_obj_create(left);
-    lv_obj_set_size(head, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(head, LV_PCT(100), 56);
     lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(head, 0, 0);
     lv_obj_set_style_pad_all(head, 0, 0);
@@ -7218,20 +7988,13 @@ static void settings_create(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(head, false);
     make_label(head, "Settings", FONT_PAGE_TITLE, COL_TEXT);
-    settings_count_label = make_label(head, "0/0", FONT_NUM, COL_MUTED);
+    counter_create(head, &settings_counter);
     settings_update_count();
-
-    lv_obj_t * spacer = lv_obj_create(left);
-    lv_obj_set_size(spacer, LV_PCT(100), 8);
-    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(spacer, 0, 0);
-    lv_obj_set_style_pad_all(spacer, 0, 0);
-    lv_obj_set_scrollable(spacer, false);
-    lv_obj_set_clickable(spacer, false);
 
     for(int i = 0; i < SETTING_COUNT; i++) {
         lv_obj_t * row = make_row(left, 56);
         lv_obj_set_style_pad_left(row, 16, 0);
+        lv_obj_set_style_outline_width(row, 0, 0);
         make_label(row, settings_names[i], FONT_H2, COL_TEXT);
 
         if(i == settings_selected) {
@@ -7254,7 +8017,7 @@ static void settings_create(lv_obj_t * parent)
     lv_obj_set_flex_grow(right, 1);
     lv_obj_set_height(right, LV_PCT(100));
     lv_obj_set_style_pad_all(right, 0, 0);
-    settings_right_content = make_panel_content(right, 18);
+    settings_right_content = make_panel_content(right, 16);
     lv_obj_set_style_pad_row(settings_right_content, 10, 0);
     lv_obj_set_scroll_dir(settings_right_content, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(settings_right_content, LV_SCROLLBAR_MODE_AUTO);
@@ -7275,6 +8038,10 @@ static void settings_create(lv_obj_t * parent)
         focus_select(settings_selected);
         ui_set_hint("UP/DOWN Select   ENTER Open   7 Play/Pause");
     }
+    if(settings_restore_focus >= 0 && settings_restore_focus < g_focus_count) {
+        focus_select(settings_restore_focus);
+    }
+    settings_restore_focus = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -7323,7 +8090,7 @@ static const page_t g_pages[SCR_COUNT] = {
     },
     [SCR_SETTINGS] = {
         .create = settings_create,
-        .tick = NULL,
+        .tick = settings_tick,
         .back = settings_back,
         .same_key = settings_same_key,
         .key = settings_key,
@@ -7699,12 +8466,130 @@ static void ui_afc_sync_build(lv_obj_t * screen)
     if(g_focus_count > 0) focus_select(0);
 }
 
+void ui_handle_key_repeat(ui_key_t key, int count)
+{
+    if(count <= 0) return;
+    if(count == 1) {
+        ui_handle_key(key);
+        return;
+    }
+
+    if(!g_afc_sync_mode && !g_ctx_menu_open &&
+       (key == UI_KEY_UP || key == UI_KEY_DOWN)) {
+        const int delta = key == UI_KEY_UP ? -count : count;
+
+        /* The time editor uses Up/Down as value adjustment, not focus
+         * movement.  Preserve one adjust per detent. */
+        if(g_current_screen == SCR_SETTINGS && settings_time_editing) {
+            for(int i = 0; i < count; i++) ui_handle_key(key);
+            return;
+        }
+
+        if(g_current_screen == SCR_SONGS) {
+            songs_select(songs_selected + delta);
+            return;
+        }
+        if(g_current_screen == SCR_ALBUMS && !albums_detail_open) {
+            albums_select(albums_selected + delta);
+            return;
+        }
+        if(g_current_screen == SCR_ARTISTS && !artists_detail_open) {
+            artists_select(artists_selected + delta);
+            return;
+        }
+        /* Settings and other focus pages: one move to the final position. */
+        focus_move(delta);
+        return;
+    }
+
+    for(int i = 0; i < count; i++) {
+        ui_handle_key(key);
+    }
+}
+
+/* Marquee target for the current page: the selected row's name (or the
+ * detail title while a detail pane is open).  NULL when none applies. */
+static lv_obj_t * marquee_target_label(void)
+{
+    switch(g_current_screen) {
+        case SCR_ALBUMS:
+            if(albums_detail_open) return albums_detail_title;
+            for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+                if(albums_row_indices[slot] == albums_selected &&
+                   !lv_obj_has_flag(albums_rows[slot], LV_OBJ_FLAG_HIDDEN)) {
+                    return albums_row_titles[slot];
+                }
+            }
+            return NULL;
+        case SCR_ARTISTS:
+            if(artists_detail_open) return artists_detail_name;
+            for(int slot = 0; slot < ARTISTS_POOL; slot++) {
+                if(artists_row_indices[slot] == artists_selected &&
+                   !lv_obj_has_flag(artists_rows[slot], LV_OBJ_FLAG_HIDDEN)) {
+                    return artists_names[slot];
+                }
+            }
+            return NULL;
+        case SCR_PLAYLISTS:
+            if(playlists_detail_open) return playlists_detail_title;
+            if(playlists_selected >= 0 && playlists_selected < 64) {
+                return playlists_name_labels[playlists_selected];
+            }
+            return NULL;
+        case SCR_SONGS:
+            for(int slot = 0; slot < SONGS_POOL; slot++) {
+                if(songs_row_indices[slot] == songs_selected &&
+                   !lv_obj_has_flag(songs_rows[slot], LV_OBJ_FLAG_HIDDEN)) {
+                    return songs_titles[slot];
+                }
+            }
+            return NULL;
+        default:
+            return NULL;
+    }
+}
+
+static lv_obj_t * g_marquee_key_label;
+static int g_marquee_key_screen = -1;
+static int g_marquee_key_index = -1;
+static bool g_marquee_key_detail;
+static char g_marquee_key_text[96];
+
+/* Restarts the marquee whenever the selection (or its text) changes. */
+static void ui_marquee_tick(lv_timer_t * timer)
+{
+    LV_UNUSED(timer);
+    lv_obj_t * target = marquee_target_label();
+    int index = g_current_screen == SCR_ALBUMS ? albums_selected
+              : g_current_screen == SCR_ARTISTS ? artists_selected
+              : g_current_screen == SCR_PLAYLISTS ? playlists_selected
+              : g_current_screen == SCR_SONGS ? songs_selected : -1;
+    bool detail = g_current_screen == SCR_ALBUMS ? albums_detail_open
+                : g_current_screen == SCR_ARTISTS ? artists_detail_open
+                : g_current_screen == SCR_PLAYLISTS ? playlists_detail_open
+                : false;
+    const char * text = target != NULL ? lv_label_get_text(target) : "";
+
+    if(target == g_marquee_key_label && g_current_screen == g_marquee_key_screen &&
+       index == g_marquee_key_index && detail == g_marquee_key_detail &&
+       strncmp(text, g_marquee_key_text, sizeof(g_marquee_key_text)) == 0) {
+        return;
+    }
+    g_marquee_key_label = target;
+    g_marquee_key_screen = (int)g_current_screen;
+    g_marquee_key_index = index;
+    g_marquee_key_detail = detail;
+    snprintf(g_marquee_key_text, sizeof(g_marquee_key_text), "%s", text);
+    ui_marquee_start(target);
+}
+
 /* -------------------------------------------------------------------------
  * Public entry point
  * ------------------------------------------------------------------------- */
 void ui_init(void)
 {
     player_init();
+    player_sort_albums(g_sort_field, g_sort_desc);
     g_device_available = player_device_available();
     if(s_thumb_pack_dir[0] != '\0') {
         char path[160];
@@ -7753,8 +8638,8 @@ void ui_init(void)
     ui_menu_play_update();
     player_set_change_callback(ui_player_changed);
     update_clock();
-    update_status();
 
     lv_timer_create(ui_tick_cb, 500, NULL);
+    lv_timer_create(ui_marquee_tick, 200, NULL);
     lv_timer_create(settings_time_blink_timer_cb, 250, NULL);
 }

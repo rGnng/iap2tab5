@@ -17,8 +17,8 @@ current library it is `4954524C`, so the file is:
 /sdcard/lib/4954524C/stars.csv
 ```
 
-The file is FAT 8.3-safe (`stars.csv`, temporary `stars.tmp`), because the
-firmware mounts FATFS with long filenames disabled.
+The file keeps the FAT 8.3-safe name `stars.csv` (temporary `stars.tmp`) for
+compatibility, even though FATFS long filenames are enabled.
 
 ## Retrieval
 
@@ -63,11 +63,12 @@ with `starred=0` mean "unstar this track".
 
 ## Boot behaviour
 
-The preview firmware seeds its clock from the firmware build timestamp; the
-board's RX8130CE RTC is not read yet. Treat `updated` as an approximate
-wall-clock label and rely on the row order/`starred` value for state. On a
-production build with a real RTC or NTP this becomes accurate without a format
-change.
+The firmware reads the time from the RX8130CE RTC at boot. If the RTC reports
+a voltage loss or contains an implausible time, it is seeded from the firmware
+build timestamp and then corrected by the web **Sync browser time** button or
+Settings → Clock. Treat `updated` as an approximate wall-clock label and
+rely on the row order/`starred` value for state. On a board with a working RTC
+backup this becomes accurate without a format change.
 
 `player_init()` loads `library.bin`, then reads `stars.csv` and applies every
 row to `track_starred[]` (`1` sets, `0` clears). The local Starred playlist is
