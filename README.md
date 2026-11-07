@@ -179,7 +179,7 @@ The checked-in LVGL font subsets are generated from the fonts in `assets/fonts/`
 ```bash
 ./tools/gen_icons.sh          # Bootstrap Icons, 24/32/40/48 px
 ./tools/gen_web_ui.py         # embed assets/web/index.html
-./tools/gen_plug_art.py       # no-iPod plug illustration
+./tools/gen_plug_art.py       # embed assets/ui/plug-in.png as the no-iPod illustration
 ./tools/gen_inter_fonts.sh    # Inter, proportional + tabular digits
 ./tools/gen_boot_font.sh      # optional VT323 boot font
 ```

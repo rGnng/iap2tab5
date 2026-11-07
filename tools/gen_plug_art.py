@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate app/ui/plug_art.h: the "no iPod" plug illustration.
 
-The artwork is a white plug silhouette on a transparent background, drawn at
-4x and downsampled, then stored as an LVGL RGB565A8 image (RGB565 pixels
-followed by one alpha byte per pixel) so it scales cleanly without an
-external file.
+If assets/ui/plug-in.png exists, that artwork is embedded byte-for-byte
+(converted to LVGL RGB565A8, keeping its pixels and alpha).  Otherwise a
+white plug silhouette is drawn at 4x and downsampled.  Either way the result
+is an LVGL image stored in flash.
 """
 from pathlib import Path
 
@@ -17,25 +17,34 @@ W, H = 96, 248
 SS = 4
 
 
-def main() -> int:
-    img = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    white = (255, 255, 255, 255)
-    d.rounded_rectangle((34 * SS, 4 * SS, 62 * SS, 34 * SS),
-                        radius=9 * SS, fill=white)       # connector tab
-    d.rounded_rectangle((0, 26 * SS, 96 * SS, 98 * SS),
-                        radius=11 * SS, fill=white)      # body
-    d.rounded_rectangle((38 * SS, 92 * SS, 58 * SS, 244 * SS),
-                        radius=10 * SS, fill=white)      # cable
+SOURCE = ROOT / "assets/ui/plug-in.png"
 
-    img = img.resize((W, H), Image.LANCZOS)
+
+def main() -> int:
+    global W, H
+    if SOURCE.exists():
+        img = Image.open(SOURCE).convert("RGBA")
+        W, H = img.size
+        print(f"embedding {SOURCE.relative_to(ROOT)} ({W}x{H})")
+    else:
+        img = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        white = (255, 255, 255, 255)
+        d.rounded_rectangle((34 * SS, 4 * SS, 62 * SS, 34 * SS),
+                            radius=9 * SS, fill=white)   # connector tab
+        d.rounded_rectangle((0, 26 * SS, 96 * SS, 98 * SS),
+                            radius=11 * SS, fill=white)  # body
+        d.rounded_rectangle((38 * SS, 92 * SS, 58 * SS, 244 * SS),
+                            radius=10 * SS, fill=white)  # cable
+        img = img.resize((W, H), Image.LANCZOS)
 
     rgb = bytearray()
     alpha = bytearray()
     for y in range(H):
         for x in range(W):
-            _, _, _, a = img.getpixel((x, y))
-            rgb += b"\xff\xff"    # white; only the alpha plane varies
+            r, g, b, a = img.getpixel((x, y))
+            v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+            rgb += bytes(((v >> 8) & 0xFF, v & 0xFF))
             alpha.append(a)
     data = bytes(rgb + alpha)
 
