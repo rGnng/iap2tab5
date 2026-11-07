@@ -1,53 +1,107 @@
-# IAP2 · M5Stack Tab5 UI
+# iAP2 Tab5
 
-**开发板还没到，也可以先做界面。** 这个仓库是一个面向 M5Stack Tab5 的 LVGL 9.6 桌面模拟器，以及一版可运行的 1280×720 UI mock。
+An iPod / iPhone media controller for the **M5Stack Tab5** (ESP32-P4), built around a shared LVGL 9.6 UI that runs both on the desktop and on the real hardware.
 
-[![UI preview](docs/screenshots/overview.png)](docs/screenshots/overview.png)
+The Tab5 has a 5-inch 1280×720 MIPI-DSI panel, 16 MB flash, 32 MB PSRAM and an ESP32-C6 for Wi-Fi/BLE. It talks to the iPod over USB using **iAP2** for playback control and metadata, and **AFC** for importing the media library and album artwork. A rotary encoder plus seven keys (reported as standard USB HID keys) are the primary input; the touchscreen is optional.
 
-模拟器直接在 PC 上跑 SDL2 窗口，鼠标就是触摸屏。UI 代码放在 `app/ui/`，不包含任何桌面专用接口，之后可以原样放进 ESP-IDF 工程。
+This repository contains:
 
-键盘：`Up/Down` 移动焦点，`Enter` 确认（长按 650 ms 打开上下文菜单，也可以按 `C`），`7` 播放/暂停，`Backspace` 或 `6` 返回，`Page Up/Page Down` 在 menubar 中上下切换；数字键 `1–5` 直接切页。在 Now Playing 按 `Page Up` 显示/隐藏 Up Next 面板。
+- a 1280×720 **SDL2 desktop simulator** with a generated mock library, boot sequence and screenshot support;
+- a working **ESP-IDF firmware** for the Tab5 with iAP2, AFC, Wi-Fi, a web UI, OTA updates and a BLE remote;
+- the shared UI, backend interface, fonts, tools and bring-up documentation.
 
-## 项目方向
+![Tab5 UI overview](docs/screenshots/overview.png)
 
-目标是做一个 iPod / iPhone 音乐控制端：旋钮 + 7 个按键为主输入，触摸仅作辅助。功能范围参考 `../iap2mediactrl`，交互和视觉参考 `rGnng/headunit`。
+## Status at a glance
 
-完整的需求、按键映射、焦点模型、页面布局和实施计划见 **[docs/design.md](docs/design.md)**。
+| Area | State |
+| --- | --- |
+| Desktop simulator | Working; mock library, keyboard/touch input, headless screenshots |
+| Shared UI | 6 top-level screens, knob/key focus engine, optional touch |
+| iAP2 over USB | Working; MFi authentication, identification, Now Playing, HID controls, artwork |
+| AFC / usbmux | Working; pair record, lockdownd TLS, database/artwork copy |
+| Real media library | Imported from the iPod's SQLite database into a compact `library.bin` |
+| Album artwork | AFC thumbnail sync plus iAP2 Now Playing artwork, cached on SD |
+| Remote input | USB HID knob/keypad, Ulanzi D100H over USB or BLE |
+| Network | Wi-Fi station/AP, web configuration, live debug page, OTA |
+| iAP2 queue | Not parsed yet; the Up Next panel reports a single-item queue |
+| iAP2 media-library subscription | Disabled by default; the AFC import path is the supported one |
 
-当前第一版 mock 已实现：
+## Features
 
-- 5 个页面：Now Playing + Queue、Albums、Artists、Songs、Settings
-- 左侧/右侧竖排图标 menubar，图标 72×72 按钮 + 40 px 图标，Settings 里可切换；Now Playing 图标随播放状态变 play/pause
-- 旋钮 + 7 键的焦点导航，带 mock 播放器和媒体库
-- menubar 顶部 72 px 时间区：24H 用 28 px、12H 用 24 px Inter tabular 时间；底部 72 px 电池区：iOS 设备电量/充电状态图标
-- 非 Now Playing 页面顶部有 72 px 迷你 Now Playing 条：小封面、两行文字（歌名 / 艺术家 + 专辑）、队列位置/大小、播放时间/曲长、shuffle/repeat/star 状态
-- Now Playing 使用 360 px 封面；标题 40 px，艺术家/专辑 32 px 合并为一行（`Artist - Album`），进度时间 20 px tabular；信息列宽 582 px（封面宽度的 1.618 倍）；标题与元信息作为一组下移到信息列的黄金分割位置，组内间距 12 px，外层主间距和上下留白也按黄金比例分配；传输按钮使用 48 px 图标；进度条走时不抖动；shuffle/repeat/star 在进度条下方居中
-- Queue 展开时左栏切换为上下布局并整体降一档字号：封面居中；标题行、`Artist - Album`、进度条、控制行统一为 582 px 宽并居中，比封面宽但左右留出边距；标题 32 px，star 在标题行最右侧，控制行左侧 shuffle、中间三枚传输按钮、右侧 repeat
-- Now Playing 背景支持 Theme / Blurred cover / Cover gradient（默认）：Blurred cover 用当前封面填充并高斯模糊；Cover gradient 从封面提取 5 个主色并生成静态 3×3 网格渐变，再叠 60% 黑色遮罩保证文字可读
-- Now Playing 长按 Enter 打开分组上下文菜单：GoTo（Go to album / Go to artist）、Star（Star / Unstar，星标随状态切换）、Playback（Shuffle / Repeat，显示当前状态）；菜单是居中弹层，带遮罩、分组标题和独立焦点，不破坏底层页面焦点
-- Albums 两栏：右侧始终显示左侧选中专辑；选中行保留底色，浅色条只提示旋钮焦点，触摸两侧都可操作
-- Artists 两栏：右侧按专辑分组列出该艺术家的全部专辑；48 px 专辑 header 可直接播放整张专辑
-- Settings 两栏：左侧 General / Theme / Now Playing Background / Device / USB-C / Backend / About 七组；General 内含 Time format（12H/24H）、Set time、Menubar、Touch input、Brightness；Now Playing Background 可选 Theme / Blurred cover / Cover gradient
-- Songs 行高 56 px，列表固定 10 行（560 px），滚动区域为行高整数倍
-- Bootstrap Icons 图标子集，生成脚本是 `tools/gen_icons.sh`
-- Inter 字体子集（SF Pro 风格），生成脚本是 `tools/gen_inter_fonts.sh`；时间使用 tabular 数字
-- Bootup sequence 默认使用 Inter tabular（与主界面数字一致）；VT323 像素字体保留为可选方案，生成脚本是 `tools/gen_boot_font.sh`
-- 开发阶段 UI 控件全灰阶、全直角、无底部提示栏；各区使用不同深浅的灰阶（menubar 时间区 / menubar 主体 / 电池区 / 迷你 Now Playing / 主内容区），Now Playing 可选用封面模糊背景
-- Songs 页面使用 14 行复用池的虚拟列表，555 首歌曲不再一次性创建 555 行
-- 启动画面：3 段式 Bootup sequence（POST 自检 → Initialize App → DISPLAY CHECKING / FPS），黑底 Inter 字体、黄色标题、绿色 `OK`、白色 `---` 和 `CHECKING....` 四点动画；默认启动时播放，任意键跳过
+### UI
 
-更多截图：[Boot sequence](docs/screenshots/boot-sequence.png) · [Albums](docs/screenshots/albums.png) · [Album detail](docs/screenshots/album-detail.png) · [Artists](docs/screenshots/artists.png) · [Artist detail](docs/screenshots/artist-detail.png) · [Songs](docs/screenshots/songs.png) · [Settings](docs/screenshots/settings.png) · [Settings time](docs/screenshots/settings-time.png) · [Now Playing Background](docs/screenshots/settings-now-playing-background.png) · [Now Playing + queue](docs/screenshots/now-playing-queue.png) · [Now Playing menu](docs/screenshots/now-playing-menu.png) · [Menubar right](docs/screenshots/menubar-right.png)
+- Six top-level screens: **Now Playing**, **Albums**, **Artists**, **Songs**, **Playlists**, **Settings**.
+- A dedicated **Bluetooth Remote** screen (opened from Settings) and a dedicated **AFC Sync** boot mode.
+- Vertical menubar on the left or right, with a 72 px clock area and a 72 px device-battery area.
+- Knob + key navigation with a custom focus engine; touch works as an optional pointer and can be disabled in Settings.
+- Now Playing includes artwork, title/artist/album, elapsed time, shuffle/repeat/star, transport controls, an Up Next panel and three background modes: Theme, Blurred cover, Cover gradient.
+- Long-press Enter opens a context menu with Go to album/artist, Star/Unstar, Shuffle and Repeat.
+- Albums, Artists, Playlists and Settings use a master/detail layout; Songs uses a virtualized list.
+- A 72 px mini Now Playing bar appears on every screen except Now Playing.
+- Album sort order can be add date, name or year, ascending or descending; albums without an AFC add date fall back to the order in which iAP2 first reported them.
+- UI is grayscale, square-cornered and designed for a 5-inch 1280×720 panel.
 
+### Input
 
-## 快速开始
+The simulator and the firmware share the same logical key events:
 
-Debian / Ubuntu：
+| Input | Action |
+| --- | --- |
+| `Up` / `Down` | Move focus (rotary encoder) |
+| `Enter` | Activate; hold 650 ms for the context menu |
+| `1`–`5` | Jump to Now Playing / Albums / Artists / Songs / Playlists |
+| `6` or `Backspace` | Back |
+| `7` | Play / pause |
+| `Page Up` / `Page Down` | Page the active list; on Now Playing, Page Up toggles Up Next |
+| `[` / `]` | Previous / next screen (simulator and serial console) |
+| `C` | Context menu (simulator/debug) |
+
+On hardware, the same events can come from:
+
+- a USB HID keyboard or rotary/keypad controller on the USB-A port;
+- the Ulanzi D100H remote, either through its USB HID interface or over BLE via the ESP32-C6;
+- the USB Serial/JTAG console (`w`, `s`, `Enter`, `b`, `1`–`7`, `c`, ...);
+- the web debug page, which can inject keys remotely.
+
+Previous/next on the D100H supports tap-to-skip and hold-to-rewind/fast-forward. Its top-right key opens the context menu on a short press and toggles Star on a long press.
+
+### Device bridge
+
+- **iAP2** runs on USB configuration 2: Apple MFi P-256 authentication, identification, Now Playing metadata, HID consumer controls and File Transfer artwork.
+- **AFC** runs on USB configuration 4: usbmux v2, lockdownd `QueryType`/`StartSession`/TLS, `StartService com.apple.afc`, directory/stat/file reads, and streaming copy to SD.
+- AFC needs a matching lockdownd pair record, uploaded through the web page or serial console. It is stored in the internal SPIFFS partition and is erased by a full flash.
+- The two USB modes are mutually exclusive. The selected mode is stored in NVS; a reboot switches between them.
+- The media library is read from `/sdcard/lib/<short8>/library.bin`, generated on a host from the iPod's `MediaLibrary.sqlitedb`.
+- Album thumbnails are kept in a packed cache on SD; the Now Playing cover comes from iAP2 and can fall back to AFC artwork cached on the card.
+- Local star state is stored in `/sdcard/lib/<short8>/stars.csv`; it is never written back to the iPod.
+- Settings provides pairing/connection, Quick sync, Full sync, cached artwork counts and a one-click switch back to iAP2.
+
+### Desktop simulator
+
+- SDL2 window at 1280×720; the mouse acts as the touchscreen.
+- A three-stage boot sequence (POST self-test, Initialize App, DISPLAY CHECKING) can play at startup and be skipped with any key.
+- Mock library with 24 artists, 100 albums, 562 tracks, 6 device playlists and generated abstract covers.
+- Screenshot mode works without X11/Wayland by using SDL's offscreen driver.
+- Command-line switches can select a screen, menubar side, injected key sequence, boot freeze time and window zoom.
+
+## Quick start: desktop simulator
+
+### Requirements
+
+Debian / Ubuntu:
 
 ```bash
 sudo apt install build-essential cmake ninja-build libsdl2-dev
 ```
 
-构建并运行：
+CMake downloads **LVGL v9.6.0** into `build/_deps` on the first configure. To use a local LVGL checkout instead:
+
+```bash
+cmake -S . -B build -G Ninja -DLVGL_SOURCE_DIR=/path/to/lvgl
+```
+
+### Build and run
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -55,207 +109,315 @@ cmake --build build -j
 ./build/tab5_sim
 ```
 
-第一次配置会下载 LVGL v9.6.0 到 `build/_deps`。如果 GitHub 访问慢，可以先用任意方式准备一份 LVGL 源码，然后指定本地目录：
+The `run` target is also available:
 
 ```bash
-cmake -S . -B build -G Ninja -DLVGL_SOURCE_DIR=/path/to/lvgl
+cmake --build build --target run
 ```
 
-交互方式：
+### Simulator options
 
-- 鼠标 = 电容触摸
-- `--zoom 0.75`：窗口缩放，适合小屏幕笔记本
-- 关闭窗口退出
+```text
+--zoom <factor>       Window zoom, e.g. 0.75 (default: 1.0)
+--screenshot <path>   Render one frame to a PNG and exit
+--wait <ms>           Wait before the screenshot (default: 1000)
+--screen <n>          Start on a specific screen
+--menubar <side>      Menubar position: left or right
+--keys <list>         Inject keys, e.g. "2,enter" or "context"
+--no-boot             Skip the boot sequence
+--boot-freeze <ms>    Freeze the boot sequence at a time offset
+--headless            Force SDL's offscreen video driver
+--help                Show help
+```
 
-### 启动画面
-
-启动时默认先播放 Bootup sequence，约 5.8 秒后自动进入主界面；任意按键跳过。
-
-- 第一屏：POST 自检（USB / SD / TOUCH / DISPLAY / PSRAM / FLASH / USB HOST / iAP2 证书 / Wi-Fi C6 / NETWORK），停留 3500ms；底部 `ELAPSED TIME` 按 60fps 显示帧数（3500ms 对应 210 帧）
-- 第二屏：`Initialize App`
-- 第三屏：`DISPLAY CHECKING` 与 `FPS = 59.9990~60.0000`（模拟器里末四位快速变化）
-
-调试时可以冻结在任意时间点：
+Examples:
 
 ```bash
-./build/tab5_sim                                      # 完整启动画面
-./build/tab5_sim --no-boot                            # 直接进主界面
+# Start on Albums with the menubar on the right
+./build/tab5_sim --no-boot --screen 2 --menubar right
+
+# Headless screenshot (no display server required)
+mkdir -p build/screenshots
+./build/tab5_sim --no-boot --screenshot build/screenshots/ui.png --wait 1500
+
+# Freeze the boot sequence at specific times
 ./build/tab5_sim --boot-freeze 1200 --screenshot build/screenshots/boot-post.png --wait 300
 ./build/tab5_sim --boot-freeze 3900 --screenshot build/screenshots/boot-app.png --wait 300
 ./build/tab5_sim --boot-freeze 5000 --screenshot build/screenshots/boot-display.png --wait 300
 ```
 
-`--boot-freeze <ms>` 只用于截图/调试：画面停在该时间点，不再自动结束。
+`--boot-freeze` only stops the animation for screenshots/debugging; the normal boot sequence automatically enters the UI after about 5.8 seconds.
 
-### 无显示器 / SSH 环境
+### Mock library
 
-没有 X11 或 Wayland 时，模拟器会自动切到 SDL 的 offscreen 驱动，可以直接输出预览图：
-
-```bash
-mkdir -p build/screenshots
-./build/tab5_sim --no-boot --screenshot build/screenshots/ui.png --wait 1500
-```
-
-也可以显式加 `--headless`。`--wait` 用来让启动动画和图表定时器先跑一会儿。
-
-## Mock 数据
-
-> 仅用于桌面模拟器。真机固件不打包 `assets/mock`，不加载 mock 库，也不执行开机演示播放；
-> 真机的媒体库来自 SD 卡上的 `library.bin`，播放状态和 Now Playing 封面来自 iAP2。
-
-Mock 库由 Python 生成，C 端只读 JSON：
+The simulator reads `assets/mock/library.json`, the generated PNG covers and the prebuilt thumbnail packs. The hardware image does not include this data: on hardware the library comes from the SD card and the device.
 
 ```text
 assets/mock/
-  library.json                 # 24 artists / 100 albums / 555 tracks
-  covers/000.png ... 099.png   # 256×256 彩色科幻抽象封面，无文字
-tools/gen_mock_library.py      # 生成器
+  library.json                 # 24 artists / 100 albums / 562 tracks / 6 playlists
+  covers/000.png ... 099.png   # 256×256 generated covers
+  thumbs34.bin, thumbs54.bin, thumbs80.bin  # packed raw thumbnails
+tools/gen_mock_library.py      # library/cover generator
 ```
 
-重新生成：
+Regenerate it with:
 
 ```bash
 python3 tools/gen_mock_library.py
-# 可选：python3 tools/gen_mock_library.py --albums 100 --seed 20261104
+# optional:
+python3 tools/gen_mock_library.py --albums 100 --seed 20261104
 ```
 
-封面不带文字，使用彩色科幻构图（行星、轨道、霓虹网格、光束、碎片）；`library.json` 由 cJSON 在启动时加载。修改 mock 数据不需要重新编译 C。
+The generator uses a fixed seed by default, so the output is reproducible. Editing the mock data does not require a C rebuild. The generator needs Python 3 and Pillow.
 
-## 目录结构
+### Fonts and icons
+
+The checked-in LVGL font subsets are generated from the fonts in `assets/fonts/`:
+
+```bash
+./tools/gen_icons.sh          # Bootstrap Icons, 24/32/40/48 px
+./tools/gen_inter_fonts.sh    # Inter, proportional + tabular digits
+./tools/gen_boot_font.sh      # optional VT323 boot font
+```
+
+These scripts need Node/npm (for `lv_font_conv`); the Inter script also needs Python `fonttools`.
+
+## Tab5 firmware
+
+The firmware lives in [`firmware/`](firmware/) and reuses the same `app/ui` and `app/backend` code as the simulator. It is built with **ESP-IDF 5.5.6** and esp-bsp's `m5stack_tab5` board support.
+
+### Toolchain and build
+
+```bash
+. $IDF_PATH/export.sh          # tested with ESP-IDF 5.5.6
+cd firmware
+idf.py set-target esp32p4      # first time only
+python3 ../tools/gen_iap2_identity.py
+idf.py build
+```
+
+The MFi identity is **not committed**: `tools/gen_iap2_identity.py` reads `../iap2cert/certificate.p7b` and `../iap2cert/identity.pk8` by default and writes the ignored `firmware/main/iap2_identity.c`. Pass `--cert` / `--key` to use another location.
+
+After moving from IDF 5.4 to 5.5, run `idf.py fullclean` once and do one full `idf.py flash`; later code-only updates can use `app-flash`.
+
+### Flash and monitor
+
+```bash
+idf.py -p /dev/ttyACM0 flash monitor
+```
+
+Exit the monitor with `Ctrl+]`. If auto-reset fails, hold **BOOT**, tap **RESET**, then release **BOOT**.
+
+### SD card
+
+The card is mounted at `/sdcard` (FAT32 recommended). A typical setup looks like this:
+
+```text
+/sdcard/
+  config.json                         # UI, Wi-Fi and USB settings
+  wifi.txt                            # station SSID/password (optional)
+  JPFONT.TTF                          # optional Japanese font for metadata
+  AFC/MLDB.SQL, MLDB.WAL, MLDB.SHM    # copied from the iPod
+  lib/<short8>/library.bin            # imported media library
+  lib/<short8>/thumbs.bin, thumbs.idx # packed 54×54 artwork cache
+  lib/<short8>/stars.csv              # local star state
+  lib/<short8>/np.raw, np.txt         # cached iAP2 Now Playing cover
+  lib/<short8>/album_seen.bin         # iAP2 first-seen album order fallback
+```
+
+Ready-to-copy examples are in [`docs/sd/`](docs/sd/). Missing or invalid files fall back to built-in defaults. Settings are written back to `config.json` at most once per second while a value is being changed.
+
+See [`firmware/README.md`](firmware/README.md) for the full `config.json` schema, partition table, serial commands and hardware notes.
+
+### USB ports
+
+| Port | Connection | Role |
+| --- | --- | --- |
+| USB-A (J10) | P4 high-speed OTG | iPod, USB HID keyboard/knob and D100H (normal host port) |
+| USB-C (J8) | P4 full-speed PHY0 / USB Serial/JTAG | Console and flashing; optional FS host through a powered hub/dock |
+
+- `usb_mode: 0` — USB-A high-speed host (default).
+- `usb_mode: 1` — USB-C full-speed host; the serial console moves, so use the Wi-Fi debug page. Requires a powered hub/dock.
+- `usb_mode: 2` — USB-A HS + USB-C FS dual host; verified with an iPod on USB-A and a Ulanzi D100H behind a powered USB-C hub. Protected by a boot-failure fallback.
+
+A plain USB-C hub that only draws power from the host cannot power the Tab5. Use a hub/dock that supplies 5 V upstream. The runtime/boot behavior, compile-time constraints and Settings UI integration notes are in [`docs/usb-modes.md`](docs/usb-modes.md).
+
+### Wi-Fi, web UI and OTA
+
+If `/sdcard/wifi.txt` is missing or station mode fails, the firmware starts an open AP:
+
+- SSID: `Tab5-Debug`
+- Address: <http://192.168.4.1>
+
+The main page shows status, edits the config, reboots and accepts a firmware `.bin` for OTA. The `/debug` page provides a live log, key injection, BMP screenshots, log-level control, USB host-mode switching, reboot and OTA upload. This is the main control path when USB-C is in host mode and the serial console is unavailable.
+
+The web server has no authentication, and the fallback AP is open. Run it only on a trusted network.
+
+### ESP32-C6 co-processor
+
+The Tab5's ESP32-C6 provides Wi-Fi and BLE through ESP-Hosted. The host project uses **ESP-Hosted 2.13.1**, while many factory units still ship with **1.4.1**. Basic AP mode may work with the mismatch, but BLE and station mode are not reliable.
+
+Prebuilt 2.13.1 C6 images and flashing instructions are in [`tools/c6_firmware/`](tools/c6_firmware/). The first update requires the internal `C6_ISP` header; later 2.x updates can use the in-band path.
+
+### Media library import
+
+The AFC path can copy the iPod's SQLite database and artwork to SD. Converting the database to `library.bin` is a host-side step:
+
+```bash
+python3 tools/media_db_to_library.py \
+    --db /tmp/ipod-db/MLDB.SQL \
+    --wal /tmp/ipod-db/MLDB.WAL \
+    --out /tmp/ipod-db/library.json \
+    --bin /tmp/ipod-db/library.bin
+```
+
+Upload the result over Wi-Fi or serial, or copy it directly to the card:
+
+```bash
+curl --data-binary @/tmp/ipod-db/library.bin \
+     http://<tab5-ip>/api/library
+```
+
+The serial console also supports file transfer and debug commands. The complete workflow, including artwork sync and the `library.bin` format, is documented in [`docs/media-library-import.md`](docs/media-library-import.md).
+
+### Security
+
+`firmware/main/iap2_identity.c` contains the Apple Accessories private key once generated. The firmware image therefore contains that key: do not distribute the binary or commit the identity to a public repository. The pair record stored on the internal SPIFFS partition also contains private keys.
+
+## Repository layout
 
 ```text
 .
 ├── app/
-│   ├── backend/
-│   │   ├── player.h          # 后端接口
-│   │   └── mock_player.c     # 共享后端：模拟器读 mock，真机读 SD + iAP2
+│   ├── backend/                  # player interface, mock/iAP2 dispatch, BLE state
+│   │   ├── player.h
+│   │   ├── mock_player.c
+│   │   └── ble_remote.c
 │   └── ui/
-│       ├── boot.c            # Bootup sequence（POST / Initialize App / FPS）
-│       ├── boot.h
-│       ├── ui.c              # 页面、焦点、状态栏、menubar
-│       ├── ui.h
+│       ├── ui.c                  # all screens, focus engine, menubar
+│       ├── boot.c                # boot sequence
 │       ├── icons.h
-│       └── fonts/            # Bootstrap Icons + Inter（含 tabular）+ VT323 备用
-├── assets/
-│   ├── fonts/                # Bootstrap Icons / Inter-Variable.ttf / VT323
-│   └── mock/                 # library.json + 100 张封面 PNG
+│       └── fonts/                # Bootstrap Icons + Inter + VT323
 ├── sim/
-│   ├── main.c                # SDL2 显示 + 键盘映射
-│   └── screenshot.c          # 离屏 PNG 截图
+│   ├── main.c                    # SDL2 display, keyboard mapping, CLI
+│   └── screenshot.c              # PNG snapshots
+├── firmware/
+│   ├── main/                     # ESP-IDF app: iAP2, AFC, USB, web, BLE, config
+│   ├── components/               # local esp_lvgl_port fix
+│   ├── partitions.csv
+│   └── README.md
 ├── tools/
-│   ├── gen_boot_font.sh
+│   ├── gen_mock_library.py
+│   ├── media_db_to_library.py
+│   ├── gen_iap2_identity.py
 │   ├── gen_icons.sh
 │   ├── gen_inter_fonts.sh
-│   └── gen_mock_library.py
+│   ├── c6_firmware/              # ESP-Hosted slave images and flashing docs
+│   └── ...
+├── tests/
+│   └── test_d100h_protocol.py    # host-side D100H codec tests
+├── docs/                         # design, bring-up notes, screenshots, SD examples
+├── assets/                       # fonts and mock library
 ├── lv_conf.h
-├── third_party/              # stb, cJSON
 └── CMakeLists.txt
 ```
 
-`app/ui/` 只依赖 LVGL 和 `player.h`。模拟器专属的 SDL、截图、命令行都在 `sim/`，所以移植时不需要改页面代码。
+`app/ui/` depends only on LVGL and the `app/backend` interfaces. SDL2, screenshots and command-line handling stay in `sim/`; ESP-IDF, USB and SD stay in `firmware/`. That keeps the page code portable between the simulator and the board.
 
-## 和真实 Tab5 的差异
+## Architecture
 
-模拟器对的是 Tab5 的屏幕规格，但不模拟硬件性能：
+The backend contract is [`app/backend/player.h`](app/backend/player.h). It exposes library queries, Now Playing snapshots and playback commands. `mock_player.c` implements the simulator's player and, on ESP builds, dispatches the same API to the real library and iAP2 host.
 
-| 项目 | Tab5 | 模拟器 |
-| --- | --- | --- |
-| 分辨率 | 1280×720，5" IPS，MIPI-DSI | 1280×720 SDL 窗口 |
-| 触摸 | GT911，多点电容触摸 | 鼠标单点 |
-| 主控 | ESP32-P4，双核 RISC-V 400 MHz | 桌面 CPU |
-| 内存 | 16 MB Flash / 32 MB PSRAM | 桌面内存 |
-| Wi-Fi | ESP32-C6，Wi-Fi 6 | 无（界面里是假数据） |
-| 渲染 | RGB565 / 双全屏 PSRAM 缓冲 / PPA | LVGL 软件渲染 |
+On hardware:
 
-所以模拟器里流畅不代表板子上也流畅。1280×720 全屏 RGB565 一帧约 1.8 MB，真机上要注意 PSRAM 带宽、双缓冲大小和刷新区域。
+- `iap2_host.c` handles the iAP2 link, authentication, identification, Now Playing, HID commands and artwork transfers.
+- `usbmux_host.c`, `lockdown_client.c` and `afc_client.c` implement the AFC path.
+- `thumb_cache.c` and `star_store.c` manage the on-SD artwork and star caches.
+- `web_server.c` provides the configuration/OTA/debug UI.
+- `ble_remote.c` and `ulanzi_d100h.c` handle the BLE remote and its protocol.
 
-当前界面里的数据（CPU、内存、Wi-Fi、吞吐）都是占位内容；确定实际产品界面后直接替换 `app/ui/ui.c` 即可。
+The UI is deliberately not tied to LVGL's default input group. A small focus engine keeps track of page-specific focus items, detail/list transitions and value editors, so the same button mapping works on every screen.
 
-## 之后怎么放到 Tab5 上
+## Testing
 
-仓库里的 `firmware/` 是一版可烧录的 **Tab5 真机预览固件**：ESP-IDF 5.5.6 + esp-bsp `m5stack_tab5` + esp_lvgl_port + 共享的 `app/ui`。真机媒体库来自 SD 卡上的 `library.bin`，播放状态和封面来自 iAP2；`assets/mock` 只用于桌面模拟器。
+The host-side D100H protocol tests compile the production codec with the system C compiler:
 
 ```bash
-export PATH="/home/ops/.local/share/uv/python/cpython-3.12-linux-aarch64-gnu/bin:$PATH"
-. /home/ops/esp/esp-idf-5.5.6/export.sh
-cd firmware
-python3 ../tools/gen_iap2_identity.py   # MFi 私钥不提交，需本地生成
-idf.py build
-idf.py -p /dev/ttyACM0 flash
+python3 -m unittest discover -s tests -v
 ```
 
-细节和真机相关的坑（P4 v1.x 修订、PSRAM BSS、LVGL 任务栈、USB 组件 override）见 [`firmware/README.md`](firmware/README.md)。
+They cover captured BLE vectors, HID framing, padding rejection and the encrypted heartbeat.
 
-下面的路线是后续接入真实 iAP2 / 量产工程时的参考。
+## Screenshots
 
-1. 安装 ESP-IDF v5.4 或更新版本。
-2. 新建 ESP-IDF 工程，添加组件：
-   - `espressif/esp-bsp`（选择 `m5stack_tab5`）
-   - `espressif/esp_lvgl_port`
-3. 在 `app_main()` 里启动 BSP 显示，然后调用 `ui_init()`：
+UI mock:
 
-```c
-#include "bsp/esp-bsp.h"
-#include "ui.h"
+- [Boot sequence](docs/screenshots/boot-sequence.png)
+- [Now Playing](docs/screenshots/now-playing.png)
+- [Now Playing + queue](docs/screenshots/now-playing-queue.png)
+- [Now Playing context menu](docs/screenshots/now-playing-menu.png)
+- [Albums](docs/screenshots/albums.png)
+- [Album detail](docs/screenshots/album-detail.png)
+- [Artists](docs/screenshots/artists.png)
+- [Artist detail](docs/screenshots/artist-detail.png)
+- [Songs](docs/screenshots/songs.png)
+- [Settings](docs/screenshots/settings.png)
+- [Settings — time](docs/screenshots/settings-time.png)
+- [Settings — Now Playing background](docs/screenshots/settings-now-playing-background.png)
+- [Menubar on the right](docs/screenshots/menubar-right.png)
 
-void app_main(void)
-{
-    lv_display_t *disp = bsp_display_start();
-    (void)disp;
+Real Tab5 hardware:
 
-    bsp_display_lock(0);
-    ui_init();
-    bsp_display_unlock();
+- [Imported library with Japanese metadata](docs/screenshots/tab5-real-library-jp.png)
+- [Real album covers](docs/screenshots/tab5-real-covers-albums.png)
+- [iAP2 Now Playing artwork](docs/screenshots/tab5-real-cover-now-playing.png)
+- [AFC sync settings](docs/screenshots/tab5-settings-afc.png)
+- [Dedicated AFC sync screen](docs/screenshots/tab5-afc-sync.png)
 
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-```
+## Known limitations
 
-4. 把 `app/ui/ui.c` 加进工程的源文件列表。`lv_conf.h` 用 ESP-IDF 工程自己的那份，不要直接复用模拟器这份。
-5. 在 `menuconfig` 里打开 PSRAM，并把 LVGL 的绘制缓冲区放到 PSRAM。
+- **iAP2 and AFC are mutually exclusive.** Switching modes requires a reboot.
+- **The iAP2 queue is not parsed yet.** Up Next currently reports `1/1`; normal playback control works.
+- **The iAP2 media-library subscription is disabled by default.** The device's large delete-phase bursts are not yet reliable over the current link layer; use the AFC import path. The experimental path is enabled with `-DIAP2TAB5_FULL_LIBRARY_SYNC`.
+- **Star ratings are local.** They are persisted in `stars.csv` but not written back to the iPod.
+- **Some artwork falls back to a color placeholder.** TJPGD handles baseline JPEG; progressive or otherwise unsupported images may not decode.
+- **The clock is seeded from the build timestamp.** The RX8130CE RTC is not read yet.
+- **USB-C host mode needs a powered hub/dock**; dual-host mode is verified and protected by a boot-failure fallback. See [`docs/usb-modes.md`](docs/usb-modes.md).
+- **The C6 and P4 must use matching ESP-Hosted versions** for reliable Wi-Fi and BLE.
+- **The firmware image contains the MFi private key**; do not publish built binaries.
+- **The simulator is not a performance model.** It renders with LVGL software rendering, while the Tab5 uses PSRAM buffers, PPA and a MIPI-DSI panel.
 
-官方参考：
+## Documentation
 
-- [M5Stack Tab5 官方 UserDemo](https://github.com/m5stack/M5Tab5-UserDemo)（自带 Desktop Build，也是一个可参考的模拟器）
-- [esp-bsp / m5stack_tab5](https://github.com/espressif/esp-bsp/tree/master/bsp/m5stack_tab5)
-- [LVGL PC simulator](https://docs.lvgl.io/master/details/integration/simulator/index.html)
+- [`docs/design.md`](docs/design.md) — UI requirements, key map, focus model and layout specifications
+- [`firmware/README.md`](firmware/README.md) — build, partitions, SD config, serial keys and hardware notes
+- [`docs/iap2-bringup.md`](docs/iap2-bringup.md) — iAP2 link layer, MFi authentication, identification and control
+- [`docs/afc-bringup.md`](docs/afc-bringup.md) — usbmux, lockdownd, AFC and pairing
+- [`docs/media-library-import.md`](docs/media-library-import.md) — database conversion, `library.bin` and artwork cache
+- [`docs/stars-persistence.md`](docs/stars-persistence.md) — `stars.csv` format and behaviour
+- [`docs/d100h-ble-handover.md`](docs/d100h-ble-handover.md) — D100H BLE protocol analysis and driver notes
+- [`docs/afc-usbmuxd-plan.md`](docs/afc-usbmuxd-plan.md) — AFC/usbmux implementation plan
+- [`tools/c6_firmware/README.md`](tools/c6_firmware/README.md) — ESP32-C6 firmware and flashing
 
-## 中文界面与字体
+## Roadmap
 
-LVGL 自带字体只覆盖 ASCII 和图标，中文需要单独准备。Tab5 只有 16 MB Flash，**不要把完整中文字体整个塞进去**。
+- Parse the iAP2 queue and library update stream so Up Next and newly added media reflect the device.
+- Harden the iAP2 link window/ACK handling and re-enable the full library subscription.
+- Read the RX8130CE RTC and optionally sync time over NTP.
+- Add tear-free DSI/VSYNC output on hardware.
+- Expand context menus and queue actions across Albums, Artists and Songs.
+- Continue CJK font coverage and metadata testing.
 
-常用做法是按界面实际用到的字符做子集：
+## Third-party components
 
-```bash
-npx lv_font_conv \
-  --font NotoSansSC-Regular.otf \
-  --size 20 --bpp 4 --format lvgl \
-  --symbols "系统概览温度湿度设置返回确定取消" \
-  --range 0x20-0x7F \
-  -o app/ui/fonts/ui_zh_20.c
-```
+- [LVGL](https://lvgl.io/) — MIT
+- [SDL2](https://libsdl.org/) — zlib license
+- [Bootstrap Icons](https://icons.getbootstrap.com/) — MIT
+- [Inter](https://rsms.me/inter/) — SIL OFL 1.1
+- [VT323](https://fonts.google.com/specimen/VT323) — SIL OFL 1.1
+- [M PLUS 1p](https://fonts.google.com/specimen/M+PLUS+1p) — SIL OFL 1.1
+- [cJSON](https://github.com/DaveGamble/cJSON) — MIT
+- [stb](https://github.com/nothings/stb) — public domain / MIT
+- [ESP-IDF](https://github.com/espressif/esp-idf), [esp-bsp](https://github.com/espressif/esp-bsp) and [ESP-Hosted](https://github.com/espressif/esp-hosted) — Apache-2.0
 
-然后把生成的字体声明进 UI：
-
-```c
-LV_FONT_DECLARE(ui_zh_20);
-lv_obj_set_style_text_font(label, &ui_zh_20, 0);
-```
-
-如果只是临时验证，也可以打开 `lv_conf.h` 里的 `LV_FONT_SOURCE_HAN_SANS_SC_16_CJK`，但它是 16 px 固定字号，而且体积约 1 MB 级，只适合做原型。
-
-桌面模拟器还支持 FreeType，可以直接加载系统 TTF；真实固件更推荐上面的子集方案，内存和 Flash 都更可控。
-
-## 下一步
-
-现在这版是 **第一版 UI mock**，后端仍是 mock 数据。接下来继续做：
-
-- 接入 `../iap2mediactrl` 的真实 iAP2 数据模型和命令队列
-- 中文媒体库字体/字形缓存
-- 把上下文菜单扩展到 Albums / Artists / Songs，增加更多队列操作
-- Genres / Recently Added / Playlists 页面
-- Tab5 真机：ESP-IDF、USB HID 输入、USB Host、PSRAM 绘图缓冲、menubar 位置持久化到 NVS
-
-下一步先从真实后端接口和把上下文菜单扩展到其它页面开始，再按实际硬件按键丝印调整映射。
+Each component keeps its own license. No project-wide license file is included yet.
