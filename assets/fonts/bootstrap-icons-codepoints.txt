@@ -1,4 +1,8 @@
 phone                  U+F4E7
+plug                   U+F4F7
+sd-card                U+F655
+question-lg            U+F64E
+power                  U+F4FF
 battery-full           U+F186
 battery-half           U+F187
 battery-low            U+F911

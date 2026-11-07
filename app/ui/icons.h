@@ -11,6 +11,10 @@ LV_FONT_DECLARE(bootstrap_icons_40);
 LV_FONT_DECLARE(bootstrap_icons_48);
 
 #define ICON_PHONE           "\xEF\x93\xA7" /* U+F4E7 */
+#define ICON_PLUG            "\xEF\x93\xB7" /* U+F4F7 */
+#define ICON_SD_CARD         "\xEF\x99\x95" /* U+F655 */
+#define ICON_QUESTION_LG     "\xEF\x99\x8E" /* U+F64E */
+#define ICON_POWER           "\xEF\x93\xBF" /* U+F4FF */
 #define ICON_BATTERY_FULL    "\xEF\x86\x86" /* U+F186 */
 #define ICON_BATTERY_HALF    "\xEF\x86\x87" /* U+F187 */
 #define ICON_BATTERY_LOW     "\xEF\xA4\x91" /* U+F911 */

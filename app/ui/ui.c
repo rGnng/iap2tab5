@@ -1538,14 +1538,50 @@ static void menu_click_cb(lv_event_t * event)
 
 static player_status_t g_menu_play_status = (player_status_t)-1;
 
+/* Device availability.  In iAP2 mode a missing iPod and a missing SD card
+ * both put the UI into a blocked state: the menubar dims everything except
+ * Now Playing and Settings, and Now Playing shows a placeholder. */
+static bool g_dev_iap2_mode;
+static bool g_dev_present;
+static bool g_dev_sd_ready = true;
+static bool g_sd_missing_seen;
+static volatile bool g_dev_state_dirty;
+
+static bool ui_sd_needs_reboot(void)
+{
+    /* The card appeared after boot; the library and config were loaded
+     * without it, so a power cycle is required. */
+    return g_sd_missing_seen && g_dev_sd_ready;
+}
+
+static bool ui_device_blocked(void)
+{
+    if(!g_dev_sd_ready || ui_sd_needs_reboot()) return true;
+    if(g_dev_iap2_mode && !g_dev_present) return true;
+    return false;
+}
+
+void ui_set_device_state(bool iap2_mode, bool present, bool sd_ready)
+{
+    if(iap2_mode != g_dev_iap2_mode || present != g_dev_present ||
+       sd_ready != g_dev_sd_ready) {
+        g_dev_iap2_mode = iap2_mode;
+        g_dev_present = present;
+        g_dev_sd_ready = sd_ready;
+        g_dev_state_dirty = true;
+    }
+    if(!sd_ready) g_sd_missing_seen = true;
+}
+
+static void ui_menu_update(void);
+
 static void ui_menu_play_update(void)
 {
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
     if(snapshot.status == g_menu_play_status) return;
     g_menu_play_status = snapshot.status;
-    lv_label_set_text(g_menu_icons[SCR_NOW_PLAYING],
-                      snapshot.status == PLAYER_PLAYING ? ICON_PLAY : ICON_PAUSE);
+    ui_menu_update();
 }
 
 static void ui_player_changed(void)
@@ -1555,10 +1591,15 @@ static void ui_player_changed(void)
 
 static void ui_menu_update(void)
 {
+    bool blocked = ui_device_blocked();
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+
     for(int i = 0; i < SCR_COUNT; i++) {
         if(g_menu_items[i] == NULL || g_menu_icons[i] == NULL) continue;
         bool active = (i == (int)g_current_screen) ||
                       (i == SCR_SETTINGS && g_current_screen == SCR_BLUETOOTH);
+        bool dimmed = blocked && i != SCR_NOW_PLAYING && i != SCR_SETTINGS;
         /* The selected tile is a solid square: the full 96 x 96 touch area
          * uses the focus grey fill, with a white icon and no edge strip. */
         lv_obj_set_style_bg_color(g_menu_items[i],
@@ -1567,8 +1608,24 @@ static void ui_menu_update(void)
                                 active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(g_menu_items[i], 0, 0);
         lv_obj_set_style_text_color(g_menu_icons[i],
-                                    lv_color_hex(active ? COL_MENU_TOP_FG
-                                                        : COL_MENU_BODY_FG), 0);
+                                    lv_color_hex(dimmed ? COL_DIM
+                                                : active ? COL_MENU_TOP_FG
+                                                         : COL_MENU_BODY_FG), 0);
+    }
+
+    /* With no SD card or no iPod the Now Playing tile shows why. */
+    const char * np_icon = NULL;
+    if(!g_dev_sd_ready || ui_sd_needs_reboot()) {
+        np_icon = ICON_SD_CARD;
+    }
+    else if(g_dev_iap2_mode && !g_dev_present) {
+        np_icon = ICON_PHONE;
+    }
+    else {
+        np_icon = snapshot.status == PLAYER_PLAYING ? ICON_PLAY : ICON_PAUSE;
+    }
+    if(g_menu_icons[SCR_NOW_PLAYING] != NULL) {
+        lv_label_set_text(g_menu_icons[SCR_NOW_PLAYING], np_icon);
     }
 }
 
@@ -2045,6 +2102,14 @@ static void ui_tick_cb(lv_timer_t * timer)
 
     update_clock();
     if(g_ui_trace) perf_t1 = perf_now();
+    if(g_dev_state_dirty) {
+        g_dev_state_dirty = false;
+        ui_menu_update();
+        if(g_current_screen == SCR_NOW_PLAYING && !g_afc_sync_mode) {
+            ui_rebuild_page();
+            return;
+        }
+    }
     if(g_ui_trace) perf_t2 = perf_now();
     ui_menu_play_update();
     if(g_ui_trace) perf_t3 = perf_now();
@@ -2491,6 +2556,7 @@ static void np_queue_action(void * user)
 
 static void np_refresh_ui(void)
 {
+    if(ui_device_blocked()) return;
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
 
@@ -2614,6 +2680,7 @@ static void np_refresh_ui(void)
 
 static void np_tick(void)
 {
+    if(ui_device_blocked()) return;
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
 
@@ -3098,6 +3165,76 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     np_vertical_gap(left, 32);
 }
 
+/* Plug-in silhouette: connector tab, body and cable, matching the
+ * reference artwork (white plug on a transparent background). */
+static void np_plug_art(lv_obj_t * parent)
+{
+    lv_obj_t * art = lv_obj_create(parent);
+    lv_obj_set_size(art, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(art, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(art, 0, 0);
+    lv_obj_set_style_pad_all(art, 0, 0);
+    lv_obj_set_style_pad_row(art, 0, 0);
+    lv_obj_set_flex_flow(art, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(art, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(art, false);
+
+    struct { int w, h, r; uint32_t color; } parts[] = {
+        { 42, 30, 10, COL_MUTED },   /* connector tab */
+        { 104, 72, 12, COL_MUTED },  /* body */
+        { 22, 176, 11, COL_MUTED },  /* cable */
+    };
+    for(size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        lv_obj_t * part = lv_obj_create(art);
+        lv_obj_set_size(part, parts[i].w, parts[i].h);
+        lv_obj_set_style_radius(part, parts[i].r, 0);
+        lv_obj_set_style_bg_color(part, lv_color_hex(parts[i].color), 0);
+        lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(part, 0, 0);
+        lv_obj_set_style_pad_all(part, 0, 0);
+        lv_obj_set_scrollable(part, false);
+    }
+}
+
+static void np_placeholder(lv_obj_t * parent)
+{
+    bool sd = !g_dev_sd_ready || ui_sd_needs_reboot();
+
+    lv_obj_t * box = lv_obj_create(parent);
+    lv_obj_set_size(box, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_set_style_pad_row(box, 18, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(box, false);
+
+    if(sd) {
+        lv_obj_t * icons = lv_obj_create(box);
+        lv_obj_set_size(icons, LV_SIZE_CONTENT, 64);
+        lv_obj_set_style_bg_opa(icons, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(icons, 0, 0);
+        lv_obj_set_style_pad_all(icons, 0, 0);
+        lv_obj_set_style_pad_column(icons, 6, 0);
+        lv_obj_set_flex_flow(icons, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(icons, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollable(icons, false);
+        make_label(icons, ICON_SD_CARD, &bootstrap_icons_48, COL_MUTED);
+        make_label(icons, ICON_QUESTION_LG, &bootstrap_icons_48, COL_MUTED);
+
+        if(g_dev_sd_ready) {
+            make_label(box, "Press Power to Reboot", FONT_GROUP, COL_ACCENT);
+        }
+    }
+    else {
+        np_plug_art(box);
+    }
+}
+
 static void np_create(lv_obj_t * parent)
 {
     np_queue_counter.group = NULL;
@@ -3114,6 +3251,17 @@ static void np_create(lv_obj_t * parent)
     np_last_track = snapshot.track.id;
     np_last_queue_count = player_queue_count();
     np_last_queue_rev = player_queue_revision();
+
+    if(ui_device_blocked()) {
+        np_title = np_meta = np_artist = np_album = NULL;
+        np_time_cur = np_time_dur = np_progress = NULL;
+        np_play_icon = np_shuffle_btn = np_repeat_btn = NULL;
+        np_shuffle_icon = np_repeat_icon = np_star_icon = np_star_btn = NULL;
+        np_cover_widget = NULL;
+        np_placeholder(parent);
+        ui_set_hint("");
+        return;
+    }
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
@@ -3637,15 +3785,35 @@ static void albums_refresh_rows(void)
     perf_log_us("albums_refresh", perf_t0);
 }
 
+/* Fast scrolling can move the viewport past several rows per frame; filling
+ * rows and decoding covers on every scroll event made the list lag and left
+ * stale rows behind.  Wait until the scroll settles, then fill once. */
+static lv_timer_t * albums_refresh_timer;
+
+static void albums_refresh_timer_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    if(g_current_screen != SCR_ALBUMS || albums_left_list == NULL) return;
+    albums_refresh_rows();
+}
+
+static void albums_schedule_refresh(void)
+{
+    if(albums_refresh_timer == NULL) {
+        albums_refresh_timer = lv_timer_create(albums_refresh_timer_cb, 140,
+                                               NULL);
+        if(albums_refresh_timer == NULL) return;
+        lv_timer_pause(albums_refresh_timer);
+    }
+    lv_timer_reset(albums_refresh_timer);
+    lv_timer_resume(albums_refresh_timer);
+}
+
 static void albums_scroll_cb(lv_event_t * event)
 {
     LV_UNUSED(event);
     if(albums_left_list == NULL) return;
-    int top = lv_obj_get_scroll_top(albums_left_list);
-    if(top < 0) top = 0;
-    int first = albums_first_for_top(top);
-    if(first == albums_first_index) return;
-    albums_refresh_rows();
+    albums_schedule_refresh();
 }
 
 static void albums_detail_timer_cb(lv_timer_t * timer)
@@ -4071,6 +4239,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
 
 static void albums_create(lv_obj_t * parent)
 {
+    if(albums_refresh_timer) lv_timer_pause(albums_refresh_timer);
     albums_right_content = NULL;
     albums_left_list = NULL;
     albums_shuffle_row = NULL;
@@ -7656,7 +7825,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             int total_albums = player_library_album_count();
             snprintf(value, sizeof(value), "%d/%d", st.cached_albums,
                      total_albums);
-            settings_make_info_row(parent, "Albums (Cached/Total)", value,
+            settings_make_info_row(parent, "Albums Cached", value,
                                    FONT_H2, FONT_H2, SETTINGS_ROW_H);
             if(st.library_db_bytes > 0) {
                 settings_format_bytes(st.library_db_bytes, size, sizeof(size));

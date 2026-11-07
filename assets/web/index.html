@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>TAB5 · MediaCtrl</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #1b1f23;
+  --surface: #23282d;
+  --surface-2: #282e34;
+  --surface-3: #313840;
+  --surface-hover: #363f47;
+  --well: #1d2226;
+  --line: #3c444c;
+  --line-soft: #30373e;
+  --line-strong: #59636d;
+  --text: #e7eaed;
+  --text-2: #c1c8ce;
+  --text-3: #98a1a9;
+  --text-4: #7d858d;
+  --ok: #3fb950;
+  --warn: #cfc0a2;
+  --err: #d8aaaa;
+  --fs-micro: 10px;
+  --fs-meta: 11px;
+  --fs-body: 12px;
+  --fs-em: 13px;
+  --fs-title: 15px;
+  --fs-display: 20px;
+  --font: "Iosevka", "JetBrains Mono", "IBM Plex Mono", ui-monospace,
+          SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  letter-spacing: .01em;
+}
+button, input, select { font-family: inherit; }
+::selection { background: #4a555f; color: #fff; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); border: 2px solid var(--bg); }
+
+/* ---- top bar ---- */
+header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 18px;
+  height: 46px; padding: 0 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 8px; font-size: var(--fs-em);
+  letter-spacing: .14em; text-transform: uppercase; color: var(--text); }
+.brand .dot { width: 7px; height: 7px; background: var(--ok); }
+.brand .sub { color: var(--text-4); letter-spacing: .1em; font-size: var(--fs-micro); }
+nav { display: flex; gap: 2px; margin-left: 8px; flex-wrap: wrap; }
+nav a {
+  padding: 5px 10px; color: var(--text-3); text-decoration: none;
+  font-size: var(--fs-meta); letter-spacing: .1em; text-transform: uppercase;
+  border: 1px solid transparent;
+}
+nav a:hover { color: var(--text); background: var(--surface-2); }
+nav a.on { color: var(--text); border-color: var(--line); background: var(--surface-2); }
+.chips { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border: 1px solid var(--line-soft); background: var(--well);
+  font-size: var(--fs-micro); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.chip b { font-weight: 500; color: var(--text-2); }
+.chip .led { width: 6px; height: 6px; background: var(--text-4); }
+.chip.ok .led { background: var(--ok); }
+.chip.bad .led { background: var(--err); }
+.chip.warn .led { background: var(--warn); }
+
+main { max-width: 1180px; margin: 0 auto; padding: 18px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+
+/* ---- panels ---- */
+section {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  margin-bottom: 14px;
+}
+section > h2 {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0; padding: 10px 14px;
+  font-size: var(--fs-meta); font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--text-3);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-2);
+}
+section > h2 .spacer { flex: 1; }
+.body { padding: 14px; }
+.muted { color: var(--text-3); }
+.micro { font-size: var(--fs-micro); letter-spacing: .1em; text-transform: uppercase; color: var(--text-4); }
+
+/* ---- player ---- */
+.player { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; }
+.track { font-size: var(--fs-display); line-height: 1.2; color: var(--text); }
+.artist { color: var(--text-2); font-size: var(--fs-em); margin-top: 3px; }
+.album { color: var(--text-4); font-size: var(--fs-body); }
+.bar { position: relative; height: 8px; background: var(--well); border: 1px solid var(--line-soft); margin: 14px 0 6px; }
+.bar > i { position: absolute; inset: 0 auto 0 0; background: var(--text-2); width: 0; }
+.times { display: flex; justify-content: space-between; color: var(--text-3); font-size: var(--fs-meta); }
+.transport { display: flex; gap: 8px; flex-wrap: wrap; }
+.transport button { height: 42px; width: 52px; }
+
+/* ---- rows ---- */
+.rows { display: flex; flex-direction: column; }
+.row { display: flex; align-items: center; gap: 12px; padding: 8px 2px; border-bottom: 1px solid var(--line-soft); }
+.row:last-child { border-bottom: 0; }
+.row .k { color: var(--text-3); font-size: var(--fs-meta); letter-spacing: .08em; text-transform: uppercase; }
+.row .v { margin-left: auto; color: var(--text-2); text-align: right; font-size: var(--fs-body); word-break: break-word; }
+.row .v.ok { color: var(--ok); }
+.row .v.bad { color: var(--err); }
+.row .v.warn { color: var(--warn); }
+
+/* ---- controls ---- */
+button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 30px; padding: 0 12px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text-2);
+  font-size: var(--fs-meta); letter-spacing: .06em; text-transform: uppercase;
+  white-space: nowrap; cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--line-strong); color: var(--text); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.main { background: var(--text-2); border-color: var(--text-2); color: var(--bg); }
+button.main:hover:not(:disabled) { background: #fff; border-color: #fff; color: #000; }
+button.danger { color: var(--err); border-color: #5a4040; }
+button.danger:hover:not(:disabled) { background: #3a2a2a; }
+button.sm { height: 24px; padding: 0 8px; font-size: var(--fs-micro); }
+
+label.field { display: block; margin: 10px 0 4px; }
+label.field .lbl { display: flex; justify-content: space-between; color: var(--text-3);
+  font-size: var(--fs-meta); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 5px; }
+select, input[type=text], input[type=number] {
+  width: 100%; height: 30px; padding: 0 9px;
+  background: var(--well); color: var(--text);
+  border: 1px solid var(--line); border-radius: 0;
+  font-size: var(--fs-body);
+}
+select:focus, input:focus { outline: 1px solid var(--line-strong); }
+input[type=range] { width: 100%; accent-color: var(--text-2); }
+input[type=file] { width: 100%; font-size: var(--fs-meta); color: var(--text-3); }
+input[type=file]::file-selector-button {
+  height: 26px; margin-right: 10px; padding: 0 10px;
+  background: var(--surface-2); color: var(--text-2);
+  border: 1px solid var(--line); font-family: inherit; font-size: var(--fs-micro);
+  letter-spacing: .08em; text-transform: uppercase; cursor: pointer;
+}
+.check { display: flex; align-items: center; gap: 9px; padding: 7px 0;
+  color: var(--text-2); font-size: var(--fs-body); cursor: pointer; }
+.check input { width: 15px; height: 15px; accent-color: var(--text-2); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.hint { margin-top: 10px; color: var(--text-4); font-size: var(--fs-meta); line-height: 1.5; }
+.progress { height: 4px; background: var(--well); border: 1px solid var(--line-soft); margin-top: 8px; display: none; }
+.progress > i { display: block; height: 100%; width: 0; background: var(--ok); }
+pre {
+  margin: 8px 0 0; padding: 10px; max-height: 220px; overflow: auto;
+  background: var(--well); border: 1px solid var(--line-soft);
+  color: var(--text-3); font-size: var(--fs-meta); white-space: pre-wrap;
+}
+
+/* ---- toast ---- */
+#toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 12px);
+  min-width: 220px; max-width: 80vw; padding: 10px 14px;
+  background: var(--surface-3); border: 1px solid var(--line-strong);
+  color: var(--text); font-size: var(--fs-meta); letter-spacing: .04em;
+  opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s;
+  z-index: 50;
+}
+#toast.on { opacity: 1; transform: translate(-50%, 0); }
+#toast.bad { border-color: #6a4444; color: var(--err); }
+
+@media (max-width: 760px) {
+  header { height: auto; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  nav { order: 3; width: 100%; overflow-x: auto; }
+  .chips { order: 2; }
+  .player { grid-template-columns: 1fr; }
+  .transport { justify-content: center; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span>TAB5<span class="sub">/ MEDIACTRL</span></div>
+  <nav id="nav">
+    <a href="#player" class="on">Player</a>
+    <a href="#device">Device</a>
+    <a href="#library">Library</a>
+    <a href="#power">Power</a>
+    <a href="#system">System</a>
+    <a href="#firmware">Firmware</a>
+    <a href="#logs">Logs</a>
+  </nav>
+  <div class="chips" id="chips"></div>
+</header>
+
+<main>
+  <section id="player">
+    <h2>Now Playing<span class="spacer"></span><span class="micro" id="play_state">—</span></h2>
+    <div class="body player">
+      <div>
+        <div class="track" id="np_title">—</div>
+        <div class="artist" id="np_artist">—</div>
+        <div class="album" id="np_album">—</div>
+        <div class="bar"><i id="np_bar"></i></div>
+        <div class="times"><span id="np_cur">0:00</span><span id="np_dur">0:00</span></div>
+      </div>
+      <div class="transport">
+        <button title="Star" onclick="key('star')" id="btn_star">☆</button>
+        <button title="Shuffle" onclick="key('shuffle')">SHUF</button>
+        <button title="Repeat" onclick="key('repeat')">REP</button>
+        <button title="Previous" onclick="key('prev')">|&lt;</button>
+        <button class="main" title="Play / Pause" onclick="key('play')" id="btn_play">PLAY</button>
+        <button title="Next" onclick="key('next')">&gt;|</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section id="device">
+      <h2>Device<span class="spacer"></span><button class="sm" onclick="refresh()">Refresh</button></h2>
+      <div class="body rows" id="device_rows"></div>
+    </section>
+
+    <section id="power">
+      <h2>Power</h2>
+      <div class="body">
+        <div class="rows" id="power_rows"></div>
+        <label class="check"><input type="checkbox" id="charge_en"> Charging enabled (CHG_EN)</label>
+        <label class="check"><input type="checkbox" id="qc_high"> QC divider high (debug)</label>
+        <div class="actions"><button onclick="saveCharge()">Apply charging</button></div>
+      </div>
+    </section>
+
+    <section id="library">
+      <h2>Library</h2>
+      <div class="body">
+        <label class="field"><span class="lbl">library.bin <span id="lib_note" class="micro"></span></span>
+          <input type="file" id="lib_file" accept=".bin">
+        </label>
+        <div class="progress" id="lib_prog"><i></i></div>
+        <div class="actions">
+          <button class="main" onclick="uploadLibrary()">Upload library</button>
+          <button onclick="sync_media()">Copy iPod database</button>
+        </div>
+        <div class="hint">Uploading replaces <code>/sdcard/lib/&lt;id&gt;/library.bin</code> and reboots the device.
+          “Copy iPod database” writes the AFC database snapshot to the SD card.</div>
+        <label class="field"><span class="lbl">Pair record (plist)</span>
+          <input type="file" id="pair_file" accept=".plist">
+        </label>
+        <div class="actions"><button onclick="uploadPair()">Upload pair record</button></div>
+        <div class="hint">Stored in SPIFFS and used by the lockdown TLS session. The device reboots if needed.</div>
+      </div>
+    </section>
+
+    <section id="system">
+      <h2>System</h2>
+      <div class="body">
+        <label class="field"><span class="lbl">Volume <span id="vol_v">65</span>%</span>
+          <input type="range" id="volume" min="0" max="100" step="1">
+        </label>
+        <label class="field"><span class="lbl">Brightness <span id="bri_v">70</span>%</span>
+          <input type="range" id="brightness" min="0" max="100" step="1">
+        </label>
+        <label class="check"><input type="checkbox" id="sound_enabled"> Prompt sound</label>
+        <label class="check"><input type="checkbox" id="debug_log"> Debug log to SD</label>
+        <label class="check"><input type="checkbox" id="iap2_mode"> iAP2 mode (reboot to apply)</label>
+        <label class="field"><span class="lbl">USB mode</span>
+          <select id="usb_mode">
+            <option value="0">USB-A HighSpeed Only</option>
+            <option value="2">USB-A HS &amp; USB-C OTG</option>
+          </select>
+        </label>
+        <label class="field"><span class="lbl">Screen orientation</span>
+          <select id="screen_flip"><option value="0">0°</option><option value="180">180°</option></select>
+        </label>
+        <label class="field"><span class="lbl">WiFi mode</span>
+          <select id="wifi_mode">
+            <option value="0">Station (/sdcard/wifi.txt)</option>
+            <option value="1">Access point (open)</option>
+          </select>
+        </label>
+        <label class="field"><span class="lbl">AP SSID</span><input type="text" id="ap_ssid" maxlength="32"></label>
+        <div class="actions">
+          <button class="main" onclick="saveConfig()">Save</button>
+          <button onclick="syncTime()">Sync browser time</button>
+          <button class="danger" onclick="reboot()">Reboot</button>
+        </div>
+        <div class="hint" id="clock_hint">—</div>
+      </div>
+    </section>
+
+    <section id="firmware">
+      <h2>Firmware</h2>
+      <div class="body">
+        <div class="rows" id="fw_rows"></div>
+        <label class="field"><span class="lbl">Update image (.bin)</span><input type="file" id="fw_file" accept=".bin"></label>
+        <div class="progress" id="fw_prog"><i></i></div>
+        <div class="actions"><button class="main" onclick="uploadFirmware()">Upload &amp; reboot</button></div>
+        <div class="hint">The device verifies the image and restarts into it. Keep the page open until the upload completes.</div>
+      </div>
+    </section>
+
+    <section id="logs">
+      <h2>Logs</h2>
+      <div class="body">
+        <div class="actions">
+          <button onclick="loadLog()">Fetch recent log</button>
+          <button onclick="location.href='/debug'">Live debug</button>
+          <button onclick="location.href='/api/debuglog'">Download SD log</button>
+        </div>
+        <pre id="log">—</pre>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div id="toast"></div>
+<script>
+var S = {}, C = {};
+var $ = function (id) { return document.getElementById(id); };
+
+function toast(msg, bad) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.className = 'on' + (bad ? ' bad' : '');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function () { t.className = ''; }, 3200);
+}
+
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  var m = Math.floor(sec / 60), s = sec % 60;
+  return m + ':' + (s < 10 ? '0' : '') + s;
+}
+var RESET = {1:'POWERON',2:'EXT',3:'SW',4:'PANIC',5:'INT_WDT',6:'TASK_WDT',
+             7:'WDT',8:'DEEPSLEEP',9:'BROWNOUT',10:'SDIO'};
+function fmtReset(v) { return RESET[v] ? RESET[v] + ' (' + v + ')' : String(v); }
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + ' ' + u[i];
+}
+function setVal(id, v) {
+  var el = $(id);
+  if (document.activeElement !== el) el.value = v;
+}
+function row(k, v, cls) {
+  return '<div class="row"><span class="k">' + k + '</span><span class="v ' +
+    (cls || '') + '">' + (v === undefined || v === null || v === '' ? '—' : v) + '</span></div>';
+}
+function chip(label, value, cls) {
+  return '<span class="chip ' + (cls || '') + '"><span class="led"></span>' +
+    label + ' <b>' + value + '</b></span>';
+}
+
+function api(path, opts) {
+  return fetch(path, opts).then(function (r) {
+    return r.text().then(function (t) {
+      if (!r.ok) throw new Error(t || r.status);
+      return t;
+    });
+  });
+}
+function key(k) {
+  api('/api/key?k=' + encodeURIComponent(k), { method: 'POST' })
+    .then(function () { setTimeout(refresh, 350); })
+    .catch(function (e) { toast('Key failed: ' + e.message, true); });
+}
+
+function render(s, c) {
+  $('chips').innerHTML =
+    chip('iAP2', s.iap2_mode ? (s.iap2_identified ? 'LINKED' : 'WAIT') : 'OFF',
+         s.iap2_mode ? (s.iap2_identified ? 'ok' : 'warn') : '') +
+    chip('SD', s.sd_ready ? 'READY' : 'MISSING', s.sd_ready ? 'ok' : 'bad') +
+    chip('WiFi', s.ip || '—', s.ip && s.ip !== '--' ? 'ok' : 'warn');
+
+  $('np_title').textContent = s.title || '—';
+  $('np_artist').textContent = s.iap2 ? s.iap2 : '—';
+  $('np_album').textContent = s.device_name || '';
+  $('play_state').textContent = s.play_status === 1 ? 'PLAYING'
+    : s.play_status === 2 ? 'PAUSED' : 'STOPPED';
+  $('btn_play').textContent = s.play_status === 1 ? 'PAUSE' : 'PLAY';
+  var dur = (s.duration_ms || 0) / 1000, cur = (s.elapsed_ms || 0) / 1000;
+  $('np_dur').textContent = fmtTime(dur);
+  $('np_cur').textContent = fmtTime(cur);
+  $('np_bar').style.width = dur > 0 ? Math.min(100, cur / dur * 100) + '%' : '0%';
+
+  $('device_rows').innerHTML =
+    row('iAP2', s.iap2) +
+    row('USB mux', s.usbmux) +
+    row('Lockdown', s.lockdown) +
+    row('AFC', s.afc) +
+    row('WiFi', s.wifi, s.ip && s.ip !== '--' ? 'ok' : '') +
+    row('IP', s.ip) +
+    row('SD card', s.sd_ready ? fmtBytes(s.sd_used) + ' / ' + fmtBytes(s.sd_total) : 'missing',
+        s.sd_ready ? '' : 'bad') +
+    row('Uptime', fmtTime(s.uptime_s)) +
+    row('Heap', fmtBytes(s.free_heap)) +
+    row('PSRAM', fmtBytes(s.free_psram)) +
+    row('Reset', fmtReset(s.reset_reason));
+
+  $('fw_rows').innerHTML =
+    row('Firmware', s.firmware) +
+    row('Build', s.build) +
+    row('OTA slot', s.ota_partition) +
+    row('USB mode', s.usb_mode === 2 ? 'USB-A HS & USB-C OTG' : 'USB-A HighSpeed Only');
+
+  $('clock_hint').textContent = (s.local_time || '—') +
+    (s.rtc ? ' · RTC backed' : ' · no RTC');
+
+  setVal('volume', c.volume); $('vol_v').textContent = c.volume;
+  setVal('brightness', c.brightness); $('bri_v').textContent = c.brightness;
+  $('sound_enabled').checked = !!c.sound_enabled;
+  $('debug_log').checked = !!c.debug_log;
+  $('iap2_mode').checked = !!c.iap2_mode;
+  setVal('usb_mode', String(c.usb_mode));
+  setVal('screen_flip', String(c.screen_flip));
+  setVal('wifi_mode', String(c.wifi_mode));
+  setVal('ap_ssid', c.ap_ssid || '');
+  $('lib_note').textContent = s.sd_ready ? 'SD ready' : 'no SD card';
+}
+
+var offline = false;
+function refresh() {
+  Promise.all([fetch('/api/status').then(function (r) { return r.json(); }),
+               fetch('/api/config').then(function (r) { return r.json(); }),
+               fetch('/api/power').then(function (r) { return r.json(); })
+                 .catch(function () { return {}; })])
+    .then(function (a) {
+      S = a[0]; C = a[1];
+      offline = false;
+      render(S, C);
+      var p = a[2] || {};
+      $('power_rows').innerHTML =
+        row('Bus', p.bus_mv ? (p.bus_mv / 1000).toFixed(2) + ' V' : '—') +
+        row('Current', p.current_ma ? p.current_ma + ' mA' : '—') +
+        row('5V rail', p.usb5v_en ? 'on' : 'off') +
+        row('CHG_EN', p.chg_en ? 'on' : 'off', p.chg_en ? 'ok' : '') +
+        row('CHG state', p.chg_stat, '') +
+        row('nCHG_QC_EN', p.nchg_qc_en ? 'high' : 'low');
+      $('charge_en').checked = !!p.chg_en;
+      $('qc_high').checked = !!p.nchg_qc_en;
+    })
+    .catch(function () {
+      if (!offline) { offline = true; toast('Device unreachable', true); }
+    });
+}
+
+function saveConfig() {
+  var body = {
+    screen_flip: +$('screen_flip').value,
+    wifi_mode: +$('wifi_mode').value,
+    sound_enabled: $('sound_enabled').checked,
+    debug_log: $('debug_log').checked,
+    iap2_mode: $('iap2_mode').checked,
+    usb_mode: +$('usb_mode').value,
+    volume: +$('volume').value,
+    brightness: +$('brightness').value,
+    ap_ssid: $('ap_ssid').value
+  };
+  api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify(body) })
+    .then(function (t) { toast(t); refresh(); })
+    .catch(function (e) { toast('Save failed: ' + e.message, true); });
+}
+
+function saveCharge() {
+  api('/api/charge?en=' + ($('charge_en').checked ? 1 : 0) +
+      '&qc=' + ($('qc_high').checked ? 1 : 0), { method: 'POST' })
+    .then(function (t) { toast(t); refresh(); })
+    .catch(function (e) { toast('Charge failed: ' + e.message, true); });
+}
+
+function syncTime() {
+  api('/api/time', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify({ epoch: Math.floor(Date.now() / 1000) }) })
+    .then(function (t) { toast(t); refresh(); })
+    .catch(function (e) { toast('Time failed: ' + e.message, true); });
+}
+
+function reboot() {
+  if (!confirm('Reboot the device?')) return;
+  api('/api/reboot', { method: 'POST' }).then(function () { toast('Rebooting…'); })
+    .catch(function () { toast('Rebooting…'); });
+}
+
+function sync_media() {
+  api('/api/sync', { method: 'POST' })
+    .then(function (t) { toast(t); })
+    .catch(function (e) { toast('Sync failed: ' + e.message, true); });
+}
+
+function upload(path, file, prog, done) {
+  if (!file) { toast('Choose a file first', true); return; }
+  var x = new XMLHttpRequest();
+  x.open('POST', path);
+  prog.style.display = 'block';
+  prog.firstElementChild.style.width = '0%';
+  x.upload.onprogress = function (e) {
+    if (e.lengthComputable) {
+      prog.firstElementChild.style.width = (e.loaded / e.total * 100) + '%';
+    }
+  };
+  x.onload = function () {
+    prog.firstElementChild.style.width = '100%';
+    if (x.status >= 200 && x.status < 300) { toast(x.responseText || 'OK'); done(x.responseText); }
+    else { toast('Upload failed: ' + x.responseText, true); }
+  };
+  x.onerror = function () { toast('Upload failed', true); };
+  x.send(file);
+}
+
+function uploadLibrary() {
+  upload('/api/library', $('lib_file').files[0], $('lib_prog'), function () {
+    setTimeout(refresh, 4000);
+  });
+}
+function uploadFirmware() {
+  upload('/api/ota', $('fw_file').files[0], $('fw_prog'), function () {
+    toast('Update accepted; the device is rebooting');
+    setTimeout(refresh, 12000);
+  });
+}
+function uploadPair() {
+  if (!$('pair_file').files[0]) { toast('Choose a plist first', true); return; }
+  api('/api/pair', { method: 'POST', body: $('pair_file').files[0] })
+    .then(function (t) { toast(t); })
+    .catch(function (e) { toast('Pair upload failed: ' + e.message, true); });
+}
+
+function loadLog() {
+  fetch('/api/log?since=0').then(function (r) { return r.text(); })
+    .then(function (t) { $('log').textContent = t.slice(-20000) || '—'; })
+    .catch(function (e) { $('log').textContent = 'Log unavailable: ' + e.message; });
+}
+
+/* sliders save on release */
+['volume', 'brightness'].forEach(function (id) {
+  var el = $(id);
+  el.addEventListener('input', function () {
+    $(id === 'volume' ? 'vol_v' : 'bri_v').textContent = el.value;
+  });
+  el.addEventListener('change', function () {
+    var body = {};
+    body[id] = +el.value;
+    api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify(body) })
+      .then(function () { toast(id + ' ' + el.value + '%'); })
+      .catch(function (e) { toast('Save failed: ' + e.message, true); });
+  });
+});
+
+/* section highlight */
+var links = [].slice.call(document.querySelectorAll('nav a'));
+function mark() {
+  var best = links[0], top = -1e9;
+  links.forEach(function (a) {
+    var r = document.querySelector(a.getAttribute('href')).getBoundingClientRect();
+    if (r.top <= 80 && r.top > top) { top = r.top; best = a; }
+  });
+  links.forEach(function (a) { a.classList.toggle('on', a === best); });
+}
+window.addEventListener('scroll', mark, { passive: true });
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

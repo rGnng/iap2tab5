@@ -761,6 +761,15 @@ void app_main(void)
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        {
+            bool present = false;
+            iap2_state_t state;
+            if(g_app_config.iap2_mode && iap2_host_get_state(&state)) {
+                present = state.identified;
+            }
+            ui_set_device_state(g_app_config.iap2_mode != 0, present,
+                                app_config_sd_ready());
+        }
         if(s_save_pending) {
             s_save_pending = false;
             app_config_save();

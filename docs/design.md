@@ -461,6 +461,27 @@ Queue 显示时的左栏：
 - 长按 Enter 打开上下文菜单（播放下一首、加入队列等）；
 - 已用 14 行复用池 + 固定高度 spacer 实现虚拟列表；真实媒体库 2 万首时同样只维护可见行。
 
+### 5.5.1 设备可用性与空状态
+
+- **iAP2 模式且没有检测到 iPod**（未识别）：
+  - menubar 中除 Now Playing 与 Settings 外的图标显示为暗灰（`#686868`）；
+  - Now Playing 菜单图标换成 `bi phone`；
+  - Now Playing 页面只显示居中的线缆插头示意图（连接器、插头本体、线缆），不显示播放器 UI。
+- **SD 卡缺失或挂载失败**：
+  - 同样的菜单项置灰；
+  - Now Playing 菜单图标换成 `bi sd-card`；
+  - Now Playing 页面只显示 `bi sd-card` 加问号图标；
+  - 若开机时无卡、之后插入并挂载成功，空状态保持不变并在图标下显示一行 `Press Power to Reboot`，因为媒体库和配置是在无卡状态下加载的，必须重新上电。
+- 设备状态每秒从固件推送到 UI；状态变化时 menubar 立即刷新，当前在 Now Playing 时会重建该页面。
+- 模拟器可用 `SIM_NO_IPOD=1`、`SIM_NO_SD=1`、`SIM_SD_BACK=1` 复现这三种状态。
+
+### 5.5.2 Web 控制台
+
+- 单页控制台，视觉沿用 `../iap2mediactrl`：等宽字体、深色分层背景、1 px 分隔线、直角、小号大写按钮。
+- 分区：Player（当前曲目、进度、star/shuffle/repeat/上一首/播放/下一首）、Device（iAP2/usbmux/lockdown/AFC/WiFi/SD/heap/PSRAM/复位原因）、Library（上传 library.bin、复制 iPod 数据库、上传配对 plist）、Power（INA226 读数、充电开关）、System（音量/亮度滑条、声音、调试日志、iAP2 模式、USB 模式、屏幕方向、WiFi 模式与 AP SSID、同步时间、重启）、Firmware（OTA 上传与进度）、Logs（最近日志、实时调试页、下载 SD 日志）。
+- 每 2 秒轮询 `/api/status`、`/api/config`、`/api/power`；顶部状态灯显示 iAP2 / SD / WiFi。
+- 源码在 `assets/web/index.html`；`tools/gen_web_ui.py` 生成 `firmware/main/web_index.h` 并编译进固件。
+
 ### 5.6 Settings
 
 左右两栏。左栏是设置项列表：标题栏 56 px、16 px 内边距，右上角为 `当前序号/总数` 计数器（与其它列表页一致）；设置项行高 64 px，文字 FONT_H2。右栏是当前设置项的内容，没有标题，内容从顶部开始排列。

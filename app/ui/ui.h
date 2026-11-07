@@ -103,6 +103,11 @@ void ui_set_time_changed_cb(void (*cb)(time_t now));
 void ui_clock_synced(void);
 
 void ui_set_network_status(const char *status, const char *ip);
+
+/** Device availability for the menubar and Now Playing placeholder:
+ *  iap2_mode is the USB role, present means an iPod is identified, and
+ *  sd_ready reports the SD card mount. Safe to call from any task. */
+void ui_set_device_state(bool iap2_mode, bool present, bool sd_ready);
 void ui_system_toggle_screen_flip(void);
 
 /** Debug: page the active list by one viewport (direction +1/-1). */

@@ -350,6 +350,16 @@ int main(int argc, char ** argv)
         }
     }
 
+    /* Debug: exercise the device-availability screens. */
+    if(getenv("SIM_SD_BACK") != NULL) {
+        ui_set_device_state(false, false, false);
+        ui_set_device_state(false, false, true);
+    }
+    else if(getenv("SIM_NO_IPOD") != NULL || getenv("SIM_NO_SD") != NULL) {
+        ui_set_device_state(getenv("SIM_NO_IPOD") != NULL, false,
+                            getenv("SIM_NO_SD") == NULL);
+    }
+
     if(start_screen >= 1 && start_screen <= 6) {
         ui_select_screen(start_screen - 1);
     }

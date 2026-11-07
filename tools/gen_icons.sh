@@ -14,6 +14,10 @@ OUT_DIR="$ROOT/app/ui/fonts"
 # on the Tab5's 16 MB flash.
 RANGES=(
   0xF4E7 # phone
+  0xF4F7 # plug
+  0xF655 # sd-card
+  0xF64E # question-lg
+  0xF4FF # power
   0xF186 # battery-full
   0xF187 # battery-half
   0xF185 # battery-charging
