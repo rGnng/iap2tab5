@@ -242,6 +242,12 @@ static void sim_afc_action(int action)
     printf("[sim] AFC action %d (simulator)\n", action);
 }
 
+static void sim_drop_ipod_cb(lv_timer_t * timer)
+{
+    lv_timer_del(timer);
+    ui_set_device_state(true, false, true);
+}
+
 int main(int argc, char ** argv)
 {
     float zoom = 1.0f;
@@ -358,6 +364,11 @@ int main(int argc, char ** argv)
     else if(getenv("SIM_NO_IPOD") != NULL || getenv("SIM_NO_SD") != NULL) {
         ui_set_device_state(getenv("SIM_NO_IPOD") != NULL, false,
                             getenv("SIM_NO_SD") == NULL);
+    }
+
+    if(getenv("SIM_DROP_IPOD") != NULL) {
+        /* Reproduce unplugging the iPod while a library tab is open. */
+        lv_timer_create((lv_timer_cb_t)sim_drop_ipod_cb, 700, NULL);
     }
 
     if(start_screen >= 1 && start_screen <= 6) {

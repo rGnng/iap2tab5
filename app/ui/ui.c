@@ -1547,12 +1547,21 @@ static bool g_dev_present;
 static bool g_dev_sd_ready = true;
 static bool g_sd_missing_seen;
 static volatile bool g_dev_state_dirty;
+static bool g_dev_blocked_last;
 
 static bool ui_sd_needs_reboot(void)
 {
     /* The card appeared after boot; the library and config were loaded
      * without it, so a power cycle is required. */
     return g_sd_missing_seen && g_dev_sd_ready;
+}
+
+/* Tabs that need the iPod library and therefore become unusable while the
+ * device is unavailable. */
+static bool ui_screen_needs_devices(screen_id_t id)
+{
+    return id == SCR_ALBUMS || id == SCR_ARTISTS ||
+           id == SCR_SONGS || id == SCR_PLAYLISTS;
 }
 
 static bool ui_device_blocked(void)
@@ -2105,7 +2114,20 @@ static void ui_tick_cb(lv_timer_t * timer)
     if(g_ui_trace) perf_t1 = perf_now();
     if(g_dev_state_dirty) {
         g_dev_state_dirty = false;
+        bool blocked = ui_device_blocked();
         ui_menu_update();
+
+        /* The device disappeared while a library tab was open: that tab can
+         * no longer render, so fall back to Now Playing (which shows the
+         * plug / SD placeholder).  Only Settings and Now Playing stay. */
+        if(blocked && !g_dev_blocked_last && !g_afc_sync_mode &&
+           ui_screen_needs_devices(g_current_screen)) {
+            g_dev_blocked_last = blocked;
+            ui_show_screen(SCR_NOW_PLAYING);
+            return;
+        }
+        g_dev_blocked_last = blocked;
+
         if(g_current_screen == SCR_NOW_PLAYING && !g_afc_sync_mode) {
             ui_rebuild_page();
             return;

@@ -473,6 +473,7 @@ Queue 显示时的左栏：
   - Now Playing 页面只显示 `bi sd-card` 加问号图标；
   - 若开机时无卡、之后插入并挂载成功，空状态保持不变并在图标下显示一行 `Press Power to Reboot`，因为媒体库和配置是在无卡状态下加载的，必须重新上电。
 - 设备状态每秒从固件推送到 UI；状态变化时 menubar 立即刷新，当前在 Now Playing 时会重建该页面。
+- 如果掉线（或 SD 失效）发生在 Albums、Artists、Songs、Playlists 页面，界面立即切到 Now Playing 并显示对应空状态；Settings（含 Bluetooth 子页）保持不动。设备恢复后停留在 Now Playing，不自动跳回。
 - 模拟器可用 `SIM_NO_IPOD=1`、`SIM_NO_SD=1`、`SIM_SD_BACK=1` 复现这三种状态。
 
 ### 5.5.2 Web 控制台
