@@ -134,6 +134,8 @@ int player_playlist_track_count(int index);
 bool player_playlist_track_get(int index, int track_index, player_track_t *out);
 
 int player_queue_count(void);
+/* Changes whenever the queue contents change (new list, iPod queue update). */
+uint32_t player_queue_revision(void);
 int player_queue_index(void);
 bool player_queue_at(int index, player_track_t *out);
 
@@ -150,11 +152,20 @@ void player_clear_stars(void);
 void player_set_shuffle(bool on);
 void player_cycle_repeat(void);
 
-void player_play_track(uint64_t track_id);
+/* Each "from" call starts the chosen item and queues what follows it in the
+ * list the UI shows; see mock_player.c for the ordering rules. */
 void player_play_album(uint64_t album_id);
+void player_play_album_from(uint64_t album_id, int track_index);
+void player_play_album_shuffled(uint64_t album_id);
 void player_play_artist(uint64_t artist_id);
+void player_play_artist_from(uint64_t artist_id, uint64_t track_id);
+void player_play_artist_shuffled(uint64_t artist_id);
+void player_play_song(uint64_t track_id);
 void player_play_playlist(int index);
-void player_play_all(void);
+void player_play_playlist_from(int index, int track_index);
+void player_play_playlist_shuffled(int index);
+/* Whole library in random order (Albums "Shuffle All"). */
+void player_play_all_shuffled(void);
 void player_queue_jump(int index);
 
 #ifdef __cplusplus

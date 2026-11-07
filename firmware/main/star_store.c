@@ -1,3 +1,4 @@
+#include <errno.h>
 #include "star_store.h"
 
 #include "esp_log.h"
@@ -240,7 +241,7 @@ void star_store_update(const char * path, const char * library_id,
     FILE * in = fopen(path, "r");
     FILE * out = fopen(tmp, "w");
     if(out == NULL) {
-        ESP_LOGW(TAG, "cannot write %s", tmp);
+        ESP_LOGW(TAG, "cannot write %s: %s", tmp, strerror(errno));
         if(in != NULL) fclose(in);
         return;
     }

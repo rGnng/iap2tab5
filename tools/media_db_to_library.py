@@ -173,6 +173,29 @@ def load_new_schema(conn: sqlite3.Connection):
     except sqlite3.DatabaseError:
         pass
 
+    if not playlists and {"container", "container_item"} <= {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}:
+        # iOS schema: user playlists are containers; skip the hidden ones,
+        # the library root and the distinguished (system) containers.
+        container_cols = table_columns(conn, "container")
+        for values in conn.execute("SELECT * FROM container").fetchall():
+            row = dict(zip(container_cols, values))
+            name = (row.get("name") or "").strip()
+            if not name or name.lower() in SYSTEM_PLAYLISTS:
+                continue
+            if row.get("is_hidden") or row.get("is_ignorable_itunes_playlist"):
+                continue
+            if row.get("distinguished_kind"):
+                continue
+            if row.get("smart_is_folder") or row.get("smart_is_genius"):
+                continue
+            item_ids = [r[0] for r in conn.execute(
+                "SELECT item_pid FROM container_item WHERE container_pid = ? "
+                "ORDER BY position", (row["container_pid"],))]
+            if item_ids:
+                playlists.append({"name": name, "item_pids": item_ids})
+
     return album_artist, albums, tracks, playlists
 
 

@@ -509,6 +509,148 @@ static int track_index_by_meta(const char * title, const char * album)
 }
 #endif
 
+/* "Play from here" lists.  Each action builds the ordered list the UI
+ * shows, then starts it from the chosen item:
+ *   album    : chosen track to the end of the album (no wrap);
+ *   artist   : artist list in display order, chosen track to the end, then
+ *              the head of the list up to the item before it;
+ *   songs    : whole library in list order with the same wrap rule (the
+ *              device uses PlayMediaLibrarySpecial so the 20k-track library
+ *              is never sent as a PID list);
+ *   playlist : chosen track to the end of the playlist (no wrap).
+ * Shuffle permutes the list in the simulator; on the device the iPod's own
+ * shuffle is switched on instead. */
+#define ARTIST_ALBUMS_MAX 256
+
+/* The iAP2 path sends at most ~500 keys per command, so the device keeps
+ * these lists small; the simulator needs room for the whole library. */
+#if defined(ESP_PLATFORM)
+#define PLAY_IDS_MAX 512
+#else
+#define PLAY_IDS_MAX MAX_QUEUE
+#endif
+
+static MOCK_LARGE_BSS uint64_t play_ids[PLAY_IDS_MAX];
+#if defined(ESP_PLATFORM)
+/* The last ordered list sent to the iPod.  Up Next shows it on the device;
+ * the iPod's own queue is not read back yet. */
+static uint64_t device_queue[PLAY_IDS_MAX];
+static int device_queue_count;
+#endif
+
+static int ids_album_from(uint64_t album_id, int from, uint64_t * out, int max)
+{
+    int n = 0;
+    int seen = 0;
+    for(int i = 0; i < track_count && n < max; i++) {
+        if(tracks[i].album_id != album_id) continue;
+        if(seen++ < from) continue;
+        out[n++] = tracks[i].id;
+    }
+    return n;
+}
+
+static int ids_artist_display(uint64_t artist_id, uint64_t * out, int max)
+{
+    uint64_t albums[ARTIST_ALBUMS_MAX];
+    int album_count = 0;
+    for(int i = 0; i < track_count; i++) {
+        if(tracks[i].artist_id != artist_id) continue;
+        bool known = false;
+        for(int a = 0; a < album_count && !known; a++) {
+            known = albums[a] == tracks[i].album_id;
+        }
+        if(!known && album_count < ARTIST_ALBUMS_MAX) {
+            albums[album_count++] = tracks[i].album_id;
+        }
+    }
+    int n = 0;
+    for(int a = 0; a < album_count; a++) {
+        for(int i = 0; i < track_count && n < max; i++) {
+            if(tracks[i].artist_id == artist_id &&
+               tracks[i].album_id == albums[a]) {
+                out[n++] = tracks[i].id;
+            }
+        }
+    }
+    return n;
+}
+
+static int ids_playlist(int index, uint64_t * out, int max)
+{
+    int n = 0;
+    if(index == 0) {
+        for(int i = 0; i < track_count && n < max; i++) {
+            if(track_starred[i]) out[n++] = tracks[i].id;
+        }
+        return n;
+    }
+    int d = index - 1;
+    if(d < 0 || d >= playlist_count) return 0;
+    for(int i = 0; i < playlists[d].track_count && n < max; i++) {
+        int track_index = track_index_by_id(playlists[d].track_ids[i]);
+        if(track_index >= 0) out[n++] = tracks[track_index].id;
+    }
+    return n;
+}
+
+/* Turns play_ids[0..count) into play_ids[start..count) followed by
+ * play_ids[0..start). */
+static void rotate_play_ids(int count, int start)
+{
+    static MOCK_LARGE_BSS uint64_t rotated[PLAY_IDS_MAX];
+    for(int k = 0; k < count; k++) {
+        rotated[k] = play_ids[(start + k) % count];
+    }
+    memcpy(play_ids, rotated, (size_t)count * sizeof(uint64_t));
+}
+
+static uint32_t queue_rev;
+
+uint32_t player_queue_revision(void)
+{
+#if defined(ESP_PLATFORM)
+    uint32_t rev = queue_rev;
+    if(iap2_host_is_enabled()) rev += iap2_host_queue_list_revision();
+    return rev;
+#else
+    return queue_rev;
+#endif
+}
+
+static void play_ids_start(int count, bool shuffle_on)
+{
+    if(count <= 0) return;
+    if(count > PLAY_IDS_MAX) count = PLAY_IDS_MAX;
+#if defined(ESP_PLATFORM)
+    if(iap2_host_is_enabled()) {
+        iap2_host_play_track_keys(play_ids, count, 0);
+        memcpy(device_queue, play_ids, (size_t)count * sizeof(uint64_t));
+        device_queue_count = count;
+        queue_rev++;
+        if(shuffle_on) player_set_shuffle(true);
+        return;
+    }
+    return;
+#endif
+    if(shuffle_on) {
+        for(int i = count - 1; i > 0; i--) {
+            int j = rand() % (i + 1);
+            uint64_t tmp = play_ids[i];
+            play_ids[i] = play_ids[j];
+            play_ids[j] = tmp;
+        }
+        shuffle = true;
+    }
+    memcpy(queue, play_ids, (size_t)count * sizeof(uint64_t));
+    queue_count = count;
+    queue_rev++;
+    queue_index = 0;
+    elapsed_sec = 0;
+    status = PLAYER_PLAYING;
+    bump_revision();
+}
+
 static void set_queue_from_tracks(const int *indices, int count, int start)
 {
     if(count <= 0 || count > MAX_QUEUE) return;
@@ -1324,54 +1466,32 @@ bool player_playlist_track_get(int index, int track_index, player_track_t * out)
 
 void player_play_playlist(int index)
 {
-#if defined(ESP_PLATFORM)
-    if(iap2_host_is_enabled()) {
-        uint64_t keys[240];
-        int count = 0;
-        if(index == 0) {
-            for(int i = 0; i < track_count && count < 240; i++) {
-                if(track_starred[i]) keys[count++] = tracks[i].id;
-            }
-        }
-        else {
-            int d = index - 1;
-            if(d < 0 || d >= playlist_count) return;
-            for(int i = 0; i < playlists[d].track_count && count < 240; i++) {
-                int ti = track_index_by_id(playlists[d].track_ids[i]);
-                if(ti >= 0) keys[count++] = tracks[ti].id;
-            }
-        }
-        if(count > 0) iap2_host_play_track_keys(keys, count, 0);
-        return;
-    }
-    return;
-#endif
-    queue_count = 0;
-    if(index == 0) {
-        for(int i = 0; i < track_count && queue_count < MAX_QUEUE; i++) {
-            if(track_starred[i]) queue[queue_count++] = tracks[i].id;
-        }
-    }
-    else {
-        int d = index - 1;
-        if(d < 0 || d >= playlist_count) return;
-        for(int i = 0; i < playlists[d].track_count &&
-                    queue_count < MAX_QUEUE; i++) {
-            int track_index = track_index_by_id(playlists[d].track_ids[i]);
-            if(track_index >= 0) queue[queue_count++] = tracks[track_index].id;
-        }
-    }
-    if(queue_count > 0) {
-        queue_index = 0;
-        elapsed_sec = 0;
-        status = PLAYER_PLAYING;
-        bump_revision();
-    }
+    int n = ids_playlist(index, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, false);
+}
+
+void player_play_playlist_from(int index, int track_index)
+{
+    int n = ids_playlist(index, play_ids, PLAY_IDS_MAX);
+    if(track_index < 0 || track_index >= n) return;
+    n -= track_index;
+    memmove(play_ids, play_ids + track_index, (size_t)n * sizeof(uint64_t));
+    play_ids_start(n, false);
+}
+
+void player_play_playlist_shuffled(int index)
+{
+    int n = ids_playlist(index, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, true);
 }
 
 int player_queue_count(void)
 {
 #if defined(ESP_PLATFORM)
+    if(iap2_host_is_enabled() && iap2_host_queue_list_count() > 0) {
+        return iap2_host_queue_list_count();
+    }
+    if(device_queue_count > 0) return device_queue_count;
     if(iap2_host_is_enabled()) {
         iap2_state_t state;
         if(iap2_host_get_state(&state)) {
@@ -1387,6 +1507,21 @@ int player_queue_count(void)
 int player_queue_index(void)
 {
 #if defined(ESP_PLATFORM)
+    if(iap2_host_is_enabled() && iap2_host_queue_list_count() > 0) {
+        iap2_state_t state;
+        if(!iap2_host_get_state(&state) || state.queue_index < 0) return -1;
+        int index = state.queue_index - iap2_host_queue_list_base();
+        int count = iap2_host_queue_list_count();
+        return (index >= 0 && index < count) ? index : -1;
+    }
+    if(device_queue_count > 0) {
+        player_snapshot_t snapshot;
+        player_get_snapshot(&snapshot);
+        for(int i = 0; i < device_queue_count; i++) {
+            if(device_queue[i] == snapshot.track.id) return i;
+        }
+        return -1;
+    }
     if(iap2_host_is_enabled()) {
         iap2_state_t state;
         if(iap2_host_get_state(&state) &&
@@ -1403,6 +1538,21 @@ int player_queue_index(void)
 bool player_queue_at(int index, player_track_t * out)
 {
 #if defined(ESP_PLATFORM)
+    if(iap2_host_is_enabled() && iap2_host_queue_list_count() > 0) {
+        uint64_t key = 0;
+        if(out == NULL || !iap2_host_queue_list_get(index, &key)) return false;
+        int track_index = track_index_by_id(key);
+        if(track_index < 0) return false;
+        *out = tracks[track_index];
+        return true;
+    }
+    if(device_queue_count > 0) {
+        if(index < 0 || index >= device_queue_count || out == NULL) return false;
+        int track_index = track_index_by_id(device_queue[index]);
+        if(track_index < 0) return false;
+        *out = tracks[track_index];
+        return true;
+    }
     if(iap2_host_is_enabled()) {
         if(index != 0 || out == NULL) return false;
         player_snapshot_t snapshot;
@@ -1629,93 +1779,85 @@ void player_cycle_repeat(void)
     bump_revision();
 }
 
-void player_play_track(uint64_t track_id)
-{
-#if defined(ESP_PLATFORM)
-    if(iap2_host_is_enabled()) {
-        if(track_index_by_id(track_id) >= 0) {
-            iap2_host_play_track_keys(&track_id, 1, 0);
-        }
-        return;
-    }
-    return;
-#endif
-    int idx = track_index_by_id(track_id);
-    if(idx < 0) return;
-    uint64_t album_id = tracks[idx].album_id;
-    player_play_album(album_id);
-    int count = player_album_track_count(album_id);
-    for(int i = 0; i < count; i++) {
-        player_track_t tr;
-        if(player_album_track_get(album_id, i, &tr) && tr.id == track_id) {
-            player_queue_jump(i);
-            break;
-        }
-    }
-}
-
 void player_play_album(uint64_t album_id)
 {
-#if defined(ESP_PLATFORM)
-    if(iap2_host_is_enabled()) {
-        uint64_t keys[240];
-        int count = 0;
-        for(int i = 0; i < track_count && count < 240; i++) {
-            if(tracks[i].album_id == album_id) keys[count++] = tracks[i].id;
-        }
-        if(count > 0) iap2_host_play_track_keys(keys, count, 0);
-        return;
-    }
-    return;
-#endif
-    queue_count = 0;
-    for(int i = 0; i < track_count && queue_count < MAX_QUEUE; i++) {
-        if(tracks[i].album_id == album_id) {
-            queue[queue_count++] = tracks[i].id;
-        }
-    }
-    if(queue_count > 0) {
-        queue_index = 0;
-        elapsed_sec = 0;
-        status = PLAYER_PLAYING;
-        bump_revision();
-    }
+    int n = ids_album_from(album_id, 0, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, false);
+}
+
+void player_play_album_from(uint64_t album_id, int track_index)
+{
+    int n = ids_album_from(album_id, track_index, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, false);
+}
+
+void player_play_album_shuffled(uint64_t album_id)
+{
+    int n = ids_album_from(album_id, 0, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, true);
 }
 
 void player_play_artist(uint64_t artist_id)
 {
+    int n = ids_artist_display(artist_id, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, false);
+}
+
+void player_play_artist_from(uint64_t artist_id, uint64_t track_id)
+{
+    int n = ids_artist_display(artist_id, play_ids, PLAY_IDS_MAX);
+    int pos = -1;
+    for(int i = 0; i < n && pos < 0; i++) {
+        if(play_ids[i] == track_id) pos = i;
+    }
+    if(pos < 0) return;
+    rotate_play_ids(n, pos);
+    play_ids_start(n, false);
+}
+
+void player_play_artist_shuffled(uint64_t artist_id)
+{
+    int n = ids_artist_display(artist_id, play_ids, PLAY_IDS_MAX);
+    play_ids_start(n, true);
+}
+
+void player_play_song(uint64_t track_id)
+{
 #if defined(ESP_PLATFORM)
     if(iap2_host_is_enabled()) {
-        uint64_t keys[240];
-        int count = 0;
-        for(int i = 0; i < track_count && count < 240; i++) {
-            if(tracks[i].artist_id == artist_id) keys[count++] = tracks[i].id;
+        if(track_index_by_id(track_id) >= 0) {
+            iap2_host_play_all_songs(track_id);
+            device_queue_count = 0;
         }
-        if(count > 0) iap2_host_play_track_keys(keys, count, 0);
         return;
     }
     return;
 #endif
-    queue_count = 0;
-    for(int i = 0; i < track_count && queue_count < MAX_QUEUE; i++) {
-        if(tracks[i].artist_id == artist_id) {
-            queue[queue_count++] = tracks[i].id;
-        }
+    int pos = track_index_by_id(track_id);
+    if(pos < 0) return;
+    int n = track_count < PLAY_IDS_MAX ? track_count : PLAY_IDS_MAX;
+    for(int k = 0; k < n; k++) {
+        play_ids[k] = tracks[(pos + k) % track_count].id;
     }
-    if(queue_count > 0) {
-        queue_index = 0;
-        elapsed_sec = 0;
-        status = PLAYER_PLAYING;
-        bump_revision();
-    }
+    play_ids_start(n, false);
 }
 
-void player_play_all(void)
+void player_play_all_shuffled(void)
 {
 #if defined(ESP_PLATFORM)
+    if(iap2_host_is_enabled()) {
+        if(track_count <= 0) return;
+        /* PlayMediaLibrarySpecial from a random track, then iPod shuffle. */
+        uint64_t start = tracks[rand() % track_count].id;
+        iap2_host_play_all_songs(start);
+        device_queue_count = 0;
+        player_set_shuffle(true);
+    }
     return;
 #endif
-    queue_all_tracks();
+    int n = track_count < PLAY_IDS_MAX ? track_count : PLAY_IDS_MAX;
+    for(int k = 0; k < n; k++) play_ids[k] = tracks[k].id;
+    play_ids_start(n, true);
 }
 
 void player_queue_jump(int index)

@@ -19,6 +19,21 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* The BSP default allows only 5 open files; the debug log, the thumbnail
+ * pack and index and the star store can exhaust that. */
+static esp_err_t sd_mount_default(void)
+{
+    esp_vfs_fat_sdmmc_mount_config_t mount = {
+        .format_if_mount_failed = false,
+        .max_files = 12,
+        .allocation_unit_size = 16 * 1024,
+    };
+    bsp_sdcard_cfg_t cfg = {
+        .mount = &mount,
+    };
+    return bsp_sdcard_sdmmc_mount(&cfg);
+}
+
 static const char * TAG = "config";
 
 app_config_t g_app_config = {
@@ -556,7 +571,7 @@ esp_err_t app_config_init(void)
              g_app_config.iap2_mode ? "iAP2 config 2" : "AFC config 4",
              (int)s_nvs_mode_valid, s_library_id);
 
-    esp_err_t err = bsp_sdcard_mount();
+    esp_err_t err = sd_mount_default();
     if(err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
         s_sd_ready = true;
         sdmmc_card_t * card = bsp_sdcard_get_handle();
@@ -797,7 +812,7 @@ bool app_config_sd_format(void)
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,
-        .max_files = 5,
+        .max_files = 12,
         .allocation_unit_size = 16 * 1024,
     };
     bsp_sdcard_cfg_t cfg = {
@@ -826,7 +841,7 @@ bool app_config_sd_ensure(void)
      * even when no card is present. Release it before retrying. */
     bsp_sdcard_unmount();
 
-    esp_err_t err = bsp_sdcard_mount();
+    esp_err_t err = sd_mount_default();
     if(err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
         s_sd_ready = true;
         sdmmc_card_t * card = bsp_sdcard_get_handle();

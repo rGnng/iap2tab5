@@ -73,6 +73,17 @@ esp_err_t iap2_host_hid_release(void);
 esp_err_t iap2_host_play_track_keys(const uint64_t * keys, int count,
                                     int start_index);
 
+/* Plays the whole media library in device order from start_pid
+ * (PlayMediaLibrarySpecial, 0x4C09). */
+esp_err_t iap2_host_play_all_songs(uint64_t start_pid);
+
+/* The iPod's own queue (PlaybackQueueList file transfer).  Count is 0 until
+ * the device has sent one. */
+int iap2_host_queue_list_count(void);
+int iap2_host_queue_list_base(void);
+uint32_t iap2_host_queue_list_revision(void);
+bool iap2_host_queue_list_get(int index, uint64_t * key);
+
 /* Play the currently reported track's persistent key (debug/recovery). */
 esp_err_t iap2_host_play_current_key(void);
 

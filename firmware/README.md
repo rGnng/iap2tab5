@@ -373,7 +373,7 @@ also yields to the idle task periodically so the task watchdog stays happy.
   `docs/screenshots/tab5-real-cover-iap2.png`.
 - `# <id>` syncs one album's cover over AFC, which is useful when testing
   a specific iAP2 track without running the full library sync.
-- **Settings > Apple File Conduit Sync** provides Pair/Connect, Quick sync,
+- **Settings > iOS Device** provides Pair/Connect, Quick sync,
   Full sync, switch-to-iAP2, cached album count, cache size,
   thumbnail/cover counts, USB mode and AFC/sync status. Quick/full sync store a one-shot NVS job,
   reboot to AFC, wait for the iPod, run the artwork sync, then switch back

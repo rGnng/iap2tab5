@@ -200,7 +200,7 @@ E         all 2,090 albums (large and long; old originals are removed)
 # <id>    one album by library ID, e.g. #919
 ```
 
-The same operations are available in **Settings > Apple File Conduit Sync**:
+The same operations are available in **Settings > iOS Device**:
 
 ```text
 Pair / Connect       switch to AFC / reconnect

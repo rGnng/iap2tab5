@@ -146,6 +146,13 @@ static char s_device_name[64] = "iPod touch";
 static uint32_t s_elapsed_ms;
 static uint32_t s_duration_ms;
 static int s_queue_index = -1;
+#define QUEUE_LIST_MAX 512
+/* The iPod's own queue, read from the PlaybackQueueList file transfer
+ * (0x0003 PID array or 0x0006 MediaItemList).  Guarded by s_state_lock. */
+static uint64_t s_queue_list[QUEUE_LIST_MAX];
+static int s_queue_list_count;
+static int s_queue_list_base;
+static uint32_t s_queue_list_rev;
 static int s_queue_count;
 static bool s_shuffle;
 static uint8_t s_repeat;
@@ -637,6 +644,8 @@ static void close_device(void)
         s_elapsed_ms = s_duration_ms = 0;
         s_queue_index = -1;
         s_queue_count = 0;
+        s_queue_list_count = 0;
+        s_queue_list_base = 0;
         s_battery = -1;
         s_charging = false;
         s_max_current_ma = -1;
@@ -1711,6 +1720,8 @@ static void ft_publish_artwork(const uint8_t * data, size_t len)
     ESP_LOGI(TAG, "artwork transfer complete (%u bytes)", (unsigned)len);
 }
 
+static void queue_list_apply(const uint8_t * blob, size_t len, uint16_t type);
+
 static void ft_feed(const uint8_t * payload, size_t len)
 {
     if(payload == NULL || len < 2) return;
@@ -1811,8 +1822,107 @@ static void ft_feed(const uint8_t * payload, size_t len)
                 ft_publish_artwork(t->data, t->len);
             }
         }
+        else if(t->type == 0x0003 || t->type == 0x0006) {
+            queue_list_apply(t->data, t->len, t->type);
+        }
         ft_release(t);
     }
+}
+
+/* Table 56-17 MediaItemList: count, start index, then MediaItem groups whose
+ * property 0 is the persistent ID. */
+static void queue_list_apply(const uint8_t * blob, size_t len, uint16_t type)
+{
+    static uint64_t ids[QUEUE_LIST_MAX];
+    int count = 0;
+    int base = 0;
+
+    if(type == 0x0003) {
+        if(len % 8 != 0) return;
+        for(size_t i = 0; i + 8 <= len && count < QUEUE_LIST_MAX; i += 8) {
+            ids[count++] = be64(blob + i);
+        }
+    }
+    else {
+        const uint8_t * p = blob;
+        const uint8_t * end = blob + len;
+        uint16_t pid = 0;
+        const uint8_t * value = NULL;
+        size_t value_len = 0;
+        while(next_param(&p, end, &pid, &value, &value_len)) {
+            if(pid == 1 && value_len >= 4) {
+                base = (int)be32(value);
+            }
+            else if(pid == 2) {
+                const uint8_t * q = value;
+                const uint8_t * qend = value + value_len;
+                uint16_t cid = 0;
+                const uint8_t * cv = NULL;
+                size_t cvlen = 0;
+                while(next_param(&q, qend, &cid, &cv, &cvlen)) {
+                    if(cid == 0 && cvlen >= 8 && count < QUEUE_LIST_MAX) {
+                        ids[count++] = be64(cv);
+                    }
+                }
+            }
+        }
+    }
+
+    if(s_state_lock != NULL) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        memcpy(s_queue_list, ids, (size_t)count * sizeof(uint64_t));
+        s_queue_list_count = count;
+        s_queue_list_base = base;
+        s_queue_list_rev++;
+        xSemaphoreGive(s_state_lock);
+    }
+    ESP_LOGI(TAG, "device queue: %d items, base=%d", count, base);
+}
+
+int iap2_host_queue_list_count(void)
+{
+    int count = 0;
+    if(s_state_lock != NULL) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        count = s_queue_list_count;
+        xSemaphoreGive(s_state_lock);
+    }
+    return count;
+}
+
+uint32_t iap2_host_queue_list_revision(void)
+{
+    uint32_t rev = 0;
+    if(s_state_lock != NULL) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        rev = s_queue_list_rev;
+        xSemaphoreGive(s_state_lock);
+    }
+    return rev;
+}
+
+int iap2_host_queue_list_base(void)
+{
+    int base = 0;
+    if(s_state_lock != NULL) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        base = s_queue_list_base;
+        xSemaphoreGive(s_state_lock);
+    }
+    return base;
+}
+
+bool iap2_host_queue_list_get(int index, uint64_t * key)
+{
+    bool ok = false;
+    if(key == NULL || s_state_lock == NULL) return false;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if(index >= 0 && index < s_queue_list_count) {
+        *key = s_queue_list[index];
+        ok = true;
+    }
+    xSemaphoreGive(s_state_lock);
+    return ok;
 }
 
 static void artwork_clear_cover(void)
@@ -2377,14 +2487,22 @@ esp_err_t iap2_host_hid_release(void)
     return ESP_OK;
 }
 
+static const char * library_uuid(void)
+{
+    return s_library_sub_id[0] != '\0' ? s_library_sub_id : s_library_id;
+}
+
 esp_err_t iap2_host_play_track_keys(const uint64_t * keys, int count,
                                     int start_index)
 {
     if(keys == NULL || count <= 0) return ESP_ERR_INVALID_ARG;
     if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    const char * uuid = library_uuid();
+    if(uuid[0] == '\0') return ESP_ERR_INVALID_STATE;
 
-    /* A CSM frame is limited to MAX_CSM_FRAME; each key is 8 bytes. */
-    const int max_keys = (MAX_CSM_FRAME - 32) / 8;
+    /* A CSM frame is limited to MAX_CSM_FRAME; each key is 8 bytes.  The
+     * library UUID (param 2) is required by the iPod and takes ~64 bytes. */
+    const int max_keys = (MAX_CSM_FRAME - 96) / 8;
     if(count > max_keys) count = max_keys;
 
     const size_t key_bytes = (size_t)count * 8;
@@ -2410,11 +2528,41 @@ esp_err_t iap2_host_play_track_keys(const uint64_t * keys, int count,
         (uint8_t)(start_index >> 8), (uint8_t)start_index
     };
     pb_param(&b, 1, start, sizeof(start));
+    pb_param(&b, 2, uuid, strlen(uuid) + 1);
     ESP_LOGI(TAG, "play media items: %d keys, start=%d, first=%016llx",
              count, start_index, (unsigned long long)keys[0]);
     csm_send(0x4C07, &b);
 
     free(kb);
+    free(buf);
+    return ESP_OK;
+}
+
+esp_err_t iap2_host_play_all_songs(uint64_t start_pid)
+{
+    if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    const char * uuid = library_uuid();
+    if(uuid[0] == '\0') return ESP_ERR_INVALID_STATE;
+
+    uint8_t * buf = heap_caps_malloc(MAX_CSM_FRAME, MALLOC_CAP_SPIRAM);
+    if(buf == NULL) return ESP_ERR_NO_MEM;
+
+    /* PlayMediaLibrarySpecial: library UUID, AllSongs (empty), and the
+     * starting track.  The device builds the queue itself, so the library
+     * is never sent as a PID list. */
+    pb_t b = { buf, 0, MAX_CSM_FRAME };
+    pb_param(&b, 0, uuid, strlen(uuid) + 1);
+    static const uint8_t none = 0;
+    pb_param(&b, 1, &none, 0);
+    uint8_t pid[8];
+    for(int i = 0; i < 8; i++) {
+        pid[i] = (uint8_t)(start_pid >> (56 - i * 8));
+    }
+    pb_param(&b, 2, pid, sizeof(pid));
+    ESP_LOGI(TAG, "play all songs from %016llx",
+             (unsigned long long)start_pid);
+    csm_send(0x4C09, &b);
+
     free(buf);
     return ESP_OK;
 }

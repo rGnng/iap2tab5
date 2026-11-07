@@ -1510,6 +1510,9 @@ typedef struct {
     bool (*back)(void);
     void (*same_key)(void);
     bool (*key)(ui_key_t key);
+    /* Called when the tab is entered: the cursor returns to the left list
+     * and the list keeps its remembered row. */
+    void (*enter)(void);
 } page_t;
 
 static const page_t g_pages[SCR_COUNT];
@@ -2012,7 +2015,7 @@ static void update_clock(void)
     localtime_r(&now, &local);
     char text[16];
     if(g_clock_12h) {
-        strftime(text, sizeof(text), "%I:%M %p", &local);
+        strftime(text, sizeof(text), "%I:%M", &local);
         if(text[0] == '0' && text[1] != '\0') {
             memmove(text, text + 1, strlen(text));
         }
@@ -2117,6 +2120,7 @@ static void ui_show_screen(screen_id_t id)
     ui_set_hint("");
     ui_layout_page_area();
     uint32_t trace_start = lv_tick_get();
+    if(g_pages[id].enter) g_pages[id].enter();
     g_pages[id].create(g_page);
     if(g_ui_trace || getenv("IAP2TAB5_TRACE")) {
         fprintf(stderr, "[trace] create screen %d in %u ms\n", (int)id,
@@ -2364,6 +2368,9 @@ static uint64_t g_np_cover_track_id;
 #define NP_QUEUE_ROW_H        56
 #define NP_QUEUE_VISIBLE_ROWS  11
 #define NP_QUEUE_LIST_H       (NP_QUEUE_VISIBLE_ROWS * NP_QUEUE_ROW_H)
+/* Rows built for the queue from the current item on.  The full queue is
+ * always played; only this many upcoming entries are listed. */
+#define NP_QUEUE_MAX_ROWS     100
 
 /* Default Now Playing layout: cover on the left; title (with the star at
  * its right edge), artist and album occupy three separate lines.  The
@@ -2388,6 +2395,7 @@ static bool np_queue_visible = false;
 static int np_queue_focus_start;
 static uint64_t np_last_track;
 static int np_last_queue_count = -1;
+static uint32_t np_last_queue_rev;
 
 typedef enum {
     NP_BG_THEME = 0,
@@ -2610,9 +2618,11 @@ static void np_tick(void)
     player_get_snapshot(&snapshot);
 
     bool track_changed = (snapshot.track.id != np_last_track);
-    bool queue_changed = (player_queue_count() != np_last_queue_count);
+    bool queue_changed = (player_queue_count() != np_last_queue_count) ||
+                         (player_queue_revision() != np_last_queue_rev);
     np_last_track = snapshot.track.id;
     np_last_queue_count = player_queue_count();
+    np_last_queue_rev = player_queue_revision();
 
     if(track_changed || queue_changed) {
         ui_rebuild_page();
@@ -3103,6 +3113,7 @@ static void np_create(lv_obj_t * parent)
     player_get_snapshot(&snapshot);
     np_last_track = snapshot.track.id;
     np_last_queue_count = player_queue_count();
+    np_last_queue_rev = player_queue_revision();
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
@@ -3373,7 +3384,7 @@ static void np_create(lv_obj_t * parent)
         int total = player_queue_count();
         int start = player_queue_index();
         if(start < 0) start = 0;
-        for(int i = start; i < total && i < start + 12; i++) {
+        for(int i = start; i < total && i < start + NP_QUEUE_MAX_ROWS; i++) {
             np_queue_row(np_queue_list, i, i == start);
         }
     }
@@ -3396,6 +3407,19 @@ static void np_create(lv_obj_t * parent)
 #define ALBUMS_VISIBLE_ROWS 8
 #define ALBUMS_LIST_H      (ALBUMS_VISIBLE_ROWS * ALBUMS_ROW_H)
 #define ALBUMS_STRIDE      ALBUMS_ROW_H
+/* Visual row 0 is the "Shuffle All" item (index -1); album N sits at row
+ * N + ALBUMS_LEAD.  The list opens scrolled past it. */
+#define ALBUMS_LEAD        1
+static int albums_row_top(int index)
+{
+    return (index + ALBUMS_LEAD) * ALBUMS_STRIDE;
+}
+static int albums_first_for_top(int top)
+{
+    int first = top / ALBUMS_STRIDE - ALBUMS_LEAD;
+    if(first > 0) first--;
+    return first < 0 ? 0 : first;
+}
 #define ALBUMS_POOL        10
 #define ALBUM_TRACK_ROW_H  56
 #define ALBUM_HEADER_H     112
@@ -3407,6 +3431,7 @@ static int albums_selected;
 static bool albums_detail_open;
 static lv_obj_t * albums_right_content;
 static lv_obj_t * albums_left_list;
+static lv_obj_t * albums_shuffle_row;
 static counter_t albums_counter;
 static lv_obj_t * albums_shuffle_icon;
 static int albums_play_focus = -1;
@@ -3479,8 +3504,23 @@ static void albums_apply_row_style(lv_obj_t * row, int index)
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
 }
 
+static void albums_apply_shuffle_row_style(void)
+{
+    if(albums_shuffle_row == NULL) return;
+    bool selected = albums_selected < 0;
+    bool focused = selected && !albums_detail_open;
+    lv_obj_set_style_bg_opa(albums_shuffle_row,
+                            selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(albums_shuffle_row,
+                              lv_color_hex(focused ? COL_FOCUS : COL_ACCENT_DARK), 0);
+    lv_obj_set_style_border_width(albums_shuffle_row, focused ? 3 : 0, 0);
+    lv_obj_set_style_border_side(albums_shuffle_row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_color(albums_shuffle_row, lv_color_hex(COL_ACCENT), 0);
+}
+
 static void albums_update_selection(void)
 {
+    albums_apply_shuffle_row_style();
     for(int slot = 0; slot < ALBUMS_POOL; slot++) {
         int index = albums_row_indices[slot];
         bool selected = (index >= 0 && index == albums_selected);
@@ -3502,7 +3542,7 @@ static void albums_fill_row(int slot, int index)
     }
 
     lv_obj_set_hidden(row, false);
-    lv_obj_set_pos(row, 0, index * ALBUMS_STRIDE);
+    lv_obj_set_pos(row, 0, albums_row_top(index));
     lv_obj_set_user_data(row, (void *)(intptr_t)index);
 
     /* Only decode covers that are actually inside the viewport. The pool has
@@ -3510,7 +3550,7 @@ static void albums_fill_row(int slot, int index)
      * wastes SPIFFS reads and PSRAM. */
     int top = albums_view_top;
     int view_h = albums_view_h;
-    int row_top = index * ALBUMS_STRIDE;
+    int row_top = albums_row_top(index);
     bool visible = row_top < top + view_h && row_top + ALBUMS_ROW_H > top;
 
     bool same = albums_row_album_ids[slot] == album.id &&
@@ -3551,8 +3591,7 @@ static void albums_refresh_rows(void)
     if(top < 0) top = 0;
     albums_view_top = top;
     albums_view_h = lv_obj_get_height(albums_left_list);
-    int first = top / ALBUMS_STRIDE;
-    if(first > 0) first--;
+    int first = albums_first_for_top(top);
     if(first > count - 1) first = count - 1;
     albums_first_index = first;
 
@@ -3604,8 +3643,7 @@ static void albums_scroll_cb(lv_event_t * event)
     if(albums_left_list == NULL) return;
     int top = lv_obj_get_scroll_top(albums_left_list);
     if(top < 0) top = 0;
-    int first = top / ALBUMS_STRIDE;
-    if(first > 0) first--;
+    int first = albums_first_for_top(top);
     if(first == albums_first_index) return;
     albums_refresh_rows();
 }
@@ -3638,7 +3676,7 @@ static void albums_select_visual(int index)
 {
     int count = player_album_count();
     if(count <= 0) return;
-    if(index < 0) index = 0;
+    if(index < -1) index = -1;
     if(index >= count) index = count - 1;
     albums_selected = index;
     albums_update_count();
@@ -3657,7 +3695,7 @@ static void albums_swipe_page(int direction)
 
     int actual = lv_obj_get_scroll_top(albums_left_list);
     if(actual < 0) actual = 0;
-    albums_select_visual(actual / ALBUMS_STRIDE);
+    albums_select_visual(actual / ALBUMS_STRIDE - ALBUMS_LEAD);
     albums_schedule_detail();
     albums_swipe_guard = lv_tick_get();
 }
@@ -3667,19 +3705,19 @@ static void albums_scroll_to_selected(void)
     if(albums_left_list == NULL) return;
     int count = player_album_count();
     if(count <= 0) return;
-    if(albums_selected < 0) albums_selected = 0;
+    if(albums_selected < -1) albums_selected = -1;
     if(albums_selected >= count) albums_selected = count - 1;
 
     int top = lv_obj_get_scroll_top(albums_left_list);
     if(top < 0) top = 0;
     int view = lv_obj_get_height(albums_left_list);
-    int row_top = albums_selected * ALBUMS_STRIDE;
+    int row_top = albums_row_top(albums_selected);
     int new_top = top;
     if(row_top < top) new_top = row_top;
     else if(row_top + ALBUMS_ROW_H > top + view) {
         new_top = row_top + ALBUMS_ROW_H - view;
     }
-    int max_top = count * ALBUMS_STRIDE - view;
+    int max_top = (count + ALBUMS_LEAD) * ALBUMS_STRIDE - view;
     if(max_top < 0) max_top = 0;
     if(new_top < 0) new_top = 0;
     if(new_top > max_top) new_top = max_top;
@@ -3688,8 +3726,7 @@ static void albums_scroll_to_selected(void)
     }
     int actual = lv_obj_get_scroll_top(albums_left_list);
     if(actual < 0) actual = 0;
-    int first = actual / ALBUMS_STRIDE;
-    if(first > 0) first--;
+    int first = albums_first_for_top(actual);
     if(first != albums_first_index) {
         albums_refresh_rows();
     }
@@ -3703,7 +3740,7 @@ static void albums_select(int index)
     uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     int count = player_album_count();
     if(count <= 0) return;
-    if(index < 0) index = 0;
+    if(index < -1) index = -1;
     if(index >= count) index = count - 1;
     albums_selected = index;
     albums_update_count();
@@ -3729,15 +3766,24 @@ static void albums_open(void * user)
     }
 }
 
+static void albums_shuffle_all(void)
+{
+    player_play_all_shuffled();
+    ui_set_hint("Shuffle All");
+}
+
+static void albums_shuffle_all_touch_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    albums_shuffle_all();
+}
+
 static void albums_track_action(void * user)
 {
     int index = (int)(intptr_t)user;
     player_album_t album;
     if(!player_album_get(albums_selected, &album)) return;
-    player_track_t track;
-    if(player_album_track_get(album.id, index, &track)) {
-        player_play_track(track.id);
-    }
+    player_play_album_from(album.id, index);
 }
 
 static void albums_open_async(void * arg)
@@ -3767,6 +3813,10 @@ static bool albums_key(ui_key_t key)
             albums_select(albums_selected + 1);
             return true;
         case UI_KEY_ENTER:
+            if(albums_selected < 0) {
+                albums_shuffle_all();
+                return true;
+            }
             albums_open((void *)(intptr_t)albums_selected);
             return true;
         default:
@@ -3795,15 +3845,9 @@ static void albums_play_all_action(void * user)
 static void albums_shuffle_action(void * user)
 {
     LV_UNUSED(user);
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
-    bool on = !snapshot.shuffle;
-    player_set_shuffle(on);
-    if(albums_shuffle_icon != NULL) {
-        lv_obj_set_style_text_color(albums_shuffle_icon,
-                                    lv_color_hex(on ? COL_ACCENT : COL_MUTED),
-                                    0);
-    }
+    player_album_t album;
+    if(!player_album_get(albums_selected, &album)) return;
+    player_play_album_shuffled(album.id);
 }
 
 static void albums_play_async(void * arg)
@@ -3828,11 +3872,20 @@ static void albums_shuffle_touch_cb(lv_event_t * event)
     ui_call_async(albums_shuffle_async, NULL);
 }
 
+static void albums_enter(void)
+{
+    albums_detail_open = false;
+}
+
 static bool albums_back(void)
 {
     if(albums_detail_open) {
         albums_detail_open = false;
         albums_rebuild();
+        return true;
+    }
+    if(albums_selected > -1) {
+        albums_select(-1);
         return true;
     }
     return false;
@@ -3845,8 +3898,10 @@ static void albums_same_key(void)
         albums_rebuild();
         return;
     }
-    albums_left_scroll_y = 0;
-    if(albums_left_list) lv_obj_scroll_to_y(albums_left_list, 0, LV_ANIM_OFF);
+    albums_left_scroll_y = albums_row_top(0);
+    if(albums_left_list) {
+        lv_obj_scroll_to_y(albums_left_list, albums_left_scroll_y, LV_ANIM_OFF);
+    }
     albums_select(0);
 }
 
@@ -4018,6 +4073,7 @@ static void albums_create(lv_obj_t * parent)
 {
     albums_right_content = NULL;
     albums_left_list = NULL;
+    albums_shuffle_row = NULL;
     albums_counter.group = NULL;
     albums_first_index = -1;
     for(int i = 0; i < ALBUMS_POOL; i++) {
@@ -4079,7 +4135,8 @@ static void albums_create(lv_obj_t * parent)
     int count = player_album_count();
     if(albums_selected >= count) albums_selected = 0;
 
-    int content_h = count > 0 ? count * ALBUMS_STRIDE : ALBUMS_ROW_H;
+    int content_h = count > 0 ? (count + ALBUMS_LEAD) * ALBUMS_STRIDE
+                              : ALBUMS_ROW_H;
     lv_obj_t * spacer = lv_obj_create(list);
     lv_obj_set_size(spacer, LV_PCT(100), content_h);
     lv_obj_set_pos(spacer, 0, 0);
@@ -4088,6 +4145,17 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(spacer, 0, 0);
     lv_obj_set_scrollable(spacer, false);
     lv_obj_set_clickable(spacer, false);
+
+    albums_shuffle_row = make_row(list, ALBUMS_ROW_H);
+    lv_obj_set_pos(albums_shuffle_row, 0, 0);
+    lv_obj_set_width(albums_shuffle_row, LV_PCT(100));
+    lv_obj_set_clickable(albums_shuffle_row, true);
+    lv_obj_set_gesture_bubble(albums_shuffle_row, false);
+    enable_event_bubble(albums_shuffle_row);
+    lv_obj_add_event_cb(albums_shuffle_row, albums_shuffle_all_touch_cb,
+                        LV_EVENT_CLICKED, NULL);
+    make_label(albums_shuffle_row, "Shuffle All", FONT_H2, COL_TEXT);
+    albums_apply_shuffle_row_style();
 
     for(int i = 0; i < ALBUMS_POOL; i++) {
         lv_obj_t * row = make_row(list, ALBUMS_ROW_H);
@@ -4135,6 +4203,9 @@ static void albums_create(lv_obj_t * parent)
     albums_render_detail(albums_right_content, albums_detail_open);
 
     lv_obj_update_layout(list);
+    if(albums_left_scroll_y < albums_row_top(0)) {
+        albums_left_scroll_y = albums_row_top(0);
+    }
     lv_obj_scroll_to_y(list, albums_left_scroll_y, LV_ANIM_OFF);
     albums_refresh_rows();
 
@@ -4435,9 +4506,11 @@ static void artists_track_action(void * user)
 {
     int track_index = (int)(intptr_t)user;
     player_track_t track;
+    player_artist_t artist;
     if(track_index >= 0 && track_index < player_song_count() &&
-       player_song_get(track_index, &track)) {
-        player_play_track(track.id);
+       player_song_get(track_index, &track) &&
+       player_artist_get(artists_selected, &artist)) {
+        player_play_artist_from(artist.id, track.id);
     }
 }
 
@@ -4453,15 +4526,9 @@ static void artists_play_all_action(void * user)
 static void artists_shuffle_action(void * user)
 {
     LV_UNUSED(user);
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
-    bool on = !snapshot.shuffle;
-    player_set_shuffle(on);
-    if(artists_shuffle_icon != NULL) {
-        lv_obj_set_style_text_color(artists_shuffle_icon,
-                                    lv_color_hex(on ? COL_ACCENT : COL_MUTED),
-                                    0);
-    }
+    player_artist_t artist;
+    if(!player_artist_get(artists_selected, &artist)) return;
+    player_play_artist_shuffled(artist.id);
 }
 
 static void artists_open_async(void * arg)
@@ -4521,11 +4588,20 @@ static void artists_shuffle_touch_cb(lv_event_t * event)
     ui_call_async(artists_shuffle_async, NULL);
 }
 
+static void artists_enter(void)
+{
+    artists_detail_open = false;
+}
+
 static bool artists_back(void)
 {
     if(artists_detail_open) {
         artists_detail_open = false;
         artists_rebuild();
+        return true;
+    }
+    if(artists_selected > 0) {
+        artists_select(0);
         return true;
     }
     return false;
@@ -5513,7 +5589,7 @@ static void songs_activate(void)
     if(player_song_count() <= 0) return;
     player_track_t track;
     if(player_song_get(songs_selected, &track)) {
-        player_play_track(track.id);
+        player_play_song(track.id);
     }
     songs_refresh_rows();
 }
@@ -5567,6 +5643,10 @@ static void songs_tick(void)
 
 static bool songs_back(void)
 {
+    if(songs_selected > 0) {
+        songs_select(0);
+        return true;
+    }
     return false;
 }
 
@@ -5777,7 +5857,7 @@ static void playlists_track_action(void * user)
     int index = (int)(intptr_t)user;
     player_track_t track;
     if(player_playlist_track_get(playlists_selected, index, &track)) {
-        player_play_track(track.id);
+        player_play_playlist_from(playlists_selected, index);
     }
 }
 
@@ -5816,10 +5896,21 @@ static void playlists_track_touch_cb(lv_event_t * event)
     ui_call_async(playlists_track_async, lv_event_get_user_data(event));
 }
 
+static void playlists_enter(void)
+{
+    playlists_detail_open = false;
+}
+
 static bool playlists_back(void)
 {
     if(playlists_detail_open) {
         playlists_detail_open = false;
+        playlists_rebuild();
+        return true;
+    }
+    if(playlists_selected > 0) {
+        playlists_selected = 0;
+        playlists_left_scroll_y = 0;
         playlists_rebuild();
         return true;
     }
@@ -5842,10 +5933,7 @@ static void playlists_same_key(void)
 static void playlists_shuffle_action(void * user)
 {
     LV_UNUSED(user);
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
-    player_set_shuffle(!snapshot.shuffle);
-    if(playlists_right_content) playlists_schedule_detail();
+    player_play_playlist_shuffled(playlists_selected);
 }
 
 static void playlists_shuffle_async(void * arg)
@@ -6470,7 +6558,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
 static void settings_rebuild(void);
 
 static const char * const settings_names[SETTING_COUNT] = {
-    "Apple File Conduit & IAP2",
+    "iOS Device",
     "Bluetooth",
     "Theme",
     "Now Playing Background",
@@ -7539,6 +7627,19 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
 
     switch(index) {
         case SETTING_AFC_IAP2: {
+            player_snapshot_t snap;
+            player_get_snapshot(&snap);
+            char battery[48];
+            if(snap.battery >= 0) {
+                snprintf(battery, sizeof(battery), "%s  %d%%",
+                         snap.charging ? "CHG" : "NOT CHG", snap.battery);
+            }
+            else {
+                snprintf(battery, sizeof(battery), "%s  --%%",
+                         snap.charging ? "CHG" : "NOT CHG");
+            }
+            settings_make_info_row(parent, "Battery", battery,
+                                   FONT_H2, FONT_H2, SETTINGS_ROW_H);
             ui_afc_status_t st;
             settings_afc_read_status(&st);
             if(st.afc_mode) {
@@ -7882,6 +7983,13 @@ static void settings_open(void * user)
     }
 }
 
+static void settings_enter(void)
+{
+    settings_detail_open = false;
+    settings_time_open = false;
+    settings_time_editing = false;
+}
+
 static bool settings_back(void)
 {
     if(settings_selected == SETTING_BLUETOOTH && settings_detail_open) {
@@ -7902,6 +8010,12 @@ static bool settings_back(void)
     if(settings_detail_open) {
         settings_detail_open = false;
         settings_rebuild();
+        return true;
+    }
+    if(settings_selected > 0) {
+        settings_selected = 0;
+        settings_update_count();
+        if(settings_right_content) settings_schedule_detail();
         return true;
     }
     return false;
@@ -8058,6 +8172,7 @@ static const page_t g_pages[SCR_COUNT] = {
         .create = albums_create,
         .tick = NULL,
         .back = albums_back,
+        .enter = albums_enter,
         .same_key = albums_same_key,
         .key = albums_key,
     },
@@ -8065,6 +8180,7 @@ static const page_t g_pages[SCR_COUNT] = {
         .create = artists_create,
         .tick = NULL,
         .back = artists_back,
+        .enter = artists_enter,
         .same_key = artists_same_key,
         .key = artists_key,
     },
@@ -8079,6 +8195,7 @@ static const page_t g_pages[SCR_COUNT] = {
         .create = playlists_create,
         .tick = NULL,
         .back = playlists_back,
+        .enter = playlists_enter,
         .same_key = playlists_same_key,
     },
     [SCR_BLUETOOTH] = {
@@ -8092,6 +8209,7 @@ static const page_t g_pages[SCR_COUNT] = {
         .create = settings_create,
         .tick = settings_tick,
         .back = settings_back,
+        .enter = settings_enter,
         .same_key = settings_same_key,
         .key = settings_key,
     },

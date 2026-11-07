@@ -37,6 +37,7 @@ This repository contains:
 - Knob + key navigation with a custom focus engine; touch works as an optional pointer and can be disabled in Settings.
 - Now Playing includes artwork, title/artist/album, elapsed time, shuffle/repeat/star, transport controls, an Up Next panel and three background modes: Theme, Blurred cover, Cover gradient.
 - Long-press Enter opens a context menu with Go to album/artist, Star/Unstar, Shuffle and Repeat.
+- Playing from a list queues what follows it: an album track plays through the end of its album, an artist or Songs track wraps around the list, and Shuffle on Albums, Artists and Playlists plays that list in random order, and Albums has a Shuffle All row above the first album. See `docs/design.md` §5.2.1.
 - Albums, Artists, Playlists and Settings use a master/detail layout; Songs uses a virtualized list.
 - A 72 px mini Now Playing bar appears on every screen except Now Playing.
 - Album sort order can be add date, name or year, ascending or descending; albums without an AFC add date fall back to the order in which iAP2 first reported them.
@@ -383,7 +384,7 @@ Real Tab5 hardware:
 ## Known limitations
 
 - **iAP2 and AFC are mutually exclusive.** Switching modes requires a reboot.
-- **The iAP2 queue is not parsed yet.** Up Next currently reports `1/1`; normal playback control works.
+- **The iAP2 queue is not parsed yet.** On the device, Up Next shows the accessory-side list rather than the iPod's queue. Playback actions send the ordered list (albums, artists, playlists) or `PlayMediaLibrarySpecial` (songs) to the iPod, and normal playback control works.
 - **The iAP2 media-library subscription is disabled by default.** The device's large delete-phase bursts are not yet reliable over the current link layer; use the AFC import path. The experimental path is enabled with `-DIAP2TAB5_FULL_LIBRARY_SYNC`.
 - **Star ratings are local.** They are persisted in `stars.csv` but not written back to the iPod.
 - **Some artwork falls back to a color placeholder.** TJPGD handles baseline JPEG; progressive or otherwise unsupported images may not decode.
