@@ -3166,24 +3166,6 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     np_vertical_gap(left, 32);
 }
 
-/* Prefer the user-supplied /sdcard/plug-in.png (decoded by LVGL at runtime);
- * fall back to the copy compiled into the firmware. */
-static const void * plug_in_source(void)
-{
-    static const char * const paths[] = { "/sdcard/plug-in.png",
-                                          "/sdcard/plugin.png",
-                                          "plug-in.png", "plugin.png" };
-    static char src[64];
-    for(size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        FILE * f = fopen(paths[i], "rb");
-        if(f == NULL) continue;
-        fclose(f);
-        snprintf(src, sizeof(src), "A:%s", paths[i]);
-        return src;
-    }
-    return &plug_in_dsc;
-}
-
 static void np_placeholder(lv_obj_t * parent)
 {
     bool sd = !g_dev_sd_ready || ui_sd_needs_reboot();
@@ -3220,7 +3202,7 @@ static void np_placeholder(lv_obj_t * parent)
     }
     else {
         lv_obj_t * img = lv_image_create(box);
-        lv_image_set_src(img, plug_in_source());
+        lv_image_set_src(img, &plug_in_dsc);
         lv_obj_align(img, LV_ALIGN_BOTTOM_MID, 0, -24);
     }
 }

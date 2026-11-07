@@ -466,7 +466,7 @@ Queue 显示时的左栏：
 - **iAP2 模式且没有检测到 iPod**（未识别）：
   - menubar 中除 Now Playing 与 Settings 外的图标显示为暗灰（`#686868`）；
   - Now Playing 菜单图标换成 `bi phone`；
-  - Now Playing 页面只显示插头图片，在内容区水平居中、贴底对齐（下边距 24 px），不显示播放器 UI。优先使用 `/sdcard/plug-in.png`（或 `/sdcard/plugin.png`，运行时由 LVGL 解码，可直接替换），文件不存在时用编译进固件的图（`assets/ui/plug-in.png`，52×343，由 `tools/gen_plug_art.py` 转成 LVGL 资产）。
+  - Now Playing 页面只显示插头图片，在内容区水平居中、贴底对齐（下边距 24 px），不显示播放器 UI。图片只有一份：`assets/ui/plug-in.png`（52×343），由 `tools/gen_plug_art.py` 转成 LVGL 资产并编译进固件；不从 SD 卡读取任何覆盖文件。
 - **SD 卡缺失或挂载失败**：
   - 同样的菜单项置灰；
   - Now Playing 菜单图标换成 `bi sd-card`；
