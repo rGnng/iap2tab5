@@ -13,6 +13,7 @@ typedef struct {
     uint32_t renders, render_last_us, render_max_us;
     uint32_t internal_free, internal_largest;
     lvgl_port_display_stats_t display;
+    uint32_t pwm_period;
 } display_diag_sample_t;
 
 /* Register on the LVGL thread, after display/backlight initialization. */

@@ -100,7 +100,7 @@ function render(s,c,p) {
   $('screen_state').textContent=s.screen_on===undefined ? '—' : s.screen_on ? 'On' : 'Off';
   var d=s.display || {};
   $('display_rows').innerHTML=d.available ?
-    T.row('Backlight PWM',d.pwm_duty+' / 1023 · '+d.pwm_hz+' Hz')+
+    T.row('Backlight PWM',d.pwm_duty+' / '+(d.pwm_period || 1024)+' · '+d.pwm_hz+' Hz')+
     T.row('Sampled PWM changes',d.pwm_duty_changes+' duty · '+d.pwm_freq_changes+' frequency')+
     T.row('VSYNC callbacks',d.vsync_gap_us ? (1000000/d.vsync_gap_us).toFixed(1)+' Hz' : 'Waiting')+
     T.row('VSYNC max gap',(d.vsync_max_gap_us/1000).toFixed(2)+' ms')+

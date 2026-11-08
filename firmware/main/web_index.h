@@ -782,7 +782,7 @@ static const char WEB_DEBUG_JS[] =
 "  $('screen_state').textContent=s.screen_on===undefined ? '—' : s.screen_on ? 'On' : 'Off';\n"
 "  var d=s.display || {};\n"
 "  $('display_rows').innerHTML=d.available ?\n"
-"    T.row('Backlight PWM',d.pwm_duty+' / 1023 · '+d.pwm_hz+' Hz')+\n"
+"    T.row('Backlight PWM',d.pwm_duty+' / '+(d.pwm_period || 1024)+' · '+d.pwm_hz+' Hz')+\n"
 "    T.row('Sampled PWM changes',d.pwm_duty_changes+' duty · '+d.pwm_freq_changes+' frequency')+\n"
 "    T.row('VSYNC callbacks',d.vsync_gap_us ? (1000000/d.vsync_gap_us).toFixed(1)+' Hz' : 'Waiting')+\n"
 "    T.row('VSYNC max gap',(d.vsync_max_gap_us/1000).toFixed(2)+' ms')+\n"

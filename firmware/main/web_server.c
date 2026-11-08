@@ -828,6 +828,7 @@ static void display_diag_json(cJSON *root)
     cJSON_AddNumberToObject(root, "requested_brightness", g_app_config.brightness);
 #define DIAG_FIELD(name) cJSON_AddNumberToObject(root, #name, sample.name)
     DIAG_FIELD(seq); DIAG_FIELD(uptime_ms); DIAG_FIELD(pwm_duty); DIAG_FIELD(pwm_hz);
+    DIAG_FIELD(pwm_period);
     DIAG_FIELD(pwm_duty_changes); DIAG_FIELD(pwm_freq_changes);
     DIAG_FIELD(renders); DIAG_FIELD(render_last_us); DIAG_FIELD(render_max_us);
     DIAG_FIELD(internal_free); DIAG_FIELD(internal_largest);
@@ -870,7 +871,7 @@ static int display_sample_csv(char *out, size_t cap, const display_diag_sample_t
 {
     const lvgl_port_display_stats_t *d = &s->display;
     return snprintf(out, cap,
-        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
         (unsigned long)s->seq, (unsigned long)s->uptime_ms, (unsigned long)s->pwm_duty,
         (unsigned long)s->pwm_hz, (unsigned long)s->pwm_duty_changes, (unsigned long)s->pwm_freq_changes,
         (unsigned long)d->vsync_count, (unsigned long)d->vsync_gap_us, (unsigned long)d->vsync_max_gap_us,
@@ -878,7 +879,8 @@ static int display_sample_csv(char *out, size_t cap, const display_diag_sample_t
         (unsigned long)d->copy_last_us, (unsigned long)d->copy_max_us, (unsigned long)d->dma_wait_timeouts,
         (unsigned long)d->draw_errors, (unsigned long)d->rotation_errors,
         (unsigned long)s->renders, (unsigned long)s->render_last_us, (unsigned long)s->render_max_us,
-        (unsigned long)s->internal_free, (unsigned long)s->internal_largest);
+        (unsigned long)s->internal_free, (unsigned long)s->internal_largest,
+        (unsigned long)s->pwm_period);
 }
 
 static esp_err_t display_trace_get(httpd_req_t *req)
@@ -904,7 +906,7 @@ static esp_err_t display_trace_get(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, "text/csv; charset=utf-8");
     esp_err_t err = httpd_resp_send_chunk(req,
-        "seq,uptime_ms,pwm_duty,pwm_hz,pwm_duty_changes,pwm_freq_changes,vsync_count,vsync_gap_us,vsync_max_gap_us,vsync_gaps_over_25ms,copy_submitted,copy_completed,copy_last_us,copy_max_us,dma_wait_timeouts,draw_errors,rotation_errors,renders,render_last_us,render_max_us,internal_free,internal_largest\n",
+        "seq,uptime_ms,pwm_duty,pwm_hz,pwm_duty_changes,pwm_freq_changes,vsync_count,vsync_gap_us,vsync_max_gap_us,vsync_gaps_over_25ms,copy_submitted,copy_completed,copy_last_us,copy_max_us,dma_wait_timeouts,draw_errors,rotation_errors,renders,render_last_us,render_max_us,internal_free,internal_largest,pwm_period\n",
         HTTPD_RESP_USE_STRLEN);
     size_t used = 0;
     for(size_t i = 0; err == ESP_OK && i < count; i++) {

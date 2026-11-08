@@ -127,13 +127,13 @@ class WebUITests(unittest.TestCase):
         self.assertFalse(self.errors)
 
     def test_display_recorder_and_marker_download(self):
-        self.status['display'] = dict(available=True, pwm_duty=409, pwm_hz=5000,
+        self.status['display'] = dict(available=True, pwm_duty=205, pwm_period=512, pwm_hz=44052,
             pwm_duty_changes=0, pwm_freq_changes=0, vsync_gap_us=17461,
             vsync_max_gap_us=17470, vsync_gaps_over_25ms=0, render_last_us=100,
             render_max_us=1200, dma_wait_timeouts=0, draw_errors=0,
             rotation_errors=0, internal_free=80000, internal_largest=32000, marker=0)
         self.open('/debug')
-        self.assertIn('409 / 1023 · 5000 Hz', self.page.locator('#display_rows').inner_text())
+        self.assertIn('205 / 512 · 44052 Hz', self.page.locator('#display_rows').inner_text())
         with self.page.expect_download() as download:
             self.page.locator('#mark_flicker').click()
         self.assertEqual(download.value.suggested_filename, 'tab5-display.csv')

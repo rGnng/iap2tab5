@@ -1,4 +1,5 @@
 #include "display_diag.h"
+#include "backlight.h"
 #include "driver/ledc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -41,6 +42,7 @@ static void sampler(void *arg)
         sample.uptime_ms = (uint32_t)(esp_timer_get_time() / 1000);
         sample.pwm_duty = ledc_get_duty(LEDC_LOW_SPEED_MODE, CONFIG_BSP_DISPLAY_BRIGHTNESS_LEDC_CH);
         sample.pwm_hz = ledc_get_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0);
+        sample.pwm_period = backlight_pwm_period();
         if(ticks) {
             if(sample.pwm_duty != previous_duty || sample.pwm_hz != previous_hz)
                 ESP_LOGI("display_diag", "PWM changed: duty %u -> %u, frequency %u -> %u Hz",

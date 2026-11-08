@@ -261,6 +261,16 @@ The INA226 measures the battery connector, so its voltage is not a USB power
 measurement when the battery has been removed. `lcd_enabled` in `/api/power`
 reads the LCD enable pin separately.
 
+Backlight control uses a fixed crystal clock and nominal 44.1 kHz, 9-bit PWM,
+following [M5GFX's Tab5 configuration](https://github.com/m5stack/M5GFX/blob/master/extras/board_spec/boards/m5stack_tab5.json)
+and [PWM implementation](https://github.com/m5stack/M5GFX/blob/master/src/lgfx/v1/platforms/esp32/Light_PWM.inl).
+The actual frequency is quantized by the LEDC divider and appears in diagnostics.
+Duty uses a complete 512-count period: 0% is constant low, 100% constant high.
+Startup goes directly to the saved brightness; Screen Off and wake use the
+same controller. If initialization fails, it restores the BSP timer/channel
+configuration and reports the fallback in the log. CSV traces append a
+`pwm_period` column; use this value to interpret duty counts.
+
 Example OTA upload:
 
 ```bash

@@ -97,7 +97,7 @@ uint32_t copies(void) { return ctx.stats.copy_completed; }
 uint32_t copy_time(void) { return ctx.stats.copy_max_us; }
 uint32_t errors(void) { return ctx.stats.draw_errors; }
 void append(uint32_t t) {
-    display_diag_sample_t s={.seq=s_next++,.uptime_ms=t,.pwm_duty=409,.pwm_hz=5000,.display=ctx.stats};
+    display_diag_sample_t s={.seq=s_next++,.uptime_ms=t,.pwm_duty=409,.pwm_hz=5000,.pwm_period=1024,.display=ctx.stats};
     storage[s.seq%DISPLAY_DIAG_CAPACITY]=s;if(s_count<DISPLAY_DIAG_CAPACITY)s_count++;
 }
 static display_diag_sample_t page[DISPLAY_DIAG_CAPACITY];
@@ -172,8 +172,9 @@ char *csv_line(void) { static char b[512];display_sample_csv(b,sizeof(b),&storag
     def test_csv_has_expected_columns_and_values(self):
         self.lib.append(1234)
         row = next(csv.reader([self.lib.csv_line().decode()]))
-        self.assertEqual(len(row), 22)
+        self.assertEqual(len(row), 23)
         self.assertEqual(row[:4], ['1','1234','409','5000'])
+        self.assertEqual(row[-1], '1024')
 
 
 if __name__ == '__main__':

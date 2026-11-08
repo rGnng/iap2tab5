@@ -4,6 +4,7 @@ idf_component_register(
     SRCS
         "main.c"
         "app_config.c"
+        "backlight.c"
         "charge.c"
         "debug_log.c"
         "display_diag.c"
@@ -46,6 +47,7 @@ idf_component_register(
         esp_http_server
         esp_http_client
         esp_driver_jpeg
+        esp_driver_ledc
         app_update
         esp_wifi
         esp_netif

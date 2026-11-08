@@ -6,6 +6,7 @@
  */
 
 #include "app_config.h"
+#include "backlight.h"
 #include "ble_remote.h"
 #include "charge.h"
 #include "debug_log.h"
@@ -416,7 +417,7 @@ static void apply_runtime_config(void)
     }
     if((int)g_app_config.brightness != s_applied_brightness &&
        g_app_config.brightness <= 100) {
-        bsp_display_brightness_set(ui_screen_is_on() ? g_app_config.brightness : 0);
+        backlight_set(ui_screen_is_on() ? g_app_config.brightness : 0);
         s_applied_brightness = g_app_config.brightness;
     }
     publish_system_config();
@@ -458,7 +459,7 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     s_save_pending = true;
     if(cfg->brightness != s_applied_brightness &&
        cfg->brightness >= 0 && cfg->brightness <= 100) {
-        bsp_display_brightness_set(ui_screen_is_on() ? cfg->brightness : 0);
+        backlight_set(ui_screen_is_on() ? cfg->brightness : 0);
         s_applied_brightness = cfg->brightness;
     }
     apply_runtime_config();
@@ -471,7 +472,7 @@ static void ui_feedback_handler(int type)
 
 static void ui_screen_power_handler(bool on)
 {
-    bsp_display_brightness_set(on ? g_app_config.brightness : 0);
+    backlight_set(on ? g_app_config.brightness : 0);
     ESP_LOGI(TAG, "Screen %s", on ? "on" : "off");
 }
 
@@ -775,8 +776,7 @@ void app_main(void)
     lv_refr_now(display);
     bsp_display_unlock();
 
-    bsp_display_backlight_on();
-    bsp_display_brightness_set(g_app_config.brightness);
+    ESP_ERROR_CHECK(backlight_init(g_app_config.brightness));
     bsp_display_lock(0);
     display_diag_init(display);
     bsp_display_unlock();
