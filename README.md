@@ -11,6 +11,20 @@ card; a host-side Python tool converts the database into the library used by
 the UI. The simulator uses a bundled mock library and needs no Apple device or
 MFi identity.
 
+## UI overview
+
+These contact sheets use the simulator's mock library and device data. Each
+shows Now Playing, Up Next, Albums, Artists, Songs, Playlists, Settings, and
+Library Sync. Click a sheet to view the screens at full resolution.
+
+**Gray (default)**
+
+[![Gray theme contact sheet showing eight iAP2 Tab5 views](docs/previews/ui-gray.png)](docs/previews/ui-gray.png)
+
+**Aqua**
+
+[![Aqua theme contact sheet showing eight iAP2 Tab5 views](docs/previews/ui-aqua.png)](docs/previews/ui-aqua.png)
+
 ## What it does
 
 - Browse **Now Playing, Albums, Artists, Songs, Playlists, and Settings** with
@@ -84,6 +98,14 @@ mkdir -p build/screenshots
 On Linux, screenshot mode automatically uses the offscreen driver when neither
 `DISPLAY` nor `WAYLAND_DISPLAY` is set. Explicit screen, menubar, or key options
 skip the normal boot animation; `--boot-freeze` can still select a boot frame.
+
+To regenerate the README contact sheets after changing the UI:
+
+```bash
+python3 -m venv build/contact-sheet-env
+build/contact-sheet-env/bin/pip install cairosvg
+build/contact-sheet-env/bin/python tools/gen_ui_contact_sheets.py --sim build/tab5_sim
+```
 
 ## Controls
 
