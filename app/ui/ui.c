@@ -7,11 +7,13 @@
 #include "player.h"
 #include "screen_idle.h"
 #include "screen_brightness.h"
+#include "cover_gradient.h"
 #include "ble_remote.h"
 #include "thumb_cache_format.h"
 
 #include "lvgl.h"
 #include "src/widgets/label/lv_label_private.h"
+#include "src/misc/cache/instance/lv_image_cache.h"
 
 /* TinyTTF is enabled in lv_conf.h. Some ESP-IDF component builds do not
  * propagate the public declaration through lvgl.h, so declare it here. */
@@ -44,8 +46,8 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
 #define UI_PERF_LOG(...) fprintf(stderr, __VA_ARGS__)
 #endif
 
-/* PPA reads image sources with DMA and requires cache-line aligned buffers.
- * Keep all cached RGB565 artwork 64-byte aligned and in PSRAM. */
+/* Keep UI artwork aligned and in PSRAM. The gradient worker separately
+ * queries the PPA driver's cache-line requirement for its DMA outputs. */
 static void * ui_alloc_aligned(size_t size)
 {
     size_t rounded = (size + 63u) & ~(size_t)63u;
@@ -3016,6 +3018,8 @@ static int np_last_queue_count = -1;
 static uint32_t np_last_queue_rev;
 static player_snapshot_t np_rendered_snapshot;
 static bool np_rendered_valid;
+static lv_obj_t * np_gradient_backdrop, * np_gradient_scrim;
+static void np_gradient_source(const void * source);
 
 typedef enum {
     NP_BG_THEME = 0,
@@ -3190,6 +3194,7 @@ static void np_refresh_snapshot(const player_snapshot_t * snapshot)
                 lv_color_hex(src ? COL_PANEL : COL_PANEL_ALT), 0);
             lv_obj_set_style_bg_opa(np_cover_widget,
                                     src ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+            np_gradient_source(src);
         }
     }
 
@@ -3360,258 +3365,119 @@ static bool find_album(uint64_t album_id, player_album_t * out)
     return false;
 }
 
-#define NP_SAMPLE_SIZE       32
-#define NP_PALETTE_COLORS     5
-#define NP_MESH_W           1280
-#define NP_MESH_H           720
-
-typedef struct {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-    uint8_t luma;
-} np_sample_t;
-
-typedef struct {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-} np_rgb_t;
-
-static np_sample_t np_samples[NP_SAMPLE_SIZE * NP_SAMPLE_SIZE];
-static np_rgb_t np_palette[NP_PALETTE_COLORS];
-
+/* Gradient work owns no LVGL objects. Only this UI-thread handoff publishes
+ * a finished image, and stale artwork can never replace the current result. */
 static lv_image_dsc_t g_np_mesh_dsc;
-static uint8_t * g_np_mesh_buf;
-static char g_np_mesh_cover[192];
+static lv_timer_t * np_gradient_timer;
+static uint64_t np_gradient_key, np_gradient_shown_key;
 
-static int np_sample_cmp(const void * a, const void * b)
+static void np_gradient_visibility(bool visible)
 {
-    const np_sample_t * sa = a;
-    const np_sample_t * sb = b;
-    return (int)sa->luma - (int)sb->luma;
+    if(np_gradient_backdrop) lv_obj_set_hidden(np_gradient_backdrop, !visible);
+    if(np_gradient_scrim) lv_obj_set_hidden(np_gradient_scrim, !visible);
 }
 
-static bool np_extract_palette(const char * cover_path)
+static void np_gradient_poll_cb(lv_timer_t * timer)
+{
+    LV_UNUSED(timer);
+    if(g_current_screen != SCR_NOW_PLAYING || !np_gradient_backdrop ||
+       !np_gradient_key || g_np_bg_mode != NP_BG_COVER_GRADIENT) {
+        if(np_gradient_timer) lv_timer_pause(np_gradient_timer);
+        return;
+    }
+    const uint16_t * pixels = NULL;
+    cover_gradient_state_t state = cover_gradient_poll(np_gradient_key, &pixels);
+    if(state == COVER_GRADIENT_PENDING) return;
+    if(np_gradient_timer) lv_timer_pause(np_gradient_timer);
+    if(state != COVER_GRADIENT_READY) { np_gradient_visibility(false); return; }
+    if(np_gradient_shown_key != np_gradient_key) {
+        lv_image_cache_drop(&g_np_mesh_dsc);
+        g_np_mesh_dsc = (lv_image_dsc_t){
+            .header = {.magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RGB565,
+                .w = COVER_GRADIENT_WIDTH, .h = COVER_GRADIENT_HEIGHT,
+                .stride = COVER_GRADIENT_WIDTH * 2},
+            .data_size = (size_t)COVER_GRADIENT_WIDTH * COVER_GRADIENT_HEIGHT * 2,
+            .data = (const uint8_t *)pixels,
+        };
+        lv_image_set_src(np_gradient_backdrop, &g_np_mesh_dsc);
+        np_gradient_shown_key = np_gradient_key;
+    }
+    np_gradient_visibility(true);
+}
+
+static uint64_t np_gradient_request_source(const void * source)
 {
     lv_image_header_t header;
-    if(lv_image_decoder_get_info(cover_path, &header) != LV_RESULT_OK) return false;
+    if(lv_image_decoder_get_info(source, &header) != LV_RESULT_OK || !header.w || !header.h) return 0;
+    if(lv_image_src_get_type(source) == LV_IMAGE_SRC_VARIABLE) {
+        const lv_image_dsc_t * image = source;
+        if(header.cf == LV_COLOR_FORMAT_RGB565 || header.cf == LV_COLOR_FORMAT_ARGB8888) {
+            size_t stride = header.stride ? header.stride : header.w * (header.cf == LV_COLOR_FORMAT_RGB565 ? 2 : 4);
+            return cover_gradient_request(image->data, image->data_size,
+                header.w, header.h, stride, header.cf == LV_COLOR_FORMAT_RGB565
+                    ? COVER_GRADIENT_RGB565 : COVER_GRADIENT_ARGB8888);
+        }
+    }
 
-    uint32_t buf_size = lv_canvas_buf_size(NP_SAMPLE_SIZE, NP_SAMPLE_SIZE,
-                                           32, LV_DRAW_BUF_STRIDE_ALIGN);
-    uint8_t * sample_buf = lv_malloc(buf_size);
-    if(sample_buf == NULL) return false;
-
+    /* File/demo images go through LVGL once to obtain the same small sample.
+     * Live iPod RGB565 artwork above never decodes or resizes on the UI thread. */
+    uint32_t bytes = lv_canvas_buf_size(COVER_GRADIENT_SAMPLE_SIDE,
+        COVER_GRADIENT_SAMPLE_SIDE, 32, LV_DRAW_BUF_STRIDE_ALIGN);
+    uint8_t * buffer = ui_alloc_aligned(bytes);
+    if(!buffer) return 0;
     lv_obj_t * canvas = lv_canvas_create(lv_screen_active());
-    lv_obj_set_size(canvas, NP_SAMPLE_SIZE, NP_SAMPLE_SIZE);
+    lv_obj_set_size(canvas, COVER_GRADIENT_SAMPLE_SIDE, COVER_GRADIENT_SAMPLE_SIDE);
     lv_obj_set_hidden(canvas, true);
-    lv_canvas_set_buffer(canvas, sample_buf, NP_SAMPLE_SIZE, NP_SAMPLE_SIZE,
-                         LV_COLOR_FORMAT_ARGB8888);
+    lv_canvas_set_buffer(canvas, buffer, COVER_GRADIENT_SAMPLE_SIDE,
+                         COVER_GRADIENT_SAMPLE_SIDE, LV_COLOR_FORMAT_ARGB8888);
     lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
-
     lv_layer_t layer;
     lv_canvas_init_layer(canvas, &layer);
-    lv_draw_image_dsc_t draw_dsc;
-    lv_draw_image_dsc_init(&draw_dsc);
-    draw_dsc.base.layer = &layer;
-    draw_dsc.src = cover_path;
-    draw_dsc.scale_x = (NP_SAMPLE_SIZE * LV_SCALE_NONE) / header.w;
-    draw_dsc.scale_y = (NP_SAMPLE_SIZE * LV_SCALE_NONE) / header.h;
-    draw_dsc.pivot.x = 0;
-    draw_dsc.pivot.y = 0;
-    draw_dsc.antialias = 1;
-    lv_area_t image_area = {0, 0, header.w - 1, header.h - 1};
-    lv_draw_image(&layer, &draw_dsc, &image_area);
+    lv_draw_image_dsc_t draw;
+    lv_draw_image_dsc_init(&draw);
+    draw.base.layer = &layer;
+    draw.src = source;
+    draw.scale_x = COVER_GRADIENT_SAMPLE_SIDE * LV_SCALE_NONE / header.w;
+    draw.scale_y = COVER_GRADIENT_SAMPLE_SIDE * LV_SCALE_NONE / header.h;
+    draw.pivot.x = draw.pivot.y = 0;
+    draw.antialias = 1;
+    lv_area_t area = {0, 0, header.w - 1, header.h - 1};
+    lv_draw_image(&layer, &draw, &area);
     lv_canvas_finish_layer(canvas, &layer);
-
-    const lv_image_dsc_t * canvas_img = lv_canvas_get_image(canvas);
-    const uint8_t * pixels = canvas_img->data;
-    uint32_t stride = canvas_img->header.stride;
-
-    int count = 0;
-    for(int y = 0; y < NP_SAMPLE_SIZE; y++) {
-        const lv_color32_t * row = (const lv_color32_t *)(pixels + y * stride);
-        for(int x = 0; x < NP_SAMPLE_SIZE; x++) {
-            lv_color32_t c = row[x];
-            if(c.alpha < 200) continue;
-            uint8_t luma = (uint8_t)((77 * c.red + 150 * c.green + 29 * c.blue) >> 8);
-            if(luma < 20 || luma > 235) continue;
-            np_samples[count].r = c.red;
-            np_samples[count].g = c.green;
-            np_samples[count].b = c.blue;
-            np_samples[count].luma = luma;
-            count++;
-        }
-    }
-
+    const lv_image_dsc_t * image = lv_canvas_get_image(canvas);
+    uint64_t key = cover_gradient_request(image->data, image->data_size,
+        image->header.w, image->header.h, image->header.stride, COVER_GRADIENT_ARGB8888);
     lv_obj_delete(canvas);
-    lv_free(sample_buf);
-
-    if(count < NP_PALETTE_COLORS * 3) return false;
-
-    qsort(np_samples, count, sizeof(np_sample_t), np_sample_cmp);
-
-    int centers[NP_PALETTE_COLORS][3];
-    for(int k = 0; k < NP_PALETTE_COLORS; k++) {
-        int index = (count - 1) * k / (NP_PALETTE_COLORS - 1);
-        centers[k][0] = np_samples[index].r;
-        centers[k][1] = np_samples[index].g;
-        centers[k][2] = np_samples[index].b;
-    }
-
-    for(int iteration = 0; iteration < 10; iteration++) {
-        uint32_t sum_r[NP_PALETTE_COLORS] = {0};
-        uint32_t sum_g[NP_PALETTE_COLORS] = {0};
-        uint32_t sum_b[NP_PALETTE_COLORS] = {0};
-        uint32_t used[NP_PALETTE_COLORS] = {0};
-
-        for(int i = 0; i < count; i++) {
-            int best = 0;
-            int32_t best_dist = INT32_MAX;
-            for(int k = 0; k < NP_PALETTE_COLORS; k++) {
-                int dr = (int)np_samples[i].r - centers[k][0];
-                int dg = (int)np_samples[i].g - centers[k][1];
-                int db = (int)np_samples[i].b - centers[k][2];
-                int32_t dist = dr * dr + dg * dg + db * db;
-                if(dist < best_dist) {
-                    best_dist = dist;
-                    best = k;
-                }
-            }
-            sum_r[best] += np_samples[i].r;
-            sum_g[best] += np_samples[i].g;
-            sum_b[best] += np_samples[i].b;
-            used[best]++;
-        }
-
-        bool changed = false;
-        for(int k = 0; k < NP_PALETTE_COLORS; k++) {
-            if(used[k] == 0) continue;
-            int r = (int)(sum_r[k] / used[k]);
-            int g = (int)(sum_g[k] / used[k]);
-            int b = (int)(sum_b[k] / used[k]);
-            if(r != centers[k][0] || g != centers[k][1] || b != centers[k][2]) {
-                centers[k][0] = r;
-                centers[k][1] = g;
-                centers[k][2] = b;
-                changed = true;
-            }
-        }
-        if(!changed) break;
-    }
-
-    for(int i = 0; i < NP_PALETTE_COLORS - 1; i++) {
-        int best = i;
-        int best_luma = centers[i][0] * 77 + centers[i][1] * 150 + centers[i][2] * 29;
-        for(int j = i + 1; j < NP_PALETTE_COLORS; j++) {
-            int luma = centers[j][0] * 77 + centers[j][1] * 150 + centers[j][2] * 29;
-            if(luma < best_luma) {
-                best = j;
-                best_luma = luma;
-            }
-        }
-        if(best != i) {
-            for(int c = 0; c < 3; c++) {
-                int tmp = centers[i][c];
-                centers[i][c] = centers[best][c];
-                centers[best][c] = tmp;
-            }
-        }
-    }
-
-    for(int k = 0; k < NP_PALETTE_COLORS; k++) {
-        np_palette[k].r = (uint8_t)centers[k][0];
-        np_palette[k].g = (uint8_t)centers[k][1];
-        np_palette[k].b = (uint8_t)centers[k][2];
-    }
-    return true;
+    free(buffer);
+    return key;
 }
 
-static void np_generate_mesh(uint16_t * out, uint32_t stride_px)
+static void np_gradient_source(const void * source)
 {
-    /* 3x3 control grid, using the 5 palette colors in a balanced layout.
-     * The grid is evaluated as a quadratic Bezier patch. */
-    static const uint8_t grid[3][3] = {
-        {0, 3, 1},
-        {2, 4, 3},
-        {1, 2, 0},
-    };
-
-    for(int y = 0; y < NP_MESH_H; y++) {
-        float ty = (float)y / (NP_MESH_H - 1);
-        float by0 = (1.0f - ty) * (1.0f - ty);
-        float by1 = 2.0f * ty * (1.0f - ty);
-        float by2 = ty * ty;
-
-        for(int x = 0; x < NP_MESH_W; x++) {
-            float tx = (float)x / (NP_MESH_W - 1);
-            float bx0 = (1.0f - tx) * (1.0f - tx);
-            float bx1 = 2.0f * tx * (1.0f - tx);
-            float bx2 = tx * tx;
-            float wx[3] = {bx0, bx1, bx2};
-            float wy[3] = {by0, by1, by2};
-
-            float r = 0.0f;
-            float g = 0.0f;
-            float b = 0.0f;
-            for(int i = 0; i < 3; i++) {
-                for(int j = 0; j < 3; j++) {
-                    float w = wy[i] * wx[j];
-                    const np_rgb_t * c = &np_palette[grid[i][j]];
-                    r += c->r * w;
-                    g += c->g * w;
-                    b += c->b * w;
-                }
-            }
-
-            if(r < 0.0f) r = 0.0f;
-            if(g < 0.0f) g = 0.0f;
-            if(b < 0.0f) b = 0.0f;
-            if(r > 255.0f) r = 255.0f;
-            if(g > 255.0f) g = 255.0f;
-            if(b > 255.0f) b = 255.0f;
-            out[y * stride_px + x] =
-                lv_color_to_u16(lv_color_make((uint8_t)(r + 0.5f),
-                                              (uint8_t)(g + 0.5f),
-                                              (uint8_t)(b + 0.5f)));
-        }
+    if(g_np_bg_mode != NP_BG_COVER_GRADIENT || !np_gradient_backdrop) return;
+    uint32_t start = g_ui_trace ? perf_now() : 0;
+    np_gradient_key = source ? np_gradient_request_source(source) : 0;
+    if(np_gradient_key != np_gradient_shown_key) np_gradient_visibility(false);
+    if(!np_gradient_key) {
+        cover_gradient_cancel();
+        if(np_gradient_timer) lv_timer_pause(np_gradient_timer);
+        return;
     }
+    if(!np_gradient_timer) np_gradient_timer = lv_timer_create(np_gradient_poll_cb, 20, NULL);
+    if(np_gradient_timer) {
+        lv_timer_reset(np_gradient_timer);
+        lv_timer_resume(np_gradient_timer);
+    }
+    np_gradient_poll_cb(NULL); /* Cached covers can appear in this same frame. */
+    perf_log_us("np_gradient_submit", start);
 }
 
-static bool np_mesh_prepare(const char * cover_path)
+static void np_gradient_detach(void)
 {
-    if(g_np_mesh_buf != NULL && strcmp(g_np_mesh_cover, cover_path) == 0) {
-        return true;
-    }
-
-    if(g_np_mesh_buf != NULL) {
-        lv_free(g_np_mesh_buf);
-        g_np_mesh_buf = NULL;
-    }
-    g_np_mesh_cover[0] = '\0';
-
-    if(!np_extract_palette(cover_path)) return false;
-
-    /* Full-resolution mesh (1280x720 RGB565 = 1.8 MB) so the backdrop is
-     * drawn 1:1 instead of being rescaled on every refresh. */
-    uint32_t mesh_stride = lv_draw_buf_width_to_stride(NP_MESH_W,
-                                                       LV_COLOR_FORMAT_RGB565);
-    uint8_t * mesh_buf = ui_alloc_aligned((size_t)mesh_stride * NP_MESH_H);
-    if(mesh_buf == NULL) return false;
-    np_generate_mesh((uint16_t *)mesh_buf, mesh_stride / 2);
-
-    lv_memzero(&g_np_mesh_dsc, sizeof(g_np_mesh_dsc));
-    g_np_mesh_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    g_np_mesh_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    g_np_mesh_dsc.header.w = NP_MESH_W;
-    g_np_mesh_dsc.header.h = NP_MESH_H;
-    g_np_mesh_dsc.header.stride = mesh_stride;
-    g_np_mesh_dsc.data_size = mesh_stride * NP_MESH_H;
-    g_np_mesh_dsc.data = mesh_buf;
-
-    g_np_mesh_buf = mesh_buf;
-    snprintf(g_np_mesh_cover, sizeof(g_np_mesh_cover), "%s", cover_path);
-    return true;
+    if(np_gradient_timer) lv_timer_pause(np_gradient_timer);
+    np_gradient_backdrop = np_gradient_scrim = NULL;
+    np_gradient_key = np_gradient_shown_key = 0;
+    cover_gradient_cancel();
 }
 
 static void np_toggle_queue(void)
@@ -3857,12 +3723,9 @@ static void np_create(lv_obj_t * parent)
                                : (album_cover != NULL ? now_album.color
                                                       : COL_PANEL_ALT);
 
-    /* The mesh/backdrop variants decode the cover at arbitrary scales.  Keep
-     * them for the bundled PNG library; real covers are raw RGB565 and are
-     * shown 1:1 in the cover widget. iAP2 artwork also stays 1:1. */
-    bool mesh_bg = !snapshot.real_device && !real_cover &&
-                   (g_np_bg_mode == NP_BG_COVER_GRADIENT && has_cover);
-    if(mesh_bg) mesh_bg = np_mesh_prepare(now_album.cover);
+    /* Reserve a background even before live artwork arrives. RGB565 covers
+     * feed the asynchronous CPU/PPA pipeline; theme remains visible meanwhile. */
+    bool mesh_bg = g_np_bg_mode == NP_BG_COVER_GRADIENT;
 
     bool blurred_bg = !snapshot.real_device && !mesh_bg && !real_cover &&
                       has_cover &&
@@ -3876,9 +3739,9 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_ignore_layout(backdrop, true);
         lv_obj_set_clickable(backdrop, false);
         if(mesh_bg) {
-            lv_image_set_src(backdrop, &g_np_mesh_dsc);
-            /* Mesh is generated at exactly 1280x720. TOP_LEFT selects the
-             * plain 1:1 blit path instead of the software transform path. */
+            np_gradient_backdrop = backdrop;
+            lv_obj_set_hidden(backdrop, true);
+            /* PPA scales once, so every subsequent refresh is a plain blit. */
             lv_image_set_inner_align(backdrop, LV_IMAGE_ALIGN_TOP_LEFT);
         }
         else {
@@ -3901,6 +3764,10 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_style_pad_all(scrim, 0, 0);
         lv_obj_set_clickable(scrim, false);
         lv_obj_set_scrollable(scrim, false);
+        if(mesh_bg) {
+            np_gradient_scrim = scrim;
+            lv_obj_set_hidden(scrim, true);
+        }
     }
 
     /* Left: artwork + metadata + transport */
@@ -4144,6 +4011,7 @@ static void np_create(lv_obj_t * parent)
     if(np_queue_visible && g_focus_count > 0) focus_select(np_queue_focus_start);
     g_np_cover_rev = player_artwork_revision();
     g_np_cover_track_id = snapshot.track.id;
+    np_gradient_source(now_cover);
     np_refresh_snapshot(&snapshot);
     ui_set_hint("UP/DOWN Select   ENTER Play/Jump   7 Play/Pause");
     if(g_ui_trace) UI_PERF_LOG("np_build: open=%d left=%u lookup=%u widgets=%u total=%u us rows=%d",
@@ -9035,6 +8903,7 @@ static void settings_schedule_detail(void)
 static void ui_page_teardown(void)
 {
     ui_page_cancel_load();
+    np_gradient_detach();
     if(np_queue_fill_timer) lv_timer_pause(np_queue_fill_timer);
     np_queue_wait_frame = false;
     np_queue_list = np_queue_loading = np_queue_spacer = NULL;

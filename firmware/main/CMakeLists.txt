@@ -29,6 +29,8 @@ idf_component_register(
         "lvgl_ppa_idf_compat.c"
         "../../app/backend/mock_player.c"
         "../../app/backend/screen_idle.c"
+        "../../app/backend/cover_gradient.c"
+        "../../app/backend/cover_gradient_math.c"
         "../../app/backend/ble_remote.c"
         "../../app/ui/ui.c"
         "../../app/ui/theme.c"
@@ -48,6 +50,7 @@ idf_component_register(
         esp_http_client
         esp_driver_jpeg
         esp_driver_ledc
+        esp_driver_ppa
         app_update
         esp_wifi
         esp_netif

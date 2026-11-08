@@ -24,6 +24,7 @@ static bool test_artist_song_get(uint64_t id, int index, player_track_t *out);
 
 static player_snapshot_t injected;
 static bool inject, art_ready;
+static unsigned art_variant;
 static uint32_t queue_rev, art_rev;
 static unsigned renders, deleted, copies;
 static unsigned global_song_reads, member_song_reads;
@@ -35,7 +36,18 @@ static uint32_t test_queue_revision(void)
 static uint32_t test_artwork_revision(void)
 { return art_rev; }
 static bool test_artwork_copy(uint8_t *dst, size_t size)
-{ copies++; if(art_ready) memset(dst,0x75,size); return art_ready; }
+{
+    copies++;
+    if(art_ready) {
+        uint16_t *pixels=(uint16_t *)dst;
+        const uint16_t colors[]={0xf800,0x001f,0x07e0,0xf81f};
+        for(size_t i=0;i<size/2;i++) {
+            unsigned x=i%360, y=i/360;
+            pixels[i]=colors[((x>=180)+2*(y>=180)+art_variant)%4];
+        }
+    }
+    return art_ready;
+}
 static bool test_song_get(int index, player_track_t *out)
 { global_song_reads++; return player_song_get(index,out); }
 static bool test_artist_song_get(uint64_t id, int index, player_track_t *out)
@@ -50,6 +62,54 @@ static void pump(int ms)
 { for(int i=0;i<ms;i+=10) { lv_tick_inc(10); lv_timer_handler(); } }
 static void text(lv_obj_t *o, const char *value)
 { check(o && !strcmp(lv_label_get_text(o),value),value); }
+
+static void gradient_lifecycle(void)
+{
+    settings_np_bg_action((void *)(intptr_t)NP_BG_COVER_GRADIENT);
+    injected.track.id+=100000; art_ready=false; art_rev++;
+    np_tick(); pump(200);
+    check(np_gradient_backdrop && lv_obj_is_hidden(np_gradient_backdrop) && np_gradient_key==0,
+          "Missing artwork must leave the theme visible while reserving a gradient widget");
+    lv_obj_t *title=np_title;
+    art_ready=true; art_rev++; np_tick(); pump(200);
+    check(np_title==title,"Late artwork must not rebuild the page");
+    check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop) &&
+          !lv_obj_is_hidden(np_gradient_scrim),"Live RGB565 artwork must generate a visible gradient");
+    uint64_t original_key=np_gradient_key;
+    const uint8_t *original_pixels=g_np_mesh_dsc.data;
+    const uint16_t *pixels=(const uint16_t *)original_pixels;
+    check(pixels[0]!=pixels[(COVER_GRADIENT_HEIGHT/2)*COVER_GRADIENT_WIDTH+COVER_GRADIENT_WIDTH/2],
+          "Colored artwork must produce a varying background");
+    unsigned before=renders;
+    for(int i=0;i<10;i++) np_tick();
+    lv_refr_now(lv_display_get_default());
+    check(renders==before,"A cached gradient must not keep invalidating the paused screen");
+    art_rev++; np_tick(); pump(100);
+    check(np_gradient_key==original_key && g_np_mesh_dsc.data==original_pixels,
+          "Identical artwork revisions must reuse the existing background");
+    art_variant++; art_rev++; np_tick(); pump(100);
+    check(np_title==title && np_gradient_key!=original_key &&
+          !lv_obj_is_hidden(np_gradient_backdrop),"Changed artwork must update the background in place");
+    uint64_t changed_key=np_gradient_key;
+    np_toggle_queue(); pump(300);
+    check(np_gradient_key==changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
+          "Up Next must reuse the same gradient");
+    np_toggle_queue(); pump(300);
+    ui_select_screen(SCR_ALBUMS); pump(400);
+    check(!np_gradient_backdrop && !np_gradient_key,"Page exit must detach gradient widgets");
+    np_gradient_poll_cb(NULL);
+    check(g_current_screen==SCR_ALBUMS,"A late background result must not affect another tab");
+    ui_select_screen(SCR_NOW_PLAYING); pump(300);
+    check(np_gradient_key==changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
+          "Returning to Now Playing must use the cached artwork background");
+    settings_np_bg_action((void *)(intptr_t)NP_BG_THEME); ui_rebuild_page(); pump(200);
+    check(!np_gradient_backdrop && !np_gradient_key,"Theme mode must omit the cover gradient");
+    inject=false;
+    settings_np_bg_action((void *)(intptr_t)NP_BG_COVER_GRADIENT); ui_rebuild_page(); pump(200);
+    check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop),
+          "PNG/demo covers must still support gradients through the shared pipeline");
+    settings_np_bg_action((void *)(intptr_t)NP_BG_THEME); ui_rebuild_page(); pump(100);
+}
 
 static void artist_membership(void)
 {
@@ -171,6 +231,7 @@ int main(int argc, char **argv)
     check(deleted==old_deleted+1,"Visible queue changes must refresh queue rows");
     np_toggle_queue(); pump(600);
     text(np_album,"Queue album"); text(np_star_icon,ICON_STAR_FILL);
+    gradient_lifecycle();
     artist_membership();
     puts("PASS: selective updates, delayed metadata/artwork, progress and queue visibility");
     return 0;

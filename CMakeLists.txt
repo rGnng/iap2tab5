@@ -47,6 +47,8 @@ endif()
 # -----------------------------------------------------------------------------
 set(UI_SOURCES
     app/backend/screen_idle.c
+    app/backend/cover_gradient.c
+    app/backend/cover_gradient_math.c
     app/backend/mock_player.c
     app/backend/ble_remote.c
     app/ui/boot.c

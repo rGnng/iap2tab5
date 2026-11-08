@@ -150,6 +150,13 @@ or keypad input restarts it. Hold the clock area for two seconds to turn off
 the screen immediately, including during playback. The first touch or key
 wakes the screen without activating a control. USB, playback and Wi-Fi keep running.
 
+**Settings → Now Playing Background → Cover gradient** uses colors from the
+current iPod artwork, including artwork that arrives after the page opens.
+It builds a 320×180 mesh in a background worker, expands it once to 1280×720
+with the ESP32-P4 PPA, and caches the RGB565 result. Matching artwork reuses
+the background; page changes cancel obsolete work. The simulator and a device
+without an available PPA use a CPU scaling fallback.
+
 ## Build and set up the Tab5
 
 The Tab5 has two processors with separate firmware and programming connections:
