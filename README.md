@@ -610,8 +610,10 @@ their sources. Run them from the repository root:
 
 ## Current limitations
 
-- Full iAP2 media-library subscription is disabled by default; AFC import is the
-  supported path. `IAP2TAB5_FULL_LIBRARY_SYNC` gates the experimental subscription.
+- The browsable library uses AFC import. Optional iAP2 library notifications
+  populate fallback album discovery order (`-DIAP2TAB5_FULL_LIBRARY_SYNC=ON`).
+  Full notification sync has passed hardware testing; importing a complete
+  catalog from those notifications is not implemented yet.
 - Up Next depends on the queue supplied by the device and matching tracks in the
   imported library. Its fallback may show only the current track.
 - Stars are stored locally in `stars.csv` and are not written back to the iPod.

@@ -1,6 +1,7 @@
 #include "iap2_host.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "esp_timer.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "app_config.h"
@@ -49,6 +52,10 @@ static const uint8_t IAP2_MARKER[IAP2_MARKER_LEN] = {
 #define CSM_BUF_SIZE     (192 * 1024)
 #define TX_QUEUE_LEN     8
 #define MAX_CSM_FRAME    2048
+#define LINK_MAX_PACKET 4096
+#define SESSION_QUEUE_LEN 32
+#define RX_PACKET_BUDGET 16
+#define RX_TIME_BUDGET_US 4000
 
 #define OUT_REPORT_BASE  13
 
@@ -89,6 +96,8 @@ static uint8_t s_ep_in;
 static usb_transfer_t * s_in_xfer;
 static usb_transfer_t * s_ctrl_xfer;
 static SemaphoreHandle_t s_ctrl_done;
+static SemaphoreHandle_t s_ctrl_lock;
+static bool s_ctrl_inflight;
 static StreamBufferHandle_t s_rx_stream;
 static TaskHandle_t s_task;
 
@@ -106,6 +115,26 @@ static TickType_t s_last_rx;
 
 static uint8_t * s_link_buf;
 static size_t s_link_len;
+static _Atomic uint32_t s_link_generation;
+static volatile bool s_reset_pending;
+static volatile bool s_rx_overflow;
+static bool s_rx_more;
+static bool s_partial_waiting;
+static TickType_t s_partial_since;
+/* HID framing belongs to the USB event task; reset only on USB reopen. */
+static size_t s_report_remaining;
+static iap2_link_stats_t s_stats;
+
+typedef struct {
+    uint32_t generation;
+    uint16_t len;
+    uint8_t session;
+    uint8_t payload[];
+} session_packet_t;
+static QueueHandle_t s_session_queue;
+static SemaphoreHandle_t s_session_lock;
+static void ft_clear_all(void);
+static void session_task(void * arg);
 
 static uint8_t * s_csm_buf;
 static size_t s_csm_len;
@@ -124,6 +153,8 @@ static uint8_t s_tx_seq;
 static TickType_t s_tx_deadline;
 static int s_tx_retries;
 static bool s_tx_busy;
+static size_t s_tx_offset;
+static size_t s_tx_packet_len;
 
 static bool s_enabled;
 static bool s_hid_ready;
@@ -225,7 +256,22 @@ static void ctrl_done_cb(usb_transfer_t * xfer)
     xSemaphoreGive(s_ctrl_done);
 }
 
-static esp_err_t ctrl_request(uint8_t bmRequestType, uint8_t bRequest,
+/* A timed-out transfer still owns the shared DMA buffer until its callback
+ * completes. Serialize all callers and never overwrite an in-flight request. */
+static bool ctrl_acquire(void)
+{
+    xSemaphoreTake(s_ctrl_lock, portMAX_DELAY);
+    if(s_ctrl_inflight) {
+        if(xSemaphoreTake(s_ctrl_done, 0) != pdTRUE) {
+            xSemaphoreGive(s_ctrl_lock);
+            return false;
+        }
+        s_ctrl_inflight = false;
+    }
+    return true;
+}
+
+static esp_err_t ctrl_request_locked(uint8_t bmRequestType, uint8_t bRequest,
                               uint16_t wValue, uint16_t wIndex,
                               const void * data, size_t len)
 {
@@ -252,14 +298,17 @@ static esp_err_t ctrl_request(uint8_t bmRequestType, uint8_t bRequest,
     xfer->context = NULL;
 
     xSemaphoreTake(s_ctrl_done, 0);
+    s_ctrl_inflight = true;
     esp_err_t err = usb_host_transfer_submit_control(s_client, xfer);
     if(err != ESP_OK) {
+        s_ctrl_inflight = false;
         return err;
     }
     if(xSemaphoreTake(s_ctrl_done, pdMS_TO_TICKS(2000)) != pdTRUE) {
         ESP_LOGW(TAG, "control transfer timeout (req 0x%02x)", bRequest);
         return ESP_ERR_TIMEOUT;
     }
+    s_ctrl_inflight = false;
     if(s_ctrl_status != USB_TRANSFER_STATUS_COMPLETED) {
         ESP_LOGW(TAG, "control transfer req 0x%02x status %d", bRequest,
                  s_ctrl_status);
@@ -268,7 +317,7 @@ static esp_err_t ctrl_request(uint8_t bmRequestType, uint8_t bRequest,
     return ESP_OK;
 }
 
-static esp_err_t ctrl_get_descriptor(uint8_t type, uint8_t index,
+static esp_err_t ctrl_get_descriptor_locked(uint8_t type, uint8_t index,
                                      uint8_t * out, size_t len)
 {
     if(s_dev == NULL || s_ctrl_xfer == NULL || len > 256) {
@@ -291,11 +340,13 @@ static esp_err_t ctrl_get_descriptor(uint8_t type, uint8_t index,
     xfer->context = NULL;
 
     xSemaphoreTake(s_ctrl_done, 0);
+    s_ctrl_inflight = true;
     esp_err_t err = usb_host_transfer_submit_control(s_client, xfer);
-    if(err != ESP_OK) return err;
+    if(err != ESP_OK) { s_ctrl_inflight = false; return err; }
     if(xSemaphoreTake(s_ctrl_done, pdMS_TO_TICKS(2000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+    s_ctrl_inflight = false;
     if(s_ctrl_status != USB_TRANSFER_STATUS_COMPLETED) {
         return ESP_FAIL;
     }
@@ -304,6 +355,25 @@ static esp_err_t ctrl_get_descriptor(uint8_t type, uint8_t index,
     if(got > len) got = len;
     memcpy(out, xfer->data_buffer + 8, got);
     return (esp_err_t)got;
+}
+
+static esp_err_t ctrl_request(uint8_t bmRequestType, uint8_t bRequest,
+                              uint16_t wValue, uint16_t wIndex,
+                              const void * data, size_t len)
+{
+    if(!ctrl_acquire()) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = ctrl_request_locked(bmRequestType, bRequest, wValue, wIndex, data, len);
+    xSemaphoreGive(s_ctrl_lock);
+    return err;
+}
+
+static esp_err_t ctrl_get_descriptor(uint8_t type, uint8_t index,
+                                     uint8_t * out, size_t len)
+{
+    if(!ctrl_acquire()) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = ctrl_get_descriptor_locked(type, index, out, len);
+    xSemaphoreGive(s_ctrl_lock);
+    return err;
 }
 
 static int s_report_variant = 2;
@@ -402,58 +472,66 @@ static size_t input_report_total(uint8_t id)
 {
     if(id == 0 || id > 12) return 0;
     size_t total = (size_t)s_in_report_sizes[id] + 1;
-    if(total > 64 && (total % 64) <= 2) {
-        total = (total / 64) * 64;
-    }
     return total;
+}
+
+/* Single producer: never admit a partial USB fragment. A full stream is a
+ * transport error, not permission to splice the next bytes into a bad frame. */
+static void rx_store(const uint8_t * data, size_t len)
+{
+    if(s_rx_overflow || len == 0) return;
+    if(xStreamBufferSpacesAvailable(s_rx_stream) < len ||
+       xStreamBufferSend(s_rx_stream, data, len, 0) != len) {
+        s_stats.rx_overflows++;
+        s_rx_overflow = true;
+    }
+    if(s_task != NULL) xTaskNotifyGive(s_task);
 }
 
 static void in_done_cb(usb_transfer_t * xfer)
 {
-    static int logged;
-    static bool report_active;
-    static size_t report_remaining;
-
+    if(xfer != s_in_xfer) {
+        /* A canceled transfer from a removed device may complete after a
+         * replacement device has already opened its own IN transfer. */
+        usb_host_transfer_free(xfer);
+        return;
+    }
     if(xfer->status == USB_TRANSFER_STATUS_COMPLETED) {
-        int actual = xfer->actual_num_bytes;
+        size_t actual = (size_t)xfer->actual_num_bytes;
+        const uint8_t * data = xfer->data_buffer;
         if(actual > 0) {
-            if(logged < 20) {
-                char hex[3 * 24 + 1];
-                int n = actual < 24 ? actual : 24;
-                for(int i = 0; i < n; i++) {
-                    snprintf(hex + i * 3, 4, "%02x ", xfer->data_buffer[i]);
+            if(s_report_remaining == 0) {
+                size_t total = actual >= 2 ? input_report_total(data[0]) : 0;
+                if(total < 2 || actual > total || (data[1] & ~3u) != 0) {
+                    s_stats.hid_errors++;
+                    s_rx_overflow = true;
                 }
-                hex[n * 3] = '\0';
-                ESP_LOGI(TAG, "HID IN %d:%s%s", actual,
-                         report_active ? " cont" : "", hex);
-                logged++;
+                else {
+                    s_report_remaining = total - actual;
+                    rx_store(data + 2, actual - 2);
+                }
             }
-
-            if(!report_active) {
-                if(actual >= 2) {
-                    size_t total = input_report_total(xfer->data_buffer[0]);
-                    size_t payload = (size_t)actual - 2;
-                    if(total >= 2) {
-                        size_t cap = total - 2;
-                        if(payload > cap) payload = cap;
-                        xStreamBufferSend(s_rx_stream, xfer->data_buffer + 2,
-                                          payload, 0);
-                        report_remaining = cap - payload;
-                        report_active = report_remaining > 0;
-                    }
-                    else {
-                        xStreamBufferSend(s_rx_stream, xfer->data_buffer + 2,
-                                          payload, 0);
-                    }
-                }
+            else if(actual <= s_report_remaining) {
+                rx_store(data, actual);
+                s_report_remaining -= actual;
             }
             else {
-                size_t payload = (size_t)actual;
-                if(payload > report_remaining) payload = report_remaining;
-                xStreamBufferSend(s_rx_stream, xfer->data_buffer, payload, 0);
-                report_remaining -= payload;
-                if(report_remaining == 0) report_active = false;
+                s_stats.hid_errors++;
+                s_rx_overflow = true;
+                s_report_remaining = 0;
             }
+            /* A short USB packet terminates the report. The 258/386/514-byte
+             * reports really do end in a 2-byte transfer; retain those bytes. */
+            if(actual < IN_XFER_SIZE && s_report_remaining != 0) {
+                s_stats.hid_errors++;
+                s_rx_overflow = true;
+                s_report_remaining = 0;
+            }
+        }
+        if(actual == 0 && s_report_remaining != 0) {
+            s_stats.hid_errors++;
+            s_rx_overflow = true;
+            s_report_remaining = 0;
         }
         xfer->num_bytes = IN_XFER_SIZE;
         if(usb_host_transfer_submit(xfer) != ESP_OK) {
@@ -464,6 +542,8 @@ static void in_done_cb(usb_transfer_t * xfer)
     }
     else {
         ESP_LOGW(TAG, "HID IN stopped: %d", (int)xfer->status);
+        s_report_remaining = 0;
+        s_reset_pending = true;
         if(s_in_xfer == xfer) s_in_xfer = NULL;
         usb_host_transfer_free(xfer);
     }
@@ -471,10 +551,19 @@ static void in_done_cb(usb_transfer_t * xfer)
 
 static void reset_link(void)
 {
+    /* Only the link task resets transport state. The worker cannot apply an
+     * old session packet after this generation changes. */
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    s_link_generation++;
+    s_stats.link_resets++;
+    session_packet_t * queued;
+    while(xQueueReceive(s_session_queue, &queued, 0) == pdTRUE) free(queued);
+    ft_clear_all();
     s_state = LINK_IDLE;
     s_sent_psn = 99;
     s_last_recv_psn = 0;
     s_link_len = 0;
+    s_partial_waiting = false;
     s_csm_len = 0;
     s_hid_ready = false;
     s_identified = false;
@@ -482,14 +571,18 @@ static void reset_link(void)
     s_playing = false;
     s_tx_busy = false;
     s_tx_retries = 0;
+    s_tx_offset = s_tx_packet_len = 0;
+    s_peer_max_len = 65535;
+    s_peer_retransmit = 4000;
     s_title[0] = s_artist[0] = s_album[0] = '\0';
-        s_track_key = 0;
-        s_library_id[0] = '\0';
-        s_library_sub_id[0] = '\0';
-        s_library_revision[0] = '\0';
-        s_library_subscribed = false;
-        s_library_resynced = false;
-        s_library_items = 0;
+    s_track_key = 0;
+    s_library_id[0] = '\0';
+    s_library_sub_id[0] = '\0';
+    s_library_revision[0] = '\0';
+    s_library_subscribed = false;
+    s_library_resynced = false;
+    s_library_items = 0;
+    s_stats.library_complete = false;
     if(s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     while(s_txq_tail != s_txq_head) {
         free(s_txq[s_txq_tail]);
@@ -501,6 +594,7 @@ static void reset_link(void)
     s_tx_active_len = 0;
     if(s_tx_lock != NULL) xSemaphoreGive(s_tx_lock);
     artwork_invalidate();
+    xSemaphoreGive(s_session_lock);
 }
 
 static void open_device(uint8_t address)
@@ -595,6 +689,7 @@ static void open_device(uint8_t address)
         s_dev = NULL;
         return;
     }
+    s_report_remaining = 0;
     s_in_xfer->device_handle = s_dev;
     s_in_xfer->bEndpointAddress = s_ep_in;
     s_in_xfer->num_bytes = IN_XFER_SIZE;
@@ -611,11 +706,7 @@ static void open_device(uint8_t address)
         return;
     }
 
-    reset_link();
-    s_state = LINK_DETECT;
-    s_next_marker = xTaskGetTickCount();
-    s_next_syn = xTaskGetTickCount();
-    s_last_rx = xTaskGetTickCount();
+    s_reset_pending = true;
     s_connected = true;
     set_status("iPod HID connected, detecting iAP2");
     ESP_LOGI(TAG, "HID ready; sending iAP2 detection marker");
@@ -628,7 +719,10 @@ static void close_device(void)
     s_identified = false;
     s_hid_ready = false;
     s_state = LINK_IDLE;
+    s_reset_pending = true;
     s_in_xfer = NULL;
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    s_link_generation++;
     if(s_state_lock != NULL) {
         xSemaphoreTake(s_state_lock, portMAX_DELAY);
         s_play_status = 0;
@@ -657,6 +751,7 @@ static void close_device(void)
         xSemaphoreGive(s_state_lock);
     }
     artwork_invalidate();
+    xSemaphoreGive(s_session_lock);
     if(s_dev != NULL) {
         usb_host_interface_release(s_client, s_dev, s_interface);
         usb_host_device_close(s_client, s_dev);
@@ -729,15 +824,16 @@ static void send_marker(void)
 static void build_lsp(uint8_t * buf, size_t * len)
 {
     buf[0] = 0x01;
-    buf[1] = 30;
-    buf[2] = 0xFF;
-    buf[3] = 0xFF;
+    /* Conservative stop-and-wait window; ACK every accepted packet. */
+    buf[1] = 1;
+    buf[2] = (uint8_t)(LINK_MAX_PACKET >> 8);
+    buf[3] = (uint8_t)LINK_MAX_PACKET;
     buf[4] = (uint8_t)(4000 >> 8);
     buf[5] = (uint8_t)4000;
     buf[6] = (uint8_t)(500 >> 8);
     buf[7] = (uint8_t)500;
     buf[8] = 4;
-    buf[9] = 3;
+    buf[9] = 1;
     buf[10] = CONTROL_SESSION;
     buf[11] = 0;
     buf[12] = 1;
@@ -752,9 +848,12 @@ static void build_lsp(uint8_t * buf, size_t * len)
 
 static bool parse_lsp(const uint8_t * p, size_t len)
 {
-    if(len < 10 || p[0] != 1) return false;
-    s_peer_max_len = (uint16_t)((p[2] << 8) | p[3]);
-    s_peer_retransmit = (uint16_t)((p[4] << 8) | p[5]);
+    if(len < 10 || p[0] != 1 || p[1] == 0) return false;
+    uint16_t max_len = (uint16_t)((p[2] << 8) | p[3]);
+    uint16_t retransmit = (uint16_t)((p[4] << 8) | p[5]);
+    if(max_len <= 10 || retransmit == 0) return false;
+    s_peer_max_len = max_len;
+    s_peer_retransmit = retransmit;
     s_peer_ack_timeout = (uint16_t)((p[6] << 8) | p[7]);
     ESP_LOGI(TAG, "peer LSP max_len=%u ack_timeout=%u retransmit=%u",
              s_peer_max_len, s_peer_ack_timeout, s_peer_retransmit);
@@ -854,6 +953,7 @@ static void tx_queue(uint8_t session, const uint8_t * data, size_t len)
         s_txq_head = (s_txq_head + 1) % TX_QUEUE_LEN;
     }
     if(s_tx_lock != NULL) xSemaphoreGive(s_tx_lock);
+    if(s_task != NULL) xTaskNotifyGive(s_task);
 }
 
 static void csm_queue(const uint8_t * frame, size_t len)
@@ -1401,6 +1501,7 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
             bool reset_seen = false;
             static int update_msgs;
             update_msgs++;
+            s_stats.library_messages++;
             while(next_param(&p, end, &pid, &value, &value_len)) {
                 if(update_msgs <= 12) {
                     ESP_LOGI(TAG, "library param %u len %u first=%02x",
@@ -1428,6 +1529,7 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
                         }
                     }
                     s_library_items++;
+                    s_stats.library_items++;
                     if(album_pid != 0) {
                         player_note_iap2_album(album_pid);
                     }
@@ -1462,6 +1564,7 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
                 ESP_LOGI(TAG, "media library updates complete: %d groups",
                          s_library_items);
                 s_library_resynced = false;
+                s_stats.library_complete = true;
             }
             break;
         }
@@ -1543,33 +1646,26 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
 
 static void csm_feed(const uint8_t * data, size_t len)
 {
-    if(s_csm_len + len > CSM_BUF_SIZE) {
-        ESP_LOGW(TAG, "CSM buffer overflow");
-        s_csm_len = 0;
+    if(len > CSM_BUF_SIZE - s_csm_len) {
+        s_reset_pending = true;
         return;
     }
     memcpy(s_csm_buf + s_csm_len, data, len);
     s_csm_len += len;
-
-    while(s_csm_len >= 6) {
-        if(s_csm_buf[0] != 0x40 || s_csm_buf[1] != 0x40) {
-            memmove(s_csm_buf, s_csm_buf + 1, s_csm_len - 1);
-            s_csm_len--;
-            continue;
-        }
-        uint16_t flen = (uint16_t)((s_csm_buf[2] << 8) | s_csm_buf[3]);
-        if(flen < 6 || flen > CSM_BUF_SIZE) {
-            memmove(s_csm_buf, s_csm_buf + 2, s_csm_len - 2);
-            s_csm_len -= 2;
-            continue;
-        }
-        if(s_csm_len < flen) break;
-        uint16_t msg_id = (uint16_t)((s_csm_buf[4] << 8) | s_csm_buf[5]);
-        handle_csm(msg_id, s_csm_buf + 6, flen - 6);
-        if(flen < s_csm_len) {
-            memmove(s_csm_buf, s_csm_buf + flen, s_csm_len - flen);
-        }
-        s_csm_len -= flen;
+    size_t offset = 0;
+    while(s_csm_len - offset >= 6) {
+        const uint8_t * frame = s_csm_buf + offset;
+        if(frame[0] != 0x40 || frame[1] != 0x40) { offset++; continue; }
+        uint16_t flen = (uint16_t)((frame[2] << 8) | frame[3]);
+        if(flen < 6) { offset++; continue; }
+        if(s_csm_len - offset < flen) break;
+        uint16_t msg_id = (uint16_t)((frame[4] << 8) | frame[5]);
+        handle_csm(msg_id, frame + 6, flen - 6);
+        offset += flen;
+    }
+    if(offset != 0) {
+        memmove(s_csm_buf, s_csm_buf + offset, s_csm_len - offset);
+        s_csm_len -= offset;
     }
 }
 
@@ -2032,30 +2128,68 @@ static void link_data(const uint8_t * payload, size_t len, uint8_t session)
     }
 }
 
+/* The worker owns session reassembly and potentially slow library/storage
+ * work. A packet becomes ACKable only after its payload is safely queued. */
+static bool session_enqueue(uint8_t session, const uint8_t * data, size_t len)
+{
+    if(uxQueueSpacesAvailable(s_session_queue) == 0) {
+        s_stats.queue_stalls++;
+        return false;
+    }
+    session_packet_t * packet = heap_caps_malloc(sizeof(*packet) + len,
+                                                  MALLOC_CAP_SPIRAM);
+    if(packet == NULL) { s_stats.queue_stalls++; return false; }
+    packet->generation = s_link_generation;
+    packet->session = session;
+    packet->len = (uint16_t)len;
+    memcpy(packet->payload, data, len);
+    if(xQueueSend(s_session_queue, &packet, 0) != pdTRUE) {
+        free(packet);
+        s_stats.queue_stalls++;
+        return false;
+    }
+    unsigned pending = uxQueueMessagesWaiting(s_session_queue);
+    if(pending > s_stats.queue_high_water) s_stats.queue_high_water = pending;
+    return true;
+}
+
+static void session_deliver(session_packet_t * packet)
+{
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    if(s_connected && packet->generation == s_link_generation) {
+        link_data(packet->payload, packet->len, packet->session);
+    }
+    xSemaphoreGive(s_session_lock);
+    free(packet);
+}
+
+static void session_task(void * arg)
+{
+    (void)arg;
+    unsigned batch = 0;
+    for(;;) {
+        session_packet_t * packet;
+        if(xQueueReceive(s_session_queue, &packet, portMAX_DELAY) != pdTRUE) continue;
+        session_deliver(packet);
+        if(++batch >= 8) { batch = 0; vTaskDelay(1); }
+    }
+}
+
 static void handle_link_packet(const uint8_t * buf, size_t len)
 {
-    if(len < 9) return;
-    if(checksum(buf, 8) != buf[8]) {
-        ESP_LOGW(TAG, "link header checksum failed");
-        return;
-    }
-
-    uint16_t plen = (uint16_t)((buf[2] << 8) | buf[3]);
-    if(plen != len || plen < 9) return;
-
-    uint8_t control = buf[4];
-    uint8_t seq = buf[5];
-    uint8_t ack = buf[6];
-    uint8_t session = buf[7];
-    size_t payload_len = plen > 10 ? plen - 10 : 0;
+    /* Header, length and payload checksums were validated by process_rx. */
+    uint8_t control = buf[4], seq = buf[5], ack = buf[6], session = buf[7];
+    size_t payload_len = len > 9 ? len - 10 : 0;
     const uint8_t * payload = buf + 9;
+    s_stats.rx_packets++;
 
-    if(payload_len > 0 && checksum(payload, payload_len + 1) != 0) {
-        ESP_LOGW(TAG, "link payload checksum failed (session %u)",
-                 session);
+    if(control & CONTROL_RST) {
+        ESP_LOGW(TAG, "device reset the iAP2 link");
+        reset_link();
+        s_state = LINK_DETECT;
+        s_next_marker = xTaskGetTickCount();
         return;
     }
-
     if(control & CONTROL_SYN) {
         if(parse_lsp(payload, payload_len)) {
             s_last_recv_psn = seq;
@@ -2069,160 +2203,180 @@ static void handle_link_packet(const uint8_t * buf, size_t len)
         }
         return;
     }
-
-    if((control & CONTROL_RST) != 0) {
-        ESP_LOGW(TAG, "device reset the iAP2 link");
-        reset_link();
-        s_state = LINK_DETECT;
-        s_next_marker = xTaskGetTickCount();
-        return;
-    }
-
-    if(control & CONTROL_ACK) {
-        if(s_state == LINK_NEGOTIATE && ack == s_sent_psn) {
-            s_state = LINK_NORMAL;
-            ESP_LOGI(TAG, "iAP2 link acknowledged");
-            set_status("iAP2 link established");
-        }
+    if(control & (CONTROL_ACK | CONTROL_EAK)) {
+        if(s_state == LINK_NEGOTIATE && ack == s_sent_psn) s_state = LINK_NORMAL;
+        /* TX is stop-and-wait, so the only admissible cumulative ACK is the
+         * outstanding sequence. Stale/unsent ACKs cannot free its payload. */
         if(s_tx_busy && ack == s_tx_seq) {
-            free(s_tx_active);
-            s_tx_active = NULL;
-            s_tx_active_len = 0;
+            s_tx_offset += s_tx_packet_len;
             s_tx_busy = false;
-        }
-    }
-
-    if(payload_len == 0) {
-        if(seq == (uint8_t)(s_last_recv_psn + 1)) {
-            s_last_recv_psn = seq;
-        }
-        return;
-    }
-
-    if((control & ~CONTROL_ACK) == 0) {
-        uint8_t expected = (uint8_t)(s_last_recv_psn + 1);
-        if(seq == expected || seq == s_last_recv_psn) {
-            if(seq == expected) {
-                s_last_recv_psn = seq;
-                link_data(payload, payload_len, session);
+            if(s_tx_offset == s_tx_active_len) {
+                free(s_tx_active);
+                s_tx_active = NULL;
+                s_tx_active_len = s_tx_offset = 0;
             }
-            s_last_rx = xTaskGetTickCount();
-            send_ack();
         }
-        else {
-            ESP_LOGW(TAG, "link out-of-order seq=%u expected=%u", seq,
-                     expected);
-            send_ack();
+        else if((control & CONTROL_EAK) && s_tx_busy) {
+            /* With one TX in flight, an EAK requests this missing packet.
+             * Its sequence list belongs to the link, never to a session. */
+            s_tx_deadline = xTaskGetTickCount();
         }
     }
+    /* Pure ACK/EAK never consumes an incoming data sequence number. */
+    if(payload_len == 0 || (control & CONTROL_EAK) || s_state != LINK_NORMAL) return;
+    if((control & ~CONTROL_ACK) != 0) return;
+
+    uint8_t expected = (uint8_t)(s_last_recv_psn + 1);
+    if(seq == expected) {
+        if(!session_enqueue(session, payload, payload_len)) return;
+        s_last_recv_psn = seq;
+    }
+    else if(seq == s_last_recv_psn) {
+        s_stats.duplicates++;
+    }
+    else {
+        s_stats.sequence_gaps++;
+        /* Discard unaccepted data; cumulative ACK asks for the missing
+         * sequence without falsely acknowledging any later payload. */
+    }
+    s_last_rx = xTaskGetTickCount();
+    send_ack();
 }
 
 static void process_rx(void)
 {
-    if(s_link_len < LINK_BUF_SIZE) {
-        size_t n = xStreamBufferReceive(s_rx_stream,
-                                        s_link_buf + s_link_len,
-                                        LINK_BUF_SIZE - s_link_len, 0);
-        s_link_len += n;
+    s_rx_more = false;
+    if(s_rx_overflow) {
+        uint8_t discard[256];
+        while(xStreamBufferReceive(s_rx_stream, discard, sizeof(discard), 0)) { }
+        s_rx_overflow = false;
+        link_send(CONTROL_RST, s_sent_psn, s_last_recv_psn, 0, NULL, 0);
+        reset_link();
+        s_state = LINK_DETECT;
+        s_next_marker = xTaskGetTickCount();
+        ESP_LOGW(TAG, "RX transport overflow/framing error; restarting link");
+        return;
     }
-
+    size_t n = xStreamBufferReceive(s_rx_stream, s_link_buf + s_link_len,
+                                    LINK_BUF_SIZE - s_link_len, 0);
+    s_link_len += n;
     if(s_state == LINK_DETECT) {
-        for(size_t i = 0; i + IAP2_MARKER_LEN <= s_link_len; i++) {
-            if(memcmp(s_link_buf + i, IAP2_MARKER, IAP2_MARKER_LEN) == 0) {
-                if(i + IAP2_MARKER_LEN < s_link_len) {
-                    memmove(s_link_buf, s_link_buf + i + IAP2_MARKER_LEN,
-                            s_link_len - i - IAP2_MARKER_LEN);
-                }
-                s_link_len -= i + IAP2_MARKER_LEN;
-                s_state = LINK_NEGOTIATE;
-                s_next_syn = xTaskGetTickCount();
-                ESP_LOGI(TAG, "iAP2 detection marker received");
-                break;
-            }
+        size_t offset = 0;
+        while(offset + IAP2_MARKER_LEN <= s_link_len &&
+              memcmp(s_link_buf + offset, IAP2_MARKER, IAP2_MARKER_LEN) != 0) offset++;
+        if(offset + IAP2_MARKER_LEN <= s_link_len) {
+            offset += IAP2_MARKER_LEN;
+            s_state = LINK_NEGOTIATE;
+            s_next_syn = xTaskGetTickCount();
         }
-        if(s_state == LINK_DETECT) {
-            if(s_link_len > IAP2_MARKER_LEN) {
-                memmove(s_link_buf, s_link_buf + s_link_len - IAP2_MARKER_LEN,
-                        IAP2_MARKER_LEN);
-                s_link_len = IAP2_MARKER_LEN;
-            }
-            return;
-        }
+        else if(s_link_len > IAP2_MARKER_LEN) offset = s_link_len - IAP2_MARKER_LEN;
+        else offset = 0;
+        memmove(s_link_buf, s_link_buf + offset, s_link_len - offset);
+        s_link_len -= offset;
+        if(s_state == LINK_DETECT) return;
     }
 
-    while(s_link_len >= 9) {
-        if(s_link_buf[0] != (uint8_t)(LINK_START >> 8) ||
-           s_link_buf[1] != (uint8_t)LINK_START) {
-            memmove(s_link_buf, s_link_buf + 1, s_link_len - 1);
-            s_link_len--;
+    size_t offset = 0;
+    unsigned packets = 0;
+    int64_t start = esp_timer_get_time();
+    uint32_t generation = s_link_generation;
+    /* Scan with a cursor, compact once. Bad bytes used to cause a whole
+     * buffer memmove each, turning corruption into quadratic CPU work. */
+    while(s_link_len - offset >= 9 && packets < RX_PACKET_BUDGET) {
+        if(esp_timer_get_time() - start >= RX_TIME_BUDGET_US) {
+            s_rx_more = true;
+            break;
+        }
+        const uint8_t * pkt = s_link_buf + offset;
+        if(pkt[0] != (uint8_t)(LINK_START >> 8) || pkt[1] != (uint8_t)LINK_START) {
+            offset++;
+            s_partial_waiting = false;
             continue;
         }
-        uint16_t plen = (uint16_t)((s_link_buf[2] << 8) | s_link_buf[3]);
-        if(plen < 9 || plen > LINK_BUF_SIZE) {
-            memmove(s_link_buf, s_link_buf + 2, s_link_len - 2);
-            s_link_len -= 2;
+        /* Never trust a length until its header checksum is valid. */
+        uint16_t plen = (uint16_t)((pkt[2] << 8) | pkt[3]);
+        if(checksum(pkt, 8) != pkt[8] || plen < 9 || plen == 10 || plen > LINK_MAX_PACKET) {
+            s_stats.bad_headers++;
+            s_partial_waiting = false;
+            offset++;
             continue;
         }
-        if(s_link_len < plen) break;
-        handle_link_packet(s_link_buf, plen);
-        if(plen < s_link_len) {
-            memmove(s_link_buf, s_link_buf + plen, s_link_len - plen);
+        if(s_link_len - offset < plen) {
+            if(!s_partial_waiting) {
+                s_partial_waiting = true;
+                s_partial_since = xTaskGetTickCount();
+            }
+            else if((TickType_t)(xTaskGetTickCount() - s_partial_since) >=
+                    pdMS_TO_TICKS((uint32_t)s_peer_retransmit * 2u)) {
+                s_stats.bad_payloads++;
+                s_partial_waiting = false;
+                offset++;
+                continue;
+            }
+            break;
         }
-        s_link_len -= plen;
+        s_partial_waiting = false;
+        if(plen > 9 && checksum(pkt + 9, plen - 9) != 0) {
+            s_stats.bad_payloads++;
+            offset++;
+            continue;
+        }
+        handle_link_packet(pkt, plen);
+        /* RST/disconnect may clear this buffer. Do not subtract the old
+         * packet length from the reset length (unsigned underflow). */
+        if(generation != s_link_generation) return;
+        offset += plen;
+        packets++;
+    }
+    if(packets == RX_PACKET_BUDGET && s_link_len - offset >= 9) s_rx_more = true;
+    if(offset != 0) {
+        memmove(s_link_buf, s_link_buf + offset, s_link_len - offset);
+        s_link_len -= offset;
     }
 }
 
 static void tx_pump(void)
 {
-    if(s_state != LINK_NORMAL) return;
-
+    if(s_state != LINK_NORMAL || !s_connected) return;
+    TickType_t now = xTaskGetTickCount();
     if(s_tx_busy) {
-        if((TickType_t)(xTaskGetTickCount() - s_tx_deadline) < 0x80000000u) {
+        if((TickType_t)(now - s_tx_deadline) < 0x80000000u) {
             if(s_tx_retries++ >= 4) {
                 ESP_LOGW(TAG, "link ACK timeout, resetting");
-                free(s_tx_active);
-                s_tx_active = NULL;
-                s_tx_busy = false;
                 reset_link();
                 s_state = LINK_DETECT;
-                s_next_marker = xTaskGetTickCount();
+                s_next_marker = now;
                 return;
             }
-            ESP_LOGW(TAG, "retransmit link seq=%u", s_tx_seq);
+            s_stats.retransmits++;
             link_send(CONTROL_ACK, s_tx_seq, s_last_recv_psn,
-                      s_tx_active_session, s_tx_active, s_tx_active_len);
-            s_tx_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(4000);
+                      s_tx_active_session, s_tx_active + s_tx_offset, s_tx_packet_len);
+            s_tx_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(s_peer_retransmit);
         }
         return;
     }
-
-    if(s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
-    if(s_txq_tail == s_txq_head) {
-        if(s_tx_lock != NULL) xSemaphoreGive(s_tx_lock);
-        return;
+    if(s_tx_active == NULL) {
+        xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+        if(s_txq_tail == s_txq_head) { xSemaphoreGive(s_tx_lock); return; }
+        s_tx_active = s_txq[s_txq_tail];
+        s_tx_active_len = s_txq_len[s_txq_tail];
+        s_tx_active_session = s_txq_session[s_txq_tail];
+        s_txq[s_txq_tail] = NULL;
+        s_txq_tail = (s_txq_tail + 1) % TX_QUEUE_LEN;
+        xSemaphoreGive(s_tx_lock);
+        s_tx_offset = 0;
     }
-    uint8_t * frame = s_txq[s_txq_tail];
-    size_t frame_len = s_txq_len[s_txq_tail];
-    uint8_t frame_session = s_txq_session[s_txq_tail];
-    s_txq[s_txq_tail] = NULL;
-    s_txq_tail = (s_txq_tail + 1) % TX_QUEUE_LEN;
-    if(s_tx_lock != NULL) xSemaphoreGive(s_tx_lock);
-
-    s_sent_psn++;
-    s_tx_active = frame;
-    s_tx_active_len = frame_len;
-    s_tx_active_session = frame_session;
-    s_tx_seq = s_sent_psn;
+    size_t limit = s_peer_max_len - 10u;
+    s_tx_packet_len = s_tx_active_len - s_tx_offset;
+    if(s_tx_packet_len > limit) s_tx_packet_len = limit;
+    s_tx_seq = ++s_sent_psn;
     s_tx_busy = true;
     s_tx_retries = 0;
-    s_tx_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(4000);
-
-    if(link_send(CONTROL_ACK, s_tx_seq, s_last_recv_psn, frame_session,
-                 frame, frame_len) != ESP_OK) {
-        free(s_tx_active);
-        s_tx_active = NULL;
-        s_tx_busy = false;
-    }
+    s_tx_deadline = now + pdMS_TO_TICKS(s_peer_retransmit);
+    /* Keep the exact sequence/payload on write failure: the device may
+     * have received some or all of the transfer. Retry, never skip ahead. */
+    link_send(CONTROL_ACK, s_tx_seq, s_last_recv_psn, s_tx_active_session,
+              s_tx_active + s_tx_offset, s_tx_packet_len);
 }
 
 static void client_task(void * arg)
@@ -2237,8 +2391,22 @@ static void iap2_task(void * arg)
 {
     (void)arg;
     bool setup_done = false;
+    unsigned work_turns = 0;
 
     for(;;) {
+        if(s_reset_pending) {
+            s_reset_pending = false;
+            reset_link();
+            uint8_t discard[256];
+            while(xStreamBufferReceive(s_rx_stream, discard, sizeof(discard), 0)) { }
+            s_rx_overflow = false;
+            setup_done = false;
+            if(s_connected) {
+                s_state = LINK_DETECT;
+                s_next_marker = xTaskGetTickCount();
+                s_next_syn = xTaskGetTickCount();
+            }
+        }
         if(!s_connected) {
             setup_done = false;
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -2288,7 +2456,10 @@ static void iap2_task(void * arg)
 
         process_rx();
         tx_pump();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* USB completion / outgoing work wakes us immediately. Yield at
+         * least once per eight turns even during a continuous sync burst. */
+        if(++work_turns >= 8) { work_turns = 0; vTaskDelay(1); }
+        ulTaskNotifyTake(pdTRUE, s_rx_more ? 0 : pdMS_TO_TICKS(10));
     }
 }
 
@@ -2316,10 +2487,15 @@ esp_err_t iap2_host_start(void)
     s_link_buf = heap_caps_malloc(LINK_BUF_SIZE, MALLOC_CAP_SPIRAM);
     s_csm_buf = heap_caps_malloc(CSM_BUF_SIZE, MALLOC_CAP_SPIRAM);
     s_ctrl_done = xSemaphoreCreateBinary();
+    s_ctrl_lock = xSemaphoreCreateMutex();
     s_tx_lock = xSemaphoreCreateMutex();
     s_state_lock = xSemaphoreCreateMutex();
+    s_session_lock = xSemaphoreCreateMutex();
+    s_session_queue = xQueueCreate(SESSION_QUEUE_LEN, sizeof(session_packet_t *));
+    if(s_session_lock == NULL || s_session_queue == NULL) return ESP_ERR_NO_MEM;
     if(s_rx_stream == NULL || s_link_buf == NULL || s_csm_buf == NULL ||
-       s_ctrl_done == NULL || s_tx_lock == NULL || s_state_lock == NULL) {
+       s_ctrl_done == NULL || s_ctrl_lock == NULL ||
+       s_tx_lock == NULL || s_state_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -2355,6 +2531,8 @@ esp_err_t iap2_host_start(void)
         return err;
     }
 
+    if(xTaskCreateWithCaps(session_task, "iap2_session", 16384, NULL, 4, NULL,
+                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) return ESP_ERR_NO_MEM;
     if(xTaskCreate(client_task, "iap2_evt", 6144, NULL, 6, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
@@ -2571,4 +2749,9 @@ esp_err_t iap2_host_play_current_key(void)
 {
     if(s_track_key == 0) return ESP_ERR_INVALID_STATE;
     return iap2_host_play_track_keys(&s_track_key, 1, 0);
+}
+
+void iap2_host_link_stats(iap2_link_stats_t * out)
+{
+    if(out != NULL) *out = s_stats;
 }

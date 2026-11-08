@@ -830,6 +830,24 @@ static esp_err_t status_get(httpd_req_t * req)
     cJSON_AddStringToObject(root, "iap2", iap2_host_status());
     cJSON_AddBoolToObject(root, "iap2_identified",
                           iap2_host_is_identified());
+    iap2_link_stats_t link;
+    iap2_host_link_stats(&link);
+    cJSON * transport = cJSON_AddObjectToObject(root, "iap2_link");
+    if(transport != NULL) {
+#if defined(IAP2TAB5_FULL_LIBRARY_SYNC)
+        cJSON_AddBoolToObject(transport, "full_library_sync", true);
+#else
+        cJSON_AddBoolToObject(transport, "full_library_sync", false);
+#endif
+#define LINK_STAT(name) cJSON_AddNumberToObject(transport, #name, link.name)
+        LINK_STAT(rx_packets); LINK_STAT(bad_headers); LINK_STAT(bad_payloads);
+        LINK_STAT(duplicates); LINK_STAT(sequence_gaps); LINK_STAT(rx_overflows);
+        LINK_STAT(hid_errors); LINK_STAT(queue_stalls); LINK_STAT(queue_high_water);
+        LINK_STAT(link_resets); LINK_STAT(retransmits);
+        LINK_STAT(library_messages); LINK_STAT(library_items);
+#undef LINK_STAT
+        cJSON_AddBoolToObject(transport, "library_complete", link.library_complete);
+    }
     iap2_state_t iap2;
     if(iap2_host_get_state(&iap2)) {
         cJSON_AddNumberToObject(root, "play_status", iap2.play_status);

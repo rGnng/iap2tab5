@@ -93,6 +93,7 @@ static uint32_t album_seen_next_seq = 1;
 static uint32_t album_seen_batch_seq;
 static int64_t album_seen_batch_last_us;
 static bool album_seen_dirty;
+static uint32_t album_seen_revision;
 static int64_t album_seen_dirty_since_us;
 
 static int album_sort_field;
@@ -243,6 +244,7 @@ void player_note_iap2_album(uint64_t album_pid)
     album_seen_batch_last_us = now;
     if(album_seen_insert_unlocked(album_pid, album_seen_batch_seq)) {
         album_seen_dirty = true;
+        album_seen_revision++;
         album_seen_dirty_since_us = now;
     }
     album_seen_lock_give();
@@ -302,62 +304,57 @@ static void album_seen_load(void)
 
 static void album_seen_save(bool force)
 {
-    if(!album_seen_dirty || !app_config_sd_ready()) return;
-    int64_t now = esp_timer_get_time();
-    if(!force && now - album_seen_dirty_since_us < 5000000) return;
-
+    if(!app_config_sd_ready()) return;
     album_seen_lock_take();
+    int64_t now = esp_timer_get_time();
+    if(!album_seen_dirty || (!force && now - album_seen_dirty_since_us < 5000000)) {
+        album_seen_lock_give();
+        return;
+    }
     uint32_t count = 0;
     for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS; i++) {
         if(album_seen[i].pid != 0 && album_seen[i].seq != 0) count++;
     }
-
-    char path[160];
-    char tmp[168];
+    album_seen_record_t * records = malloc((size_t)count * sizeof(*records));
+    if(records == NULL) { album_seen_lock_give(); return; }
+    uint32_t index = 0;
+    for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS; i++) {
+        if(album_seen[i].pid == 0 || album_seen[i].seq == 0) continue;
+        records[index++] = (album_seen_record_t){album_seen[i].pid, album_seen[i].seq};
+    }
+    uint32_t saved_revision = album_seen_revision;
+    char path[160], tmp[168];
     album_seen_path(path, sizeof(path));
+    album_seen_lock_give();
+    /* Snapshot under the lock, perform all SD I/O without it. Incoming
+     * iAP2 albums must never wait for an SD flush or rename. */
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE * f = fopen(tmp, "wb");
-    if(f == NULL) {
-        album_seen_lock_give();
-        return;
-    }
-
+    if(f == NULL) { free(records); return; }
     album_seen_header_t header = {
-        .magic = "T5SEE001",
-        .version = 1,
-        .count = count,
+        .magic = "T5SEE001", .version = 1, .count = count,
     };
-    bool ok = fwrite(&header, 1, sizeof(header), f) == sizeof(header);
-    if(ok) {
-        for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS && count > 0; i++) {
-            if(album_seen[i].pid == 0 || album_seen[i].seq == 0) continue;
-            album_seen_record_t rec = {
-                .pid = album_seen[i].pid,
-                .seq = album_seen[i].seq,
-            };
-            if(fwrite(&rec, 1, sizeof(rec), f) != sizeof(rec)) {
-                ok = false;
-                break;
-            }
-        }
-    }
+    bool ok = fwrite(&header, 1, sizeof(header), f) == sizeof(header) &&
+              fwrite(records, sizeof(*records), count, f) == count;
+    free(records);
     if(fclose(f) != 0) ok = false;
     if(ok) {
-        /* FATFS rename() does not replace an existing target. */
+        /* FATFS rename does not replace an existing file. */
         remove(path);
-        if(rename(tmp, path) == 0) {
-            album_seen_dirty = false;
-        }
-        else {
-            ok = false;
-        }
+        ok = rename(tmp, path) == 0;
     }
-    if(!ok) {
+    if(ok) {
+        album_seen_lock_take();
+        if(album_seen_revision == saved_revision) album_seen_dirty = false;
+        album_seen_lock_give();
+        ESP_LOGI(TAG, "album seen order saved (%u entries)", (unsigned)count);
+    }
+    else {
         remove(tmp);
         ESP_LOGW(TAG, "album seen order save failed");
     }
-    album_seen_lock_give();
 }
+
 #else
 static void album_seen_load(void) { }
 static void album_seen_save(bool force) { (void)force; }

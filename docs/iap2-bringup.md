@@ -34,6 +34,9 @@ keyboard driver. Restore AFC with `J` and a reboot.
   iPod and are not sent.
 - the IN transfer runs in 64-byte packets; reports larger than 64 bytes are
   reassembled from the `[report_id][LCB]` header before feeding the link layer
+  using their exact descriptor sizes, including the trailing two bytes of
+  258/386/514-byte reports. Stream writes are all-or-nothing; overflow causes
+  controlled link recovery instead of silently dropping bytes.
 
 ## Link layer
 
@@ -54,10 +57,24 @@ Payload bytes are followed by the same checksum over the payload.
 
 - control bits: `SYN=0x80`, `ACK=0x40`, `EAK=0x20`, `RST=0x10`
 - control session id 10, EA session 11, FT session 12
-- the host sends SYN with its LSP (max_outgoing 30, max_len 65535,
-  retransmit 4000 ms, ack timeout 500 ms, 3 sessions), adopts the device LSP,
+- the host sends SYN with its LSP (max_outstanding 1, max_len 4096,
+  retransmit 4000 ms, ack timeout 500 ms, max cumulative ACKs 1, 3 sessions), adopts the device LSP,
   then sends an ACK
 - data packets are stop-and-wait with ACK and 4 retries
+- TX fragmentation respects the peer's maximum packet length and retransmit
+  timeout. A failed write retains its sequence and payload for retry.
+- ACK/EAK-only packets do not consume RX sequence numbers. Duplicates are
+  acknowledged without being delivered twice. Missing or unqueued data is
+  never cumulatively acknowledged.
+- Validated payloads enter a bounded 32-entry queue before ACK; a separate
+  worker handles session parsing and storage. Reset generations discard stale
+  queued work. USB completions wake the link task directly, with bounded parser
+  work and periodic yields during continuous traffic.
+- The parser validates headers before trusting packet lengths, scans using a
+  cursor, and compacts once per batch. Reset during dispatch cannot underflow
+  the receive length. Truncated frames expire so they cannot block reception
+  indefinitely. Timed-out control transfers retain their DMA buffer until the
+  completion callback is observed.
 - the device ACKs each data packet and sends its own control-session CSM
   frames on session 10
 

@@ -61,3 +61,7 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     # desktop-only "lvgl/lvgl.h" include path.
     LV_LVGL_H_INCLUDE_SIMPLE=1
 )
+
+if(IAP2TAB5_FULL_LIBRARY_SYNC)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE IAP2TAB5_FULL_LIBRARY_SYNC=1)
+endif()

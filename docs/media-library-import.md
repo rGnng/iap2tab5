@@ -330,10 +330,24 @@ Asteroid`; the album detail shows `運命 Disaster`, `キラキラ雨`, `鴉少�
 "Recently Added" order; Settings → Sort basis / Order switches between added
 date, name and year, ascending/descending.
 
-A small `/sdcard/lib/<short8>/album_seen.bin` side-car can hold the iAP2-side
-first-seen sequence for albums without an AFC date. The iAP2 full-library
-subscription is currently **disabled by default**: the USB link layer cannot
-sustain the device's 15k-message delete phase reliably (out-of-order/checksum
-errors and watchdog resets). Build with
-`-DIAP2TAB5_FULL_LIBRARY_SYNC` to enable the experimental path once the link
-window/ACK handling has been hardened.
+A small `/sdcard/lib/<short8>/album_seen.bin` sidecar holds the iAP2-side
+first-seen sequence for albums without an AFC date. This is discovery order,
+not the original date the music was added to the iPod. The existing AFC dates
+remain authoritative. The writer snapshots the map before doing SD I/O, and
+keeps new arrivals dirty until a subsequent save.
+
+Full iAP2 library notifications are opt-in. Enable the CMake option with:
+
+```bash
+idf.py -C firmware -DIAP2TAB5_FULL_LIBRARY_SYNC=ON build
+```
+
+Use `OFF` to disable the subscription. A CMake option now explicitly supplies
+the compiler definition; a bare, unused CMake variable is insufficient.
+The hardened USB link passed the real iPod's 15k-message deletion phase and
+completed 23,661 update messages / 34,443 item groups without transport errors
+or watchdog resets. `/api/status` reports counters under `iap2_link`.
+
+These notifications supplement album ordering. The browsable album/track
+catalog is still loaded from the AFC import; this handler does not yet create
+a complete catalog from iAP2 metadata alone.

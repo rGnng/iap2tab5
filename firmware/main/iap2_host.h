@@ -14,6 +14,15 @@ extern "C" {
  * usb_host_core_set_apple_config(2) before enumeration. */
 esp_err_t iap2_host_start(void);
 
+/* Diagnostic counters are cumulative for this boot; snapshots are approximate. */
+typedef struct {
+    uint32_t rx_packets, bad_headers, bad_payloads, duplicates, sequence_gaps;
+    uint32_t rx_overflows, hid_errors, queue_stalls, queue_high_water;
+    uint32_t link_resets, retransmits, library_messages, library_items;
+    bool library_complete;
+} iap2_link_stats_t;
+void iap2_host_link_stats(iap2_link_stats_t * out);
+
 typedef struct {
     bool connected;
     bool identified;
