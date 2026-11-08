@@ -5,7 +5,9 @@ dependencies:
   espressif/esp_lvgl_port:
     version: "^2.9.0"
     override_path: "../components/esp_lvgl_port"
-  espressif/usb_host_hid: ^1.2.0
+  espressif/usb_host_hid:
+    version: "1.2.1"
+    override_path: "../components/usb_host_hid"
   lvgl/lvgl: 9.6.0
   # IDF 5.5 provides the USB host stack and the FS/HS OTG controllers.
   # Let the component manager resolve the matching espressif/usb version.

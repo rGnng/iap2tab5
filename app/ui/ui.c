@@ -260,18 +260,56 @@ static ui_system_config_t g_system_config = {
 };
 static void (*g_system_config_changed_cb)(const ui_system_config_t * cfg);
 static void (*g_feedback_cb)(int type);
+static bool g_key_feedback_scope;
+static bool g_key_feedback_sent;
 static void (*g_afc_status_cb)(ui_afc_status_t * out);
 static void (*g_afc_action_cb)(int action);
 static void (*g_time_changed_cb)(time_t now);
 
-/* Key Sound: 0 = none, 1 = touch only, 2 = touch + key.  Scrolling never
- * calls this; only real activations do. */
+/* Key Feedback: 0 = none, 1 = touch only, 2 = touch + key. */
 static void ui_feedback_emit(ui_feedback_t type, bool from_key)
 {
     int mode = g_system_config.sound_mode;
     if(!g_system_config.sound_enabled || mode <= 0) return;
     if(from_key && mode < 2) return;
-    if(g_feedback_cb != NULL) g_feedback_cb((int)type);
+    if(g_key_feedback_scope && g_key_feedback_sent) return;
+    if(g_feedback_cb != NULL) {
+        if(g_key_feedback_scope) g_key_feedback_sent = true;
+        g_feedback_cb((int)type);
+    }
+}
+
+void ui_play_key_feedback(ui_key_t key)
+{
+    switch(key) {
+        case UI_KEY_BACK:
+        case UI_KEY_6:
+            ui_feedback_emit(UI_FEEDBACK_BACK, true);
+            break;
+        case UI_KEY_ENTER:
+        case UI_KEY_7:
+        case UI_KEY_STAR:
+            ui_feedback_emit(UI_FEEDBACK_ACTIVATE, true);
+            break;
+        case UI_KEY_1:
+        case UI_KEY_2:
+        case UI_KEY_3:
+        case UI_KEY_4:
+        case UI_KEY_5:
+        case UI_KEY_CONTEXT:
+        case UI_KEY_SCREEN_PREV:
+        case UI_KEY_SCREEN_NEXT:
+        case UI_KEY_PREV_TRACK:
+        case UI_KEY_NEXT_TRACK:
+        case UI_KEY_VOLUME_UP:
+        case UI_KEY_VOLUME_DOWN:
+        case UI_KEY_MUTE:
+            ui_feedback_emit(UI_FEEDBACK_CLICK, true);
+            break;
+        default:
+            /* Rotary movement and list paging stay silent. */
+            break;
+    }
 }
 
 static void ui_set_hint(const char * text)
@@ -911,7 +949,9 @@ static void thumb_pack_load_task(void * p)
 {
     thumb_load_arg_t * a = (thumb_load_arg_t *)p;
     const size_t one = (size_t)REAL_THUMB_SIZE * REAL_THUMB_SIZE * 2;
-    size_t bytes = (size_t)a->albums * one;
+    /* Include the header: real_thumb_read() uses file-relative slot offsets,
+     * including for the final album in the pack. */
+    size_t bytes = THUMB_CACHE_HEADER_SIZE + (size_t)a->albums * one;
     if(bytes > 0 && bytes <= 16u * 1024u * 1024u) {
         FILE * f = fopen(a->path, "rb");
         if(f != NULL) {
@@ -1051,12 +1091,20 @@ void ui_set_artwork_dir(const char * dir)
 }
 static int cover_cache_next;
 
-static const lv_image_dsc_t * real_thumb_for_album(uint16_t id)
+static const lv_image_dsc_t * real_thumb_cached(uint16_t id)
 {
     if(id == 0) return NULL;
     for(int i = 0; i < COVER_CACHE_SLOTS; i++) {
         if(cover_cache[i].id == id) return &cover_cache[i].dsc;
     }
+    return NULL;
+}
+
+static const lv_image_dsc_t * real_thumb_for_album(uint16_t id)
+{
+    if(id == 0) return NULL;
+    const lv_image_dsc_t * cached = real_thumb_cached(id);
+    if(cached != NULL) return cached;
 
     cover_cache_slot_t * slot = &cover_cache[cover_cache_next++ % COVER_CACHE_SLOTS];
     const size_t one = (size_t)REAL_THUMB_SIZE * REAL_THUMB_SIZE * 2;
@@ -1187,6 +1235,30 @@ static const void * thumb_for_album(const player_album_t * album, int size)
     if(size <= 60) return &thumb54_dsc[album->cover_index];
     if(size <= 90) return &thumb80_dsc[album->cover_index];
     return album->cover;
+}
+
+/* No file access or decoding on the scrolling path. */
+static const void * thumb_for_album_cached(const player_album_t * album)
+{
+    if(album->cover_index >= PLAYER_REAL_COVER_BASE) {
+        return real_thumb_cached(
+            (uint16_t)(album->cover_index - PLAYER_REAL_COVER_BASE));
+    }
+    if(thumbs_ready && album->cover_index < THUMB_COUNT && album->cover[0]) {
+        return &thumb54_dsc[album->cover_index];
+    }
+    return NULL;
+}
+
+static bool album_thumb_missing(const player_album_t * album)
+{
+    if(album->cover_index < PLAYER_REAL_COVER_BASE) return album->cover[0] == '\0';
+    uint32_t id = album->cover_index - PLAYER_REAL_COVER_BASE;
+    if(id == 0) return true;
+    if(!s_thumb_pack_ready) return false; /* Legacy file: try at idle. */
+    uint32_t n = id - 1;
+    return id > s_thumb_pack_count || n / 8 >= sizeof(s_thumb_valid) ||
+           (s_thumb_valid[n / 8] & (1u << (n & 7))) == 0;
 }
 
 static const void * mini_thumb_for_album(const player_album_t * album)
@@ -2326,7 +2398,7 @@ static void ui_handle_media_key(ui_key_t key)
     }
 }
 
-void ui_handle_key(ui_key_t key)
+static void ui_dispatch_key(ui_key_t key)
 {
     if(g_afc_sync_mode) {
         switch(key) {
@@ -2446,6 +2518,22 @@ void ui_handle_key(ui_key_t key)
     }
 }
 
+void ui_handle_key(ui_key_t key)
+{
+    /* Page and modal handlers can consume Enter/Back before the generic
+     * focus code. Emit here, then suppress duplicate action/preview sounds
+     * during this dispatch. Keep previews when enabling a previously silent
+     * mode, and leave touch events outside this scope unchanged. */
+    bool previous_scope = g_key_feedback_scope;
+    bool previous_sent = g_key_feedback_sent;
+    g_key_feedback_scope = true;
+    g_key_feedback_sent = false;
+    ui_play_key_feedback(key);
+    ui_dispatch_key(key);
+    g_key_feedback_scope = previous_scope;
+    g_key_feedback_sent = previous_sent;
+}
+
 void ui_select_screen(int index)
 {
     if(g_afc_sync_mode) return;
@@ -2480,8 +2568,8 @@ static uint64_t g_np_cover_track_id;
  * always played; only this many upcoming entries are listed. */
 #define NP_QUEUE_MAX_ROWS     100
 
-/* Default Now Playing layout: cover on the left; title (with the star at
- * its right edge), artist and album occupy three separate lines.  The
+/* Default Now Playing layout: cover on the left; title, artist and album
+ * occupy three separate lines, with a secondary star action below. The
  * progress bar and the five transport/mode buttons span the full column
  * width below the cover. */
 #define NP_COVER_SIZE         360
@@ -2493,9 +2581,13 @@ static uint64_t g_np_cover_track_id;
 #define NP_BUTTON_W            96
 #define NP_BUTTON_H            84
 #define NP_BUTTON_GAP          28
-/* Vertical rhythm for the three metadata lines: 26:16 ≈ 1.625 (~φ). */
+/* Golden-ratio rhythm: 26:16:10 gaps; star = round(48 px / φ) = 30 px.
+ * Keep its 56 px touch target independent of the smaller visual. */
 #define NP_TEXT_GAP_TITLE      26
 #define NP_TEXT_GAP_ARTIST     16
+#define NP_TEXT_GAP_ALBUM      10
+#define NP_STAR_ICON_SIZE      30
+#define NP_STAR_TARGET_SIZE    56
 
 static lv_obj_t * np_queue_list;
 static counter_t np_queue_counter;
@@ -2609,9 +2701,8 @@ static void np_refresh_ui(void)
         if(strcmp(lv_label_get_text(np_title), title) != 0) {
             lv_label_set_text(np_title, title);
             if(!np_queue_visible) {
-                /* Keep the star hugging the end of the title.  Measure the
-                 * rendered text so long titles stop before the star and
-                 * ellipsize instead of pushing it out of the column. */
+                /* Fit the title to its text, capped at the metadata column
+                 * width so long titles fade within the column. */
                 lv_point_t title_size;
                 lv_text_get_size(&title_size, title, FONT_NP_TITLE, 0, 0,
                                  LV_COORD_MAX, LV_TEXT_FLAG_NONE);
@@ -3432,11 +3523,22 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_height(np_album, 44);
         ui_text_fade(np_album);
 
-        lv_obj_t * star = make_flat_icon_button(info, ICON_STAR, 56, 56,
+        np_vertical_gap(info, NP_TEXT_GAP_ALBUM);
+
+        lv_obj_t * star = make_flat_icon_button(info, ICON_STAR,
+                                                NP_STAR_TARGET_SIZE,
+                                                NP_STAR_TARGET_SIZE,
                                                 COL_MUTED, &bootstrap_icons_40);
-        lv_obj_set_style_margin_left(star, -8, 0);
+        lv_obj_set_style_margin_left(star,
+            -(NP_STAR_TARGET_SIZE - NP_STAR_ICON_SIZE) / 2, 0);
         np_star_btn = star;
         np_star_icon = lv_obj_get_child(star, 0);
+        /* Scale the glyph around its centre, preserving the button's hit
+         * area and aligning the visible star with the metadata text. */
+        lv_obj_set_style_transform_pivot_x(np_star_icon, LV_PCT(50), 0);
+        lv_obj_set_style_transform_pivot_y(np_star_icon, LV_PCT(50), 0);
+        lv_obj_set_style_transform_scale(np_star_icon,
+                                         LV_SCALE_NONE * NP_STAR_ICON_SIZE / 40, 0);
         lv_obj_add_event_cb(star, np_star_click_cb, LV_EVENT_CLICKED, NULL);
 
         np_vertical_gap(left, NP_GAP_PROGRESS);
@@ -3583,6 +3685,12 @@ static int albums_first_for_top(int top)
     return first < 0 ? 0 : first;
 }
 #define ALBUMS_POOL        10
+#define ALBUMS_REFRESH_MS  16
+#define ALBUMS_COVER_IDLE_MS 140
+#define ALBUMS_COVER_BATCH  2
+#define ALBUMS_COVER_BUDGET_US 4000
+#define ALBUMS_COVER_RETRY_MS 250
+#define ALBUMS_COVER_MAX_ATTEMPTS 3
 #define ALBUM_TRACK_ROW_H  56
 #define ALBUM_HEADER_H     112
 #define ALBUM_TRACK_ROWS   9
@@ -3605,12 +3713,19 @@ static uint32_t albums_swipe_guard;
 static uint64_t albums_row_album_ids[ALBUMS_POOL];
 static int albums_row_indices[ALBUMS_POOL] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 static bool albums_row_visible[ALBUMS_POOL];
+static bool albums_row_cover_pending[ALBUMS_POOL];
+static uint8_t albums_row_cover_attempts[ALBUMS_POOL];
+static uint32_t albums_row_cover_attempt_tick[ALBUMS_POOL];
 static bool albums_row_selected[ALBUMS_POOL];
 static int albums_view_top;
 static int albums_view_h;
 static int albums_first_index = -1;
 static bool albums_detail_dirty;
 static lv_timer_t * albums_detail_timer;
+static lv_timer_t * albums_refresh_timer;
+static lv_timer_t * albums_cover_timer;
+static bool albums_refresh_pending;
+static uint32_t albums_last_scroll_tick;
 static lv_obj_t * albums_detail_title;
 static lv_obj_t * artists_detail_name;
 static lv_obj_t * playlists_detail_title;
@@ -3699,16 +3814,12 @@ static void albums_fill_row(int slot, int index)
     if(index < 0 || index >= player_album_count() ||
        !player_album_get(index, &album)) {
         lv_obj_set_hidden(row, true);
+        albums_row_cover_pending[slot] = false;
         return;
     }
 
-    lv_obj_set_hidden(row, false);
-    lv_obj_set_pos(row, 0, albums_row_top(index));
-    lv_obj_set_user_data(row, (void *)(intptr_t)index);
-
-    /* Only decode covers that are actually inside the viewport. The pool has
-     * a few rows above/below the visible area; loading those covers just
-     * wastes SPIFFS reads and PSRAM. */
+    /* Recheck visibility even for retained rows. Overscan rows may have been
+     * bound with placeholders before they entered the viewport. */
     int top = albums_view_top;
     int view_h = albums_view_h;
     int row_top = albums_row_top(index);
@@ -3717,21 +3828,30 @@ static void albums_fill_row(int slot, int index)
     bool same = albums_row_album_ids[slot] == album.id &&
                 albums_row_indices[slot] == index;
     if(!same) {
+        lv_obj_set_hidden(row, false);
+        lv_obj_set_pos(row, 0, albums_row_top(index));
+        lv_obj_set_user_data(row, (void *)(intptr_t)index);
         lv_label_set_text(albums_row_titles[slot], album.title);
         lv_label_set_text(albums_row_artists[slot], album.artist);
         lv_obj_set_style_bg_color(albums_row_covers[slot],
                                   lv_color_hex(album.color ? album.color : COL_PANEL), 0);
         albums_row_album_ids[slot] = album.id;
         albums_row_indices[slot] = index;
-        albums_row_visible[slot] = !visible; /* force the cover update below */
     }
-    if(visible != albums_row_visible[slot]) {
-        lv_image_set_src(albums_row_covers[slot],
-                         visible ? thumb_for_album(&album, 54) : NULL);
+    if(!same || visible != albums_row_visible[slot]) {
+        const void * src = visible ? thumb_for_album_cached(&album) : NULL;
+        lv_image_set_src(albums_row_covers[slot], src);
         albums_row_visible[slot] = visible;
+        albums_row_cover_pending[slot] = visible && src == NULL &&
+                                         !album_thumb_missing(&album);
+        albums_row_cover_attempts[slot] = 0;
+        albums_row_cover_attempt_tick[slot] = 0;
     }
-    albums_apply_row_style(row, index);
-    albums_row_selected[slot] = (index == albums_selected);
+    bool selected = index == albums_selected;
+    if(!same || albums_row_selected[slot] != selected) {
+        albums_apply_row_style(row, index);
+        albums_row_selected[slot] = selected;
+    }
 }
 
 static void albums_refresh_rows(void)
@@ -3743,6 +3863,7 @@ static void albums_refresh_rows(void)
         for(int i = 0; i < ALBUMS_POOL; i++) {
             lv_obj_set_hidden(albums_rows[i], true);
             albums_row_indices[i] = -1;
+            albums_row_cover_pending[i] = false;
         }
         perf_log_us("albums_refresh", perf_t0);
         return;
@@ -3772,6 +3893,7 @@ static void albums_refresh_rows(void)
         bool present = false;
         for(int slot = 0; slot < ALBUMS_POOL; slot++) {
             if(albums_row_indices[slot] == index) {
+                albums_fill_row(slot, index);
                 present = true;
                 break;
             }
@@ -3788,24 +3910,18 @@ static void albums_refresh_rows(void)
         albums_fill_row(free_slot, index);
     }
     for(int slot = 0; slot < ALBUMS_POOL; slot++) {
-        if(albums_row_indices[slot] >= 0) {
-            albums_apply_row_style(albums_rows[slot], albums_row_indices[slot]);
-        }
-        else {
+        if(albums_row_indices[slot] < 0) {
             lv_obj_set_hidden(albums_rows[slot], true);
+            albums_row_cover_pending[slot] = false;
         }
     }
     perf_log_us("albums_refresh", perf_t0);
 }
 
-/* Fast scrolling can move the viewport past several rows per frame; filling
- * rows and decoding covers on every scroll event made the list lag and left
- * stale rows behind.  Wait until the scroll settles, then fill once. */
-static lv_timer_t * albums_refresh_timer;
-
 static void albums_refresh_timer_cb(lv_timer_t * timer)
 {
     lv_timer_pause(timer);
+    albums_refresh_pending = false;
     if(g_current_screen != SCR_ALBUMS || albums_left_list == NULL) return;
     albums_refresh_rows();
 }
@@ -3813,20 +3929,124 @@ static void albums_refresh_timer_cb(lv_timer_t * timer)
 static void albums_schedule_refresh(void)
 {
     if(albums_refresh_timer == NULL) {
-        albums_refresh_timer = lv_timer_create(albums_refresh_timer_cb, 140,
+        albums_refresh_timer = lv_timer_create(albums_refresh_timer_cb, ALBUMS_REFRESH_MS,
                                                NULL);
         if(albums_refresh_timer == NULL) return;
         lv_timer_pause(albums_refresh_timer);
     }
-    lv_timer_reset(albums_refresh_timer);
-    lv_timer_resume(albums_refresh_timer);
+    /* Coalesce to a frame, without postponing rows indefinitely during a
+     * continuous drag. This path only binds text and existing cached images. */
+    if(!albums_refresh_pending) {
+        albums_refresh_pending = true;
+        lv_timer_reset(albums_refresh_timer);
+        lv_timer_resume(albums_refresh_timer);
+    }
+}
+
+static void albums_cover_timer_cb(lv_timer_t * timer)
+{
+    if(g_current_screen != SCR_ALBUMS || albums_left_list == NULL) {
+        lv_timer_pause(timer);
+        return;
+    }
+    if(lv_tick_elaps(albums_last_scroll_tick) < ALBUMS_COVER_IDLE_MS ||
+       lv_obj_is_scrolling(albums_left_list)) return;
+
+    /* Reconcile the final viewport before touching artwork, including when
+     * movement stayed within the same ten-row pool. */
+    albums_refresh_rows();
+    lv_timer_set_period(timer, ALBUMS_REFRESH_MS);
+    uint32_t start = perf_now();
+    int attempted = 0;
+    for(int index = albums_first_index;
+        index < albums_first_index + ALBUMS_POOL; index++) {
+        for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+            if(albums_row_indices[slot] != index ||
+               !albums_row_cover_pending[slot] || !albums_row_visible[slot]) continue;
+            if(albums_row_cover_attempts[slot] > 0 &&
+               lv_tick_elaps(albums_row_cover_attempt_tick[slot]) <
+                   ALBUMS_COVER_RETRY_MS) continue;
+            player_album_t album;
+            if(!player_album_get(index, &album) ||
+               album.id != albums_row_album_ids[slot]) {
+                albums_row_cover_pending[slot] = false;
+                continue;
+            }
+            const void * src = thumb_for_album(&album, 54);
+            albums_row_cover_attempts[slot]++;
+            albums_row_cover_attempt_tick[slot] = lv_tick_get();
+            if(src != NULL) {
+                lv_image_set_src(albums_row_covers[slot], src);
+                albums_row_cover_pending[slot] = false;
+            }
+            else if(album_thumb_missing(&album) ||
+                    albums_row_cover_attempts[slot] >= ALBUMS_COVER_MAX_ATTEMPTS) {
+                albums_row_cover_pending[slot] = false;
+            }
+            attempted++;
+            break;
+        }
+        /* One slow SD read may exceed the budget; yield before starting the
+         * next one. PSRAM/cache hits can fill two covers per frame. */
+        if(attempted >= ALBUMS_COVER_BATCH ||
+           (uint32_t)(perf_now() - start) >= ALBUMS_COVER_BUDGET_US) break;
+    }
+    if(attempted) perf_log_us("albums_cover_batch", start);
+    int visible = 0, loaded = 0;
+    bool pending = false;
+    uint32_t next_delay = ALBUMS_COVER_RETRY_MS;
+    for(int slot = 0; slot < ALBUMS_POOL; slot++) {
+        if(albums_row_cover_pending[slot]) {
+            pending = true;
+            uint32_t elapsed = lv_tick_elaps(albums_row_cover_attempt_tick[slot]);
+            uint32_t delay = albums_row_cover_attempts[slot] == 0 ||
+                             elapsed >= ALBUMS_COVER_RETRY_MS
+                ? ALBUMS_REFRESH_MS : ALBUMS_COVER_RETRY_MS - elapsed;
+            if(delay < next_delay) next_delay = delay;
+        }
+        if(albums_row_visible[slot] && albums_row_indices[slot] >= 0) {
+            visible++;
+            if(lv_image_get_src(albums_row_covers[slot]) != NULL) loaded++;
+        }
+    }
+    if(pending) {
+        lv_timer_set_period(timer, next_delay < ALBUMS_REFRESH_MS
+                                     ? ALBUMS_REFRESH_MS : next_delay);
+        return;
+    }
+    lv_timer_pause(timer);
+    if(g_ui_trace) {
+        UI_PERF_LOG("albums_covers settled: visible=%d loaded=%d missing=%d",
+                    visible, loaded, visible - loaded);
+    }
+}
+
+static void albums_schedule_covers(void)
+{
+    if(albums_cover_timer == NULL) {
+        albums_cover_timer = lv_timer_create(albums_cover_timer_cb,
+                                             ALBUMS_COVER_IDLE_MS, NULL);
+        if(albums_cover_timer == NULL) return;
+    }
+    lv_timer_set_period(albums_cover_timer, ALBUMS_COVER_IDLE_MS);
+    lv_timer_reset(albums_cover_timer);
+    lv_timer_resume(albums_cover_timer);
+}
+
+static void albums_cancel_work(void)
+{
+    if(albums_refresh_timer) lv_timer_pause(albums_refresh_timer);
+    if(albums_cover_timer) lv_timer_pause(albums_cover_timer);
+    albums_refresh_pending = false;
 }
 
 static void albums_scroll_cb(lv_event_t * event)
 {
     LV_UNUSED(event);
     if(albums_left_list == NULL) return;
+    albums_last_scroll_tick = lv_tick_get();
     albums_schedule_refresh();
+    albums_schedule_covers();
 }
 
 static void albums_detail_timer_cb(lv_timer_t * timer)
@@ -3908,7 +4128,7 @@ static void albums_scroll_to_selected(void)
     int actual = lv_obj_get_scroll_top(albums_left_list);
     if(actual < 0) actual = 0;
     int first = albums_first_for_top(actual);
-    if(first != albums_first_index) {
+    if(first != albums_first_index || actual != albums_view_top) {
         albums_refresh_rows();
     }
     else {
@@ -4257,7 +4477,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
 
 static void albums_create(lv_obj_t * parent)
 {
-    if(albums_refresh_timer) lv_timer_pause(albums_refresh_timer);
+    albums_cancel_work();
     albums_right_content = NULL;
     albums_left_list = NULL;
     albums_shuffle_row = NULL;
@@ -4267,6 +4487,8 @@ static void albums_create(lv_obj_t * parent)
         albums_row_album_ids[i] = 0;
         albums_row_indices[i] = -1;
         albums_row_visible[i] = false;
+        albums_row_cover_pending[i] = false;
+        albums_row_cover_attempts[i] = 0;
         albums_row_selected[i] = false;
     }
     albums_detail_dirty = false;
@@ -4317,6 +4539,7 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_set_gesture_bubble(list, false);
     lv_obj_set_clickable(list, true);
     lv_obj_add_event_cb(list, albums_scroll_cb, LV_EVENT_SCROLL, NULL);
+    lv_obj_add_event_cb(list, albums_scroll_cb, LV_EVENT_SCROLL_END, NULL);
     albums_left_list = list;
 
     int count = player_album_count();
@@ -4395,6 +4618,7 @@ static void albums_create(lv_obj_t * parent)
     }
     lv_obj_scroll_to_y(list, albums_left_scroll_y, LV_ANIM_OFF);
     albums_refresh_rows();
+    albums_schedule_covers();
 
     if(albums_detail_open) {
         focus_select(albums_play_focus >= 0 ? albums_play_focus : 0);
@@ -6669,7 +6893,7 @@ static void ble_tick(void)
 enum {
     SETTING_AFC_IAP2 = 0,
     SETTING_BLUETOOTH,
-    SETTING_KEY_SOUND,
+    SETTING_KEY_FEEDBACK,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
     SETTING_USB,
@@ -6779,7 +7003,7 @@ static void settings_rebuild(void);
 static const char * const settings_names[SETTING_COUNT] = {
     "iOS Device",
     "Bluetooth",
-    "Key Sound",
+    "Key Feedback",
     "Theme",
     "Now Playing Background",
     "USB Options",
@@ -8028,7 +8252,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             }
             break;
         }
-        case SETTING_KEY_SOUND: {
+        case SETTING_KEY_FEEDBACK: {
             lv_obj_t * vol = settings_make_value_row(
                 parent, "Volume", "", COL_TEXT, SETTINGS_ROW_H, FONT_H2,
                 FONT_H2, &settings_detail_volume_value);
@@ -8230,6 +8454,8 @@ static void settings_schedule_detail(void)
 static void ui_page_teardown(void)
 {
     ui_marquee_stop();
+    albums_cancel_work();
+    albums_left_list = NULL;
     if(albums_detail_timer) lv_timer_pause(albums_detail_timer);
     albums_detail_dirty = false;
     albums_right_content = NULL;

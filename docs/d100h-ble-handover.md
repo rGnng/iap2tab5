@@ -262,7 +262,7 @@ the scan. This is a UX issue, not the driver blocker.
 | --- | --- | --- |
 | 0x01 | top-left | `UI_KEY_BACK` |
 | 0x02 | top-middle | `UI_KEY_7` (play/pause) |
-| 0x03 | top-right | `UI_KEY_CONTEXT` short / `UI_KEY_STAR` long (handled in `ble_remote.c`) |
+| 0x03 | top-right | `UI_KEY_CONTEXT` short / `UI_KEY_STAR` long (shared timer in `usb_hid_input.c`) |
 | 0x04 | upper-left side | `UI_KEY_SCREEN_PREV` |
 | 0x05 | upper-right side | `UI_KEY_PREV_TRACK` |
 | 0x06 | lower-left side | `UI_KEY_SCREEN_NEXT` |
@@ -271,8 +271,10 @@ the scan. This is a UX issue, not the driver blocker.
 | 0x09 / 0x0A | free CCW / CW | `UI_KEY_UP` / `UI_KEY_DOWN` |
 | 0x0B / 0x0C | knob-held CCW / CW | `UI_KEY_UP` / `UI_KEY_DOWN` |
 
-Top-right long press is measured from the down event to the up event; >= 600 ms
-is Star, otherwise Context.
+Top-right emits Star once when the button has been held for 600 ms, while it
+is still down. Release after a long press does nothing; release before 600 ms
+emits Context. USB and BLE share the timing logic and cancel pending holds
+on disconnect.
 
 ---
 

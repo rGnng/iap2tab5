@@ -210,7 +210,7 @@ dependencies:
       public: true
       version: '>=8,<10'
     source:
-      path: /home/ops/iap2tab5/firmware/components/esp_lvgl_port
+      path: components/esp_lvgl_port
       type: local
     version: 2.9.0
   espressif/esp_sccb_intf:
@@ -402,21 +402,18 @@ dependencies:
     - linux
     version: 1.6.0
   espressif/usb_host_hid:
-    component_hash: 74b9c84cd2921a5e987f504c1713ca7819f7e8be80565e5253e9e9c7e07ab881
     dependencies:
     - name: idf
-      require: private
       version: '>=5.0'
     - name: espressif/usb
-      registry_url: https://components.espressif.com
-      require: public
+      public: true
       rules:
       - if: idf_version >=6.0
       - if: target not in ["linux"]
       version: ^1.0.0
     source:
-      registry_url: https://components.espressif.com/
-      type: service
+      path: components/usb_host_hid
+      type: local
     targets:
     - esp32s2
     - esp32s3
@@ -506,6 +503,6 @@ direct_dependencies:
 - espressif/usb_host_hid
 - idf
 - lvgl/lvgl
-manifest_hash: ed774f4c941d5e38552bcd50576d7919218d0169785b740e7ecab7a82b3ba8f7
+manifest_hash: c73c6396fcba6dd258196c749897c2b30c294ee7f1d8c23d0717c57866d12a4b
 target: esp32p4
 version: 2.0.0

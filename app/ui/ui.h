@@ -127,6 +127,10 @@ typedef enum {
 /** Optional short UI sound hook implemented by the firmware. */
 void ui_set_feedback_cb(void (*cb)(int type));
 
+/** Sound for a key action handled outside ui_handle_key (e.g. held seek).
+ * Respects Key Feedback mode; caller must hold the UI/display lock. */
+void ui_play_key_feedback(ui_key_t key);
+
 /* Apple File Conduit Sync settings page. The UI is shared with the simulator;
  * the firmware supplies the live status and handles the actions. */
 typedef struct {

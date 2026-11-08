@@ -14,6 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 ZERO_BLOCK = bytes.fromhex('3890c499a360aaad')
 
 
+class TopRightState(ctypes.Structure):
+    _fields_ = [('down', ctypes.c_bool), ('fired', ctypes.c_bool),
+                ('pressed_us', ctypes.c_int64)]
+
+
+# Public gesture event/action enums from ulanzi_d100h.h.
+DOWN, UP, POLL, CANCEL = range(4)
+NONE, CONTEXT, STAR = range(3)
+
+
 class D100HProtocolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -42,6 +52,70 @@ class D100HProtocolTests(unittest.TestCase):
             ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
             ctypes.POINTER(ctypes.c_uint8)]
         cls.lib.ulanzi_d100h_encode_ble.restype = None
+        cls.lib.ulanzi_top_right_update.argtypes = [
+            ctypes.POINTER(TopRightState), ctypes.c_int, ctypes.c_int64]
+        cls.lib.ulanzi_top_right_update.restype = ctypes.c_int
+        cls.lib.ulanzi_top_right_deadline.argtypes = [ctypes.POINTER(TopRightState)]
+        cls.lib.ulanzi_top_right_deadline.restype = ctypes.c_int64
+
+    def gesture(self, state, event, now_us):
+        return self.lib.ulanzi_top_right_update(ctypes.byref(state), event, now_us)
+
+    def test_top_right_fires_at_threshold_without_release(self):
+        state = TopRightState()
+        self.assertEqual(self.gesture(state, DOWN, 1000000), NONE)
+        self.assertEqual(self.lib.ulanzi_top_right_deadline(ctypes.byref(state)), 1600000)
+        self.assertEqual(self.gesture(state, POLL, 1599999), NONE)
+        self.assertEqual(self.gesture(state, POLL, 1600000), STAR)
+        self.assertTrue(state.down)
+        self.assertEqual(self.lib.ulanzi_top_right_deadline(ctypes.byref(state)), 0)
+        self.assertEqual(self.gesture(state, POLL, 9000000), NONE)
+        self.assertEqual(self.gesture(state, UP, 9000001), NONE)
+        self.assertFalse(state.down)
+
+    def test_top_right_short_tap_and_unmatched_release(self):
+        state = TopRightState()
+        self.assertEqual(self.gesture(state, UP, 0), NONE)
+        self.assertEqual(self.gesture(state, DOWN, 0), NONE)
+        self.assertEqual(self.gesture(state, UP, 599999), CONTEXT)
+        self.assertEqual(self.gesture(state, POLL, 600000), NONE)
+        self.assertEqual(self.gesture(state, UP, 700000), NONE)
+
+    def test_top_right_repeat_down_does_not_restart_or_repeat(self):
+        state = TopRightState()
+        self.gesture(state, DOWN, 0)
+        self.assertEqual(self.gesture(state, DOWN, 500000), NONE)
+        self.assertEqual(self.gesture(state, POLL, 600000), STAR)
+        self.assertEqual(self.gesture(state, DOWN, 900000), NONE)
+        self.assertEqual(self.gesture(state, POLL, 1500000), NONE)
+        self.assertEqual(self.gesture(state, UP, 1600000), NONE)
+
+    def test_top_right_release_at_threshold_when_dispatch_is_delayed(self):
+        for release_us in (600000, 800000):
+            state = TopRightState()
+            self.gesture(state, DOWN, 0)
+            self.assertEqual(self.gesture(state, UP, release_us), STAR)
+            self.assertEqual(self.gesture(state, POLL, 1000000), NONE)
+
+    def test_top_right_cancel_and_separate_input_sources(self):
+        usb, ble = TopRightState(), TopRightState()
+        self.gesture(usb, DOWN, 0)
+        self.gesture(ble, DOWN, 0)
+        self.assertEqual(self.gesture(usb, CANCEL, 500000), NONE)
+        self.assertEqual(self.gesture(usb, POLL, 600000), NONE)
+        self.assertEqual(self.gesture(usb, UP, 700000), NONE)
+        self.assertEqual(self.gesture(ble, POLL, 600000), STAR)
+        self.gesture(usb, DOWN, 1000000)
+        self.assertEqual(self.gesture(usb, POLL, 1600000), STAR)
+
+    def test_top_right_next_hold_can_toggle_again(self):
+        state = TopRightState()
+        self.gesture(state, DOWN, 0)
+        self.assertEqual(self.gesture(state, POLL, 600000), STAR)
+        self.assertEqual(self.gesture(state, UP, 700000), NONE)
+        self.gesture(state, DOWN, 800000)
+        self.assertEqual(self.gesture(state, POLL, 1400000), STAR)
+        self.assertEqual(self.gesture(state, UP, 1500000), NONE)
 
     def decode(self, name, wire):
         data = (ctypes.c_uint8 * len(wire)).from_buffer_copy(wire)

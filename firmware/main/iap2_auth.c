@@ -40,9 +40,11 @@ esp_err_t iap2_auth_init(void)
         return ESP_FAIL;
     }
 
-    /* identity.pk8 is an unencrypted PKCS#8 DER EC P-256 key. */
+    /* PKCS#8 can omit the public point. mbedTLS needs an RNG to derive it
+     * from the private scalar, even though the key is not encrypted. */
     ret = mbedtls_pk_parse_key(&s_key, iap2_identity_sec1,
-                               iap2_identity_sec1_len, NULL, 0, NULL, NULL);
+                               iap2_identity_sec1_len, NULL, 0,
+                               mbedtls_ctr_drbg_random, &s_drbg);
     if(ret != 0) {
         log_mbedtls("pk_parse_key", ret);
         return ESP_FAIL;

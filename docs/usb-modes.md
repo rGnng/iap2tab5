@@ -27,7 +27,7 @@
 | 值 | 启动后的 USB 角色 |
 | --- | --- |
 | `0` | USB-A HS host；USB-C 作为 device / USB Serial-JTAG console（默认） |
-| `2` | Both A+C：USB-A HS + USB-C FS 同时 host；USB-C console 仍在 PHY1 |
+| `2` | Both A+C：USB-A HS + USB-C FS 同时 host；Serial/JTAG pads 关闭，避免占用 I2S |
 
 补充：
 
@@ -75,10 +75,11 @@ usb_host_core_start()
 - USB-C 数据线在 Tab5 上接 **FSLS PHY0**；ESP-IDF 默认把 `USB_WRAP` 映射到 PHY1，所以固件必须在 `usb_host_install()` 前调用：
 
   ```c
+  usb_serial_jtag_ll_phy_enable_pad(false);  // GPIO26/27 留给 I2S
   usb_wrap_ll_phy_select(&USB_WRAP, 0);
   ```
 
-- USB-C host 模式下，USB Serial/JTAG console 会被路由到 PHY1（板子上没接），因此串口会消失；远程调试使用 WiFi 的 `/debug`、`/api/log`、`/api/log/stream`。
+- USB-C host 模式下，USB Serial/JTAG 会被路由到 PHY1（GPIO26/27）。这两个脚实际连接 ES8388 的 I2S DOUT/BCLK，所以必须在切换 PHY 前调用 `usb_serial_jtag_ll_phy_enable_pad(false)` 释放引脚，否则 codec 写入成功也没有声音。USB_WRAP 的 PHY0 pads 保持启用；远程调试使用 WiFi 的 `/debug`、`/api/log`、`/api/log/stream`。
 - OTA / USB mode 切换后的重启使用 `esp_rom_software_reset_system()`，不再调用 `esp_restart()`：USB host 栈处于活动状态时 `esp_restart()` 可能卡住并触发 WDT，表现为“重启时死机几秒后自动重启”。
 - USB-C 的 CC1/CC2 是 5.1k 下拉，VBUS 是 `USB_5VIN` 输入；它不是能对外供电的 host 口。需要通过 powered hub/dock 向上游供 5V，Tab5 才能同时作为 USB-C host 工作。
 - USB-A 的 VBUS 由 BSP `BSP_FEATURE_USB` 开关控制；双 host 时 USB-A 和 USB-C 下游设备的电流都来自系统 5V/电池，供电余量要留够。

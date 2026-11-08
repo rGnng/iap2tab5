@@ -7,6 +7,7 @@
 #include "usb/usb_host.h"
 
 #if CONFIG_IDF_TARGET_ESP32P4
+#include "hal/usb_serial_jtag_ll.h"
 #include "hal/usb_wrap_ll.h"
 #include "soc/usb_wrap_struct.h"
 #endif
@@ -89,14 +90,17 @@ esp_err_t usb_host_core_start(void)
     if(s_peripheral_map & (1u << 1)) {
         /* The Tab5 routes USB-C to FSLS PHY0 (GPIO24/25).  The IDF default
          * maps USB_WRAP to PHY1 (GPIO26/27) and USJ to PHY0, so USB-C would
-         * otherwise never see the host controller.  This also moves the USB
-         * Serial/JTAG console to the unconnected PHY1, which is expected:
+         * otherwise never see the host controller. This also moves USB
+         * Serial/JTAG to PHY1, whose GPIO26/27 are the Tab5's I2S DOUT/BCLK.
+         * Disable the serial/JTAG pads BEFORE swapping PHYs so they cannot
+         * take over the speaker pins. USB_WRAP keeps its own pads enabled;
          * logs remain available through the web debug stream. */
+        usb_serial_jtag_ll_phy_enable_pad(false);
         usb_wrap_ll_phy_select(&USB_WRAP, 0);
         esp_log_level_set("HCD DWC", ESP_LOG_DEBUG);
         esp_log_level_set("USB HOST", ESP_LOG_DEBUG);
         esp_log_level_set("ENUM", ESP_LOG_DEBUG);
-        ESP_LOGI(TAG, "USB-C FS host routed to FSLS PHY0 (serial console moves to PHY1)");
+        ESP_LOGI(TAG, "USB-C FS host on PHY0; Serial/JTAG pads disabled for I2S GPIO26/27");
     }
 #endif
 

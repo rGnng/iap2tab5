@@ -39,10 +39,14 @@ typedef struct {
 typedef struct {
     ui_key_t key;
     bool down;
+    enum { KEY_EVENT_KEY, KEY_EVENT_TOP_RIGHT, KEY_EVENT_TOP_RIGHT_CANCEL } kind;
+    d100h_input_source_t source;
+    int64_t time_us;
 } key_event_t;
 
 static QueueHandle_t s_device_events;
 static QueueHandle_t s_key_events;
+static ulanzi_top_right_t s_top_right[D100H_INPUT_COUNT];
 
 /* Previous/next behave as tap-to-skip and hold-to-rewind/fast-forward. */
 #define HOLD_MS         500
@@ -58,12 +62,10 @@ static uint8_t s_prev_keys[HID_KEYBOARD_KEY_MAX];
 
 #define ULANZI_VID 0xFFF1
 #define ULANZI_TOP_RIGHT_ID 0x03
-#define ULANZI_LONG_PRESS_MS 600
 static hid_host_device_handle_t s_ulanzi_handle;
 static SemaphoreHandle_t s_ulanzi_lock;
 static uint8_t s_ulanzi_addr;
 static int s_ulanzi_report_count;
-static int64_t s_ulanzi_top_right_down_us;
 
 static bool handle_is_ulanzi(hid_host_device_handle_t handle)
 {
@@ -254,24 +256,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                 bool down = false;
                 if(ulanzi_d100h_decode(data, length, &id, &down)) {
                     if(id == ULANZI_TOP_RIGHT_ID) {
-                        if(down) {
-                            s_ulanzi_top_right_down_us = esp_timer_get_time();
-                        }
-                        else {
-                            int64_t held_ms = 0;
-                            if(s_ulanzi_top_right_down_us != 0) {
-                                held_ms = (esp_timer_get_time() -
-                                           s_ulanzi_top_right_down_us) / 1000;
-                            }
-                            s_ulanzi_top_right_down_us = 0;
-                            ui_key_t key =
-                                held_ms >= ULANZI_LONG_PRESS_MS
-                                    ? UI_KEY_STAR : UI_KEY_CONTEXT;
-                            ESP_LOGI(TAG,
-                                     "D100H top-right held=%lldms key=%d",
-                                     (long long)held_ms, (int)key);
-                            usb_hid_input_post_key(key);
-                        }
+                        usb_hid_input_post_top_right(D100H_INPUT_USB, down);
                     }
                     else if(id == 0x05 || id == 0x08) {
                         usb_hid_input_post_key_state(
@@ -300,7 +285,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
             if(handle_is_ulanzi(handle)) {
                 set_ulanzi_handle(NULL);
-                s_ulanzi_top_right_down_us = 0;
+                usb_hid_input_cancel_top_right(D100H_INPUT_USB);
                 ESP_LOGI(TAG, "Ulanzi D100H disconnected");
             }
             else {
@@ -383,7 +368,7 @@ static void hid_event_task(void * arg)
             set_ulanzi_handle(evt.handle);
             s_ulanzi_addr = params.addr;
             s_ulanzi_report_count = 0;
-            s_ulanzi_top_right_down_us = 0;
+            usb_hid_input_cancel_top_right(D100H_INPUT_USB);
             ulanzi_send_heartbeat(evt.handle);
             ESP_LOGI(TAG, "Ulanzi D100H vendor HID iface=%u addr=%u ready",
                      params.iface_num, params.addr);
@@ -398,8 +383,32 @@ static uint8_t hold_bit_for_key(ui_key_t key)
     return key == UI_KEY_PREV_TRACK ? 11 : 10;
 }
 
+static void dispatch_top_right(d100h_input_source_t source,
+                               ulanzi_top_right_event_t event, int64_t now_us)
+{
+    ulanzi_top_right_t * state = &s_top_right[source];
+    ulanzi_top_right_action_t action =
+        ulanzi_top_right_update(state, event, now_us);
+    if(action == ULANZI_TOP_RIGHT_NONE) return;
+    ESP_LOGI(TAG, "D100H top-right source=%d held=%lldms action=%s down=%d",
+             (int)source, (long long)((now_us - state->pressed_us) / 1000),
+             action == ULANZI_TOP_RIGHT_STAR ? "star" : "context", state->down);
+    if(bsp_display_lock(1000)) {
+        ui_handle_key(action == ULANZI_TOP_RIGHT_STAR
+                      ? UI_KEY_STAR : UI_KEY_CONTEXT);
+        bsp_display_unlock();
+    }
+}
+
 static void dispatch_key_event(const key_event_t * evt)
 {
+    if(evt->kind != KEY_EVENT_KEY) {
+        dispatch_top_right(evt->source,
+            evt->kind == KEY_EVENT_TOP_RIGHT_CANCEL ? ULANZI_TOP_RIGHT_CANCEL
+                : evt->down ? ULANZI_TOP_RIGHT_DOWN : ULANZI_TOP_RIGHT_UP,
+            evt->time_us);
+        return;
+    }
     const ui_key_t key = evt->key;
 
     if(key == UI_KEY_PREV_TRACK || key == UI_KEY_NEXT_TRACK) {
@@ -439,7 +448,7 @@ static void dispatch_key_event(const key_event_t * evt)
         for(int i = 0; i < 63; i++) {
             key_event_t next;
             if(xQueuePeek(s_key_events, &next, 0) != pdTRUE) break;
-            if(!next.down) break;
+            if(next.kind != KEY_EVENT_KEY || !next.down) break;
             if(next.key != UI_KEY_UP && next.key != UI_KEY_DOWN) break;
             xQueueReceive(s_key_events, &next, 0);
             delta += next.key == UI_KEY_UP ? -1 : 1;
@@ -464,24 +473,53 @@ static void key_dispatch_task(void * arg)
     LV_UNUSED(arg);
     for(;;) {
         TickType_t wait = portMAX_DELAY;
+        int64_t deadline = 0;
         if(s_hold_pending) {
-            int64_t deadline = s_hold_sent
+            deadline = s_hold_sent
                 ? s_hold_sent_us + (int64_t)HOLD_MAX_MS * 1000
                 : s_hold_start_us + (int64_t)HOLD_MS * 1000;
+        }
+        for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+            int64_t top_right_deadline = ulanzi_top_right_deadline(&s_top_right[i]);
+            if(top_right_deadline && (!deadline || top_right_deadline < deadline)) {
+                deadline = top_right_deadline;
+            }
+        }
+        if(deadline) {
             int64_t remain_us = deadline - esp_timer_get_time();
             wait = remain_us <= 0
                        ? 0
                        : pdMS_TO_TICKS((remain_us + 999) / 1000);
+            if(remain_us > 0 && wait == 0) wait = 1;
         }
 
         key_event_t evt;
         if(xQueueReceive(s_key_events, &evt, wait) == pdTRUE) {
             dispatch_key_event(&evt);
-            continue;
+        }
+
+        /* Check timers even during continuous input. Use the next queued
+         * event's arrival time so a queued short release/cancel wins over
+         * a timeout if the UI was busy when that event arrived. */
+        int64_t now_us = esp_timer_get_time();
+        key_event_t next;
+        int64_t top_right_now = xQueuePeek(s_key_events, &next, 0) == pdTRUE
+            ? next.time_us : now_us;
+        for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+            dispatch_top_right((d100h_input_source_t)i,
+                               ULANZI_TOP_RIGHT_POLL, top_right_now);
         }
 
         if(!s_hold_pending) continue;
+        int64_t hold_deadline = s_hold_sent
+            ? s_hold_sent_us + (int64_t)HOLD_MAX_MS * 1000
+            : s_hold_start_us + (int64_t)HOLD_MS * 1000;
+        if(now_us < hold_deadline) continue;
         if(!s_hold_sent) {
+            if(bsp_display_lock(1000)) {
+                ui_play_key_feedback(s_hold_key);
+                bsp_display_unlock();
+            }
             iap2_host_hid_press_bit(hold_bit_for_key(s_hold_key));
             s_hold_sent = true;
             s_hold_sent_us = esp_timer_get_time();
@@ -503,9 +541,34 @@ void usb_hid_input_post_key(ui_key_t key)
 void usb_hid_input_post_key_state(ui_key_t key, bool down)
 {
     if(s_key_events != NULL) {
-        key_event_t evt = { .key = key, .down = down };
+        key_event_t evt = { .key = key, .down = down,
+                            .time_us = esp_timer_get_time() };
         xQueueSend(s_key_events, &evt, 0);
     }
+}
+
+static void post_top_right_event(d100h_input_source_t source, bool down, bool cancel)
+{
+    if((unsigned)source >= D100H_INPUT_COUNT || s_key_events == NULL) return;
+    key_event_t evt = {
+        .kind = cancel ? KEY_EVENT_TOP_RIGHT_CANCEL : KEY_EVENT_TOP_RIGHT,
+        .source = source,
+        .down = down,
+        .time_us = esp_timer_get_time(),
+    };
+    if(xQueueSend(s_key_events, &evt, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "D100H top-right input queue full");
+    }
+}
+
+void usb_hid_input_post_top_right(d100h_input_source_t source, bool down)
+{
+    post_top_right_event(source, down, false);
+}
+
+void usb_hid_input_cancel_top_right(d100h_input_source_t source)
+{
+    post_top_right_event(source, false, true);
 }
 
 void usb_hid_input_start(void)

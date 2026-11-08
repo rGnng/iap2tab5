@@ -136,6 +136,41 @@ bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
     return true;
 }
 
+int64_t ulanzi_top_right_deadline(const ulanzi_top_right_t * state)
+{
+    return state->down && !state->fired
+        ? state->pressed_us + (int64_t)ULANZI_TOP_RIGHT_HOLD_MS * 1000 : 0;
+}
+
+ulanzi_top_right_action_t ulanzi_top_right_update(ulanzi_top_right_t * state,
+    ulanzi_top_right_event_t event, int64_t now_us)
+{
+    if(event == ULANZI_TOP_RIGHT_CANCEL) {
+        *state = (ulanzi_top_right_t){0};
+        return ULANZI_TOP_RIGHT_NONE;
+    }
+    if(event == ULANZI_TOP_RIGHT_DOWN) {
+        if(!state->down) {
+            *state = (ulanzi_top_right_t){.down = true, .pressed_us = now_us};
+        }
+        return ULANZI_TOP_RIGHT_NONE;
+    }
+    if(!state->down) return ULANZI_TOP_RIGHT_NONE;
+
+    ulanzi_top_right_action_t action = ULANZI_TOP_RIGHT_NONE;
+    if(!state->fired) {
+        if(now_us >= ulanzi_top_right_deadline(state)) {
+            state->fired = true;
+            action = ULANZI_TOP_RIGHT_STAR;
+        }
+        else if(event == ULANZI_TOP_RIGHT_UP) {
+            action = ULANZI_TOP_RIGHT_CONTEXT;
+        }
+    }
+    if(event == ULANZI_TOP_RIGHT_UP) state->down = false;
+    return action;
+}
+
 bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key)
 {
     if(key == NULL || !down) return false;

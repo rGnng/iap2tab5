@@ -22,6 +22,22 @@ it when flashing. The registry `espressif/usb` component (currently 1.6.0)
 provides the USB host stack and the HS/FS OTG controller selection; the old
 vendored `components/usb` copy from IDF 5.4 has been removed.
 
+
+The HID driver in `components/usb_host_hid` is a local copy of Espressif
+`usb_host_hid` 1.2.1 with interrupt-OUT report support. The D100H needs its
+64-byte heartbeat on that endpoint; SET_REPORT alone enumerates successfully
+but does not enable its vendor keys on this unit. The driver copies each
+report, allows one transfer in flight, and logs completion failures. The
+2026-11-08 OTA test confirmed 64-byte transfers on endpoint `0x05`; the user
+verified keypad play/pause, knob, Back, iPod control, and sound together.
+
+The D100H top-right button opens Context on a short release. Holding it for
+600 ms toggles Star once, with key feedback, while the button is still down;
+releasing after a long press does nothing. USB and BLE use the same timer
+handler, and disconnect cancels that input's pending gesture. For web debug,
+`POST /api/keystate?k=topright&down=1` and `down=0` exercise the same handler
+using a separate input state.
+
 On this machine ESP-IDF is installed at `/home/ops/esp/esp-idf-5.5.6`:
 
 ```bash
@@ -40,7 +56,15 @@ The USB-C data lines are wired to **FSLS PHY0**, not the PHY that ESP-IDF
 uses by default. `usb_host_core.c` therefore calls
 `usb_wrap_ll_phy_select(&USB_WRAP, 0)` before `usb_host_install()` when the
 FS host is selected. Without that call the FS host runs on PHY1
-(GPIO26/27), which is not connected on this board.
+(GPIO26/27), which is not connected to USB-C.
+
+GPIO26/27 are connected to the ES8388 as I2S DOUT/BCLK. Switching the FS
+host to PHY0 also moves USB Serial/JTAG to PHY1, so its pads must be disabled
+with `usb_serial_jtag_ll_phy_enable_pad(false)` **before** switching. Leaving
+them enabled takes over the audio pins even though codec opens and tone
+writes succeed. The USB-A-only mode retains the USB-C serial console; in
+Both A+C mode use the web debug log instead. The sound fix was OTA tested
+on 2026-11-08; the user confirmed audible feedback with Both A+C enabled.
 
 The USB-C port itself is a sink/device port: the CC pins have 5.1k
 pull-downs and VBUS is an input into the charger/system rail. A USB-C
@@ -85,7 +109,9 @@ that uses `assets/mock`.
 `firmware/main/iap2_identity.c` contains the Apple Accessories private key
 and is intentionally excluded from git. Generate it locally from the MFi
 identity files (default `../iap2cert/certificate.p7b` and
-`../iap2cert/identity.pk8`) with `tools/gen_iap2_identity.py`.
+`../iap2cert/identity.pk8`) with `tools/gen_iap2_identity.py`. Keys without
+an embedded public point are supported: authentication passes the seeded
+DRBG to mbedTLS when parsing the key so it can derive that point.
 
 ## Flash / monitor
 
@@ -288,6 +314,21 @@ also yields to the idle task periodically so the task watchdog stays happy.
   to keep builds fast and the image small.
 - Performance: 8 MB decoded-image cache + 128 image headers, a 10-row
   virtual list for Albums, and covers outside the viewport are not decoded.
+  Albums updates row text/cached images at most once per 16 ms during touch
+  scrolling. After 140 ms without scrolling, visible missing covers load in
+  batches of at most two; a read exceeding the 4 ms budget yields before the
+  next read. Retained rows are checked when they enter the viewport, so Enter
+  is no longer needed to load their artwork. Failed reads retry at 250 ms,
+  up to three attempts; known missing art and offscreen rows cause no reads.
+  Page teardown cancels both row and artwork timers.
+  `POST /api/key?k=scroll&dy=-70` exercises a one-row drag, and
+  `POST /api/key?k=trace&en=1` enables timing/visible-cover diagnostics
+  (`en=0` disables them).
+  OTA verification on 2026-11-08 (`3e68d36-album-idle`, 2096 albums) filled
+  all 8–9 visible covers without Enter after knob/scroll bursts and direction
+  reversal. Row-binding work peaked at 1.812 ms in those bursts (excluding
+  rendering); artwork batches took 5.2–13.4 ms and yielded after a slow read.
+  The nine-cover cold viewport settled about 306 ms after the final scroll.
 - PPA is enabled in two places:
   - `CONFIG_LVGL_PORT_ENABLE_PPA=y` rotates each partial flush with the PPA
     SRM engine instead of `lv_draw_sw_rotate`.
@@ -319,9 +360,9 @@ also yields to the idle task periodically so the task watchdog stays happy.
 - DSI tear-free/VSYNC is **not** enabled yet: the panel uses one DSI
   framebuffer and the PPA flush writes into it. Full-screen changes can tear.
   The next step would be a double-DSI-framebuffer custom flush.
-- Touch drag scrolling is restored on scrollable lists. The Albums/Songs
-  virtual pools now only refresh when the first visible row index changes, so
-  a finger drag no longer re-renders all rows on every motion event. Page
+- Touch drag scrolling is restored on scrollable lists. Albums reuses
+  unchanged row text while checking visibility at frame intervals; Songs
+  refreshes its virtual pool when the first visible row index changes. Page
   Up/Down still jumps one viewport, and a tap after scrolling opens/plays the
   row under the finger.
 - The menu-bar clock is read from the RX8130CE RTC at boot. The web
@@ -334,8 +375,13 @@ also yields to the idle task periodically so the task watchdog stays happy.
   The mock library/player is simulator-only.
 - After changing only C code, `idf.py app-flash` is enough; use full
   `idf.py flash` after changing assets or the partition table.
-- Prompt sounds use the ES8388 speaker codec (880/1200/520 Hz short beeps on
-  activate/click/back). Volume and on/off are in Settings and the web UI.
+- Prompt sounds use the ES8388 speaker codec: 880 Hz for Enter, play/pause
+  and star; 1200 Hz for tab changes, previous/next and context; a longer
+  880 Hz / 65 ms tone for Back. Held previous/next sounds once when seeking
+  begins. Rotary scrolling
+  and list paging stay silent. Key Feedback mode (None / Touch / Touch + Key)
+  and volume are available in Settings and the web UI. The shared dispatcher
+  covers page-specific Enter/Back handlers and suppresses duplicate tones.
 - The web updater writes to `ota_0`/`ota_1`. The factory slot remains the
   recovery image; reflash with `idf.py flash` to return to it.
 - AFC/usbmux is implemented: config 4, usbmux v2, lockdownd

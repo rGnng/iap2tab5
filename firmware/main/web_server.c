@@ -289,6 +289,24 @@ static esp_err_t key_post(httpd_req_t * req)
     }
     url_decode_inplace(value);
 
+    /* Expose the existing UI diagnostics for remote scrolling/perf checks. */
+    if(strcmp(value, "scroll") == 0 || strcmp(value, "trace") == 0) {
+        char argument[16] = "0";
+        bool scroll = strcmp(value, "scroll") == 0;
+        query_value(req, scroll ? "dy" : "en", argument, sizeof(argument));
+        int amount = atoi(argument);
+        if(!bsp_display_lock(1000)) return httpd_resp_send_500(req);
+        if(scroll) {
+            if(amount < -4096) amount = -4096;
+            if(amount > 4096) amount = 4096;
+            ui_debug_scroll(amount);
+        }
+        else ui_debug_trace(amount != 0);
+        bsp_display_unlock();
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "ok");
+    }
+
     if(strcmp(value, "prev") == 0 || strcmp(value, "next") == 0 ||
        strcmp(value, "play") == 0 || strcmp(value, "star") == 0) {
         ui_key_t key = UI_KEY_PREV_TRACK;
@@ -410,11 +428,17 @@ static esp_err_t charge_post(httpd_req_t * req)
 
 static esp_err_t keystate_post(httpd_req_t * req)
 {
-    char value[8] = {0};
+    char value[16] = {0};
     char down[8] = "0";
     query_value(req, "k", value, sizeof(value));
     query_value(req, "down", down, sizeof(down));
     url_decode_inplace(value);
+
+    if(strcmp(value, "topright") == 0) {
+        usb_hid_input_post_top_right(D100H_INPUT_WEB, atoi(down) != 0);
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "ok");
+    }
 
     ui_key_t key;
     if(strcmp(value, "prev") == 0) {
@@ -425,7 +449,7 @@ static esp_err_t keystate_post(httpd_req_t * req)
     }
     else {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                   "k must be prev or next");
+                                   "k must be prev, next, or topright");
     }
 
     usb_hid_input_post_key_state(key, atoi(down) != 0);

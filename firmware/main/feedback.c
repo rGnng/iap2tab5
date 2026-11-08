@@ -1,5 +1,8 @@
 #include "feedback.h"
 
+/* Allow /api/loglevel?tag=feedback&level=4 to trace completed tones. */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include <math.h>
 #include <string.h>
 
@@ -37,13 +40,18 @@ static void write_tone(uint16_t frequency, uint16_t duration_ms)
             .channel = 1,
             .bits_per_sample = 16,
         };
-        if(esp_codec_dev_open(s_codec, &fs) != ESP_OK) {
-            ESP_LOGW(TAG, "codec open failed");
+        int ret = esp_codec_dev_open(s_codec, &fs);
+        if(ret != ESP_OK) {
+            ESP_LOGW(TAG, "codec open failed: %d", ret);
             return;
         }
         s_codec_open = true;
     }
-    esp_codec_dev_set_out_mute(s_codec, false);
+    int ret = esp_codec_dev_set_out_mute(s_codec, false);
+    if(ret != ESP_OK) {
+        ESP_LOGW(TAG, "codec unmute failed: %d", ret);
+        return;
+    }
 
     uint32_t total = (uint32_t)FEEDBACK_SAMPLE_RATE * duration_ms / 1000;
     if(total > FEEDBACK_MAX_SAMPLES) total = FEEDBACK_MAX_SAMPLES;
@@ -61,7 +69,10 @@ static void write_tone(uint16_t frequency, uint16_t duration_ms)
         samples[i] = (int16_t)v;
     }
 
-    esp_codec_dev_write(s_codec, samples, (int)(total * sizeof(int16_t)));
+    ret = esp_codec_dev_write(s_codec, samples, (int)(total * sizeof(int16_t)));
+    if(ret != ESP_OK) ESP_LOGW(TAG, "tone write failed: %d", ret);
+    else ESP_LOGD(TAG, "tone: %u Hz, %u ms", (unsigned)frequency,
+                  (unsigned)duration_ms);
 }
 
 static void feedback_task(void * arg)
@@ -129,8 +140,8 @@ void feedback_play(feedback_t type)
             request.duration_ms = 45;
             break;
         case FEEDBACK_BACK:
-            request.frequency = 520;
-            request.duration_ms = 35;
+            request.frequency = 880;
+            request.duration_ms = 65;
             break;
         case FEEDBACK_CLICK:
         default:
@@ -138,5 +149,7 @@ void feedback_play(feedback_t type)
             request.duration_ms = 22;
             break;
     }
-    xQueueSend(s_queue, &request, 0);
+    if(xQueueSend(s_queue, &request, 0) != pdTRUE) {
+        ESP_LOGD(TAG, "tone dropped: queue full");
+    }
 }

@@ -321,7 +321,7 @@ Queue 显示时的左栏：
 └────────────────────────────────────────┴──────────────────────────────┘
 ```
 
-- Queue 隐藏时（默认）：左栏横向布局，360×360 封面 + 582 px 信息列（≈封面 × 1.618）；歌名（40 px）、艺术家（32 px）、专辑（32 px）各占一行，三行间距按黄金比例分布（26:16 ≈ 1.625），文字组在封面高度内垂直居中；收藏星标位于专辑行下方，左对齐；进度条与五个等尺寸控制按钮（shuffle / prev / play / next / repeat，96×84 px）在封面下方占满 966 px 宽，按钮行在进度条与底部空间之间垂直居中；
+- Queue 隐藏时（默认）：左栏横向布局，360×360 封面 + 582 px 信息列（≈封面 × 1.618）；歌名（40 px）、艺术家（32 px）、专辑（32 px）各占一行，到下一行/星标的间距按黄金比例递减（26:16:10），文字组在封面高度内垂直居中；收藏星标位于专辑行下方，左对齐；进度条与五个等尺寸控制按钮（shuffle / prev / play / next / repeat，96×84 px）在封面下方占满 966 px 宽，按钮行在进度条与底部空间之间垂直居中；
 - Queue 显示时：左栏宽度 620 px，改为上下布局，字号整体比默认横向布局小一档：
   - 封面居中，360×360；
   - 标题行、`Artist - Album`、进度条、控制行统一使用 582 px 宽并居中；比 360 px 封面宽，同时左右保留约 39 px 内边距，避免贴边，也给长标题留出余量；
@@ -331,7 +331,7 @@ Queue 显示时的左栏：
   - 控制行：shuffle 在最左，prev / play / next 居中，repeat 在最右；传输按钮使用标准 84 / 108 / 84 px 和 48 px 图标；
   - 垂直构成：28 + 360 + 16 + 56 + 8 + 40 + 12 + 28 + 16 + 84 + 32 = 680 px；
 - 进度条在封面区域下方；普通布局时间标签使用 24 px Inter tabular（88 px 宽），队列布局使用 18 px（72 px 宽），避免走时造成进度条左右抖动；
-- shuffle / repeat 在普通布局使用与传输按钮一致的 48 px 图标，队列布局使用 32 px；启用时显示 `#303030` 直角底色；star 普通布局 40 px、队列布局 32 px，收藏后显示实心星；
+- shuffle / repeat 在普通布局使用与传输按钮一致的 48 px 图标，队列布局使用 32 px；启用时显示 `#303030` 直角底色；star 普通布局约 30 px（48 ÷ φ，保留 56×56 px 点击区域）、队列布局 32 px，收藏后显示实心星；
 - 传输按钮无背景、48 px 图标，只支持触摸点击，不进入焦点链；
 - 界面不显示 Playing/Paused 文本，播放状态由 menubar 图标表示；
 - 右侧：Up Next 队列占满左栏之外的剩余宽度，内容区右侧留 16 px；标题行左侧为 `Up Next`，右侧为 `当前队列位置/总数`（如 `1/8`）计数器，与列表行同一右边缘；
@@ -397,7 +397,8 @@ Queue 显示时的左栏：
 └──────────────────────────────────────┴──────────────────────────────┘
 ```
 
-- 左栏宽度约 46%，行高 77 px，带 54×54 封面缩略图；7 行 × 77 px + 6 个 4 px 间隔 = 563 px 固定列表高度，避免半行；
+- 左栏宽度 480 px，行高 70 px，带 54×54 封面缩略图；8 行 × 70 px = 560 px 固定列表高度，触摸滚动时允许边缘出现部分行；
+- Albums 左栏复用 10 个行控件：滚动期间每 16 ms 合并更新文字和已缓存封面；停止滚动 140 ms 后，仅补齐当前视口的封面，每批最多 2 张，单次读取后超过 4 ms 则让出 UI。保留的行也重新判断可见性，不依赖 Enter 重建页面；临时读取失败间隔 250 ms 重试、最多 3 次，缺失封面不反复读取；离开页面取消待处理任务。
 - 标题右侧显示 `当前选中序号/总数`（如 `1/100`），使用 Inter tabular 18 px，选中项变化时实时更新；
 - 左右两栏无间隔，左栏 `#141414`、右栏 `#1E1E1E`，用底色区分；
 - 右侧详情始终显示左栏当前选中的专辑，不再显示占位提示文字；
@@ -509,13 +510,13 @@ Queue 显示时的左栏：
 - 菜单项统一规格：所有可选、只读、带右侧值的菜单项都是 64 px 高、16 px 左内边距、FONT_H2 字号；颜色按语义保留（On 为绿色，Off 与次要信息为灰色，强调项为 accent 色）。
 - 说明性文字不随菜单字号：分组标题（如 `Paired Devices`、`Search Devices`）及其右侧提示、`Reboot to apply`、`No paired devices`、`Searching...` 保持原小字号；说明文字与菜单标签左对齐（16 px 内边距）。
 - **Bluetooth**：第一行是 Bluetooth On/Off。下方是 Paired Devices（Connected / Disconnected，长按 Enter 忘记设备）。页面底部是 **Search Devices** 分组（`PRESS: PAIR`）：打开页面即开始扫描，新发现的设备出现在该分组下方，选中即配对。已移除顶部的 Search 行。
-- **Key Sound**：`Volume` 行（Enter 进入调节，Up/Down ±5%，Enter 确认）；中间留 14 px inset；下方 `Play sound on` 提供 `Touch`、`Touch + Key`、`None` 三个带勾选项，默认 `Touch + Key`。
-  - 声音只在真实操作时发出：触屏点击控件、旋钮/按键确认、返回。
+- **Key Feedback**：`Volume` 行（Enter 进入调节，Up/Down ±5%，Enter 确认）；中间留 14 px inset；下方 `Play sound on` 提供 `Touch`、`Touch + Key`、`None` 三个带勾选项，默认 `Touch + Key`。
+  - 触屏点击控件以及键盘按钮操作有声音：左右切换标签页、Back、播放/暂停、上一首/下一首、Enter（旋钮按下）、菜单与收藏。统一在 key dispatch 入口触发，覆盖列表、菜单和编辑模式；同一次按键最多一个提示音。长按上一首/下一首在开始快退/快进时响一次，松开不重复。
   - 列表滚动（触摸拖动、滚轮/上下键移动）不发声。
   - 保存到 `sound_mode`（0 none / 1 touch / 2 touch+key），同时同步旧的 `sound_enabled` 字段。
-  - **当前状态（未解决）**：设备上仍无可听见的提示音。已确认的部分：UI 事件 → `feedback_play` → 队列 → `esp_codec_dev_write` 全链路返回成功；I2S 以 16 kHz 单声道打开；ES8388 `DACPOWER=0x3c`、`DACCONTROL21=0x80`、LOUT1/ROUT1 音量 `0x1e` 正常；扬声器功放使能脚（扩展器 0，第 1 位）输出寄存器为 1、方向为输出。已修复：DAC 静音位（`DACCONTROL3` `0x19` bit 2）在诊断时为 1，`feedback.c` 每次写入前调用 `esp_codec_dev_set_out_mute(false)`，寄存器读回变为 `0x00`，但仍未听到声音。
+  - **此前状态（修复前）**：设备上仍无可听见的提示音。已确认的部分：UI 事件 → `feedback_play` → 队列 → `esp_codec_dev_write` 全链路返回成功；I2S 以 16 kHz 单声道打开；ES8388 `DACPOWER=0x3c`、`DACCONTROL21=0x80`、LOUT1/ROUT1 音量 `0x1e` 正常；扬声器功放使能脚（扩展器 0，第 1 位）输出寄存器为 1、方向为输出。已修复：DAC 静音位（`DACCONTROL3` `0x19` bit 2）在诊断时为 1，`feedback.c` 每次写入前调用 `esp_codec_dev_set_out_mute(false)`，寄存器读回变为 `0x00`，但仍未听到声音。
   - 注意：扩展器输入寄存器读回不可靠（输出为 1 的引脚如 `BSP_TOUCH_EN` 也读回 0），不能用来判断功放使能状态。
-  - 下一步：检查功放本身或其供电/使能电路（用万用表量功放使能脚电压），并确认 I2S 数据是否到达 DAC（例如测 BCLK/LRCK/DOUT）。
+  - **2026-11-08 代码检查**：发现 `usb_mode=2` 把 USB Serial/JTAG 路由到 PHY1，却未关闭其 pads；PHY1 的 GPIO26/27 正是 ES8388 的 I2S DOUT/BCLK。`usb_host_core_start()` 已改为先关闭 Serial/JTAG pads，再把 USB_WRAP 切到 PHY0，保留 USB-A + USB-C 双 host。已通过 OTA 验证，用户确认提示音恢复。首次本机构建还暴露了 MFi 私钥未带 public point 时解析缺少 RNG 的问题，补齐 RNG 后设备日志确认 iAP2 authentication succeeded。已将 D100H 所需的 interrupt OUT 支持纳入本地 `usb_host_hid` 组件；最终 OTA 后用户确认 iPod、键盘、旋钮及提示音同时工作。
 - **USB Options**：`USB-A HighSpeed Only`（`usb_mode 0`，默认）和 `USB-A HS & USB-C OTG`（`usb_mode 2`）；启动生效，需重启，详见 [`usb-modes.md`](usb-modes.md)。
 - **Boot Screen**：`OFF`（默认）和 `KCN4M1`；选中后保存到 `boot_screen`，下次启动生效。KCN4M1 是启动动画，设备上播放约 5 秒，模拟器需 `--boot` 才会播放。
 - **Now Playing Background**：Theme / Blurred cover / Cover gradient，默认 Cover gradient，切换后返回 Now Playing 生效。

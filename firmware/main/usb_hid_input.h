@@ -13,4 +13,16 @@ void usb_hid_input_post_key(ui_key_t key);
  * (currently previous/next: tap = track skip, hold = rewind/fast-forward). */
 void usb_hid_input_post_key_state(ui_key_t key, bool down);
 
+typedef enum {
+    D100H_INPUT_USB,
+    D100H_INPUT_BLE,
+    D100H_INPUT_WEB,
+    D100H_INPUT_COUNT,
+} d100h_input_source_t;
+
+/** Top-right: tap for Context, hold 600 ms for Star while still pressed. */
+void usb_hid_input_post_top_right(d100h_input_source_t source, bool down);
+/** Cancel a source's pending gesture when it disconnects. */
+void usb_hid_input_cancel_top_right(d100h_input_source_t source);
+
 #endif /* IAP2TAB5_USB_HID_INPUT_H */

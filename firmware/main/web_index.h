@@ -282,7 +282,7 @@ static const char INDEX_HTML[] =
 "        <label class=\"field\"><span class=\"lbl\">Brightness <span id=\"bri_v\">70</span>%</span>\n"
 "          <input type=\"range\" id=\"brightness\" min=\"0\" max=\"100\" step=\"1\">\n"
 "        </label>\n"
-"        <label class=\"field\"><span class=\"lbl\">Key sound</span>\n"
+"        <label class=\"field\"><span class=\"lbl\">Key Feedback</span>\n"
 "          <select id=\"sound_mode\">\n"
 "            <option value=\"2\">Touch + Key</option>\n"
 "            <option value=\"1\">Touch</option>\n"
