@@ -2003,7 +2003,8 @@ static void build_mini_now(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(g_mini, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(g_mini, 0, 0);
     lv_obj_set_style_border_width(g_mini, 0, 0);
-    lv_obj_set_style_pad_hor(g_mini, 20, 0);
+    lv_obj_set_style_pad_left(g_mini, 16, 0);
+    lv_obj_set_style_pad_right(g_mini, 20, 0);
     lv_obj_set_style_pad_ver(g_mini, 0, 0);
     lv_obj_set_style_pad_column(g_mini, 20, 0);
     lv_obj_set_flex_flow(g_mini, LV_FLEX_FLOW_ROW);
@@ -3122,11 +3123,6 @@ static void np_queue_row(lv_obj_t * parent, int queue_index)
     lv_obj_t * row = make_row(parent, NP_QUEUE_ROW_H);
     lv_obj_set_style_pad_right(row, 16, 0);
     lv_obj_set_style_pad_column(row, 10, 0);
-    lv_obj_t * marker = make_label(row, "", FONT_NUM, COL_MUTED);
-    lv_obj_set_width(marker, 30);
-    char number[16];
-    snprintf(number, sizeof(number), "%02d", g_focus_count - np_queue_focus_start + 1);
-    lv_label_set_text(marker, number);
 
     lv_obj_t * title = make_label(row, track.title, FONT_H2, COL_TEXT);
     lv_obj_set_flex_grow(title, 1);
