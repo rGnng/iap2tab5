@@ -2853,9 +2853,15 @@ static uint64_t g_np_cover_track_id;
 #define NP_COVER_SIZE         360
 #define NP_INFO_W             582
 #define NP_COVER_GAP           24
-#define NP_TOP_W             (NP_COVER_SIZE + NP_COVER_GAP + NP_INFO_W)
+/* Default view uses symmetric margins inside the content area. NP_INFO_W
+ * above remains the compact queue-open layout's metadata/control width. */
+#define NP_MARGIN_X           72
+#define NP_TOP_W             (CONTENT_W - 2 * NP_MARGIN_X)
+#define NP_MAIN_INFO_W        (NP_TOP_W - NP_COVER_SIZE - NP_COVER_GAP)
 #define NP_TOP_SPACER         72
-#define NP_GAP_PROGRESS       36
+#define NP_INFO_BOTTOM        24
+#define NP_GAP_PROGRESS       64
+#define NP_CONTROLS_BOTTOM    48
 #define NP_BUTTON_W            96
 #define NP_BUTTON_H            84
 #define NP_BUTTON_GAP          28
@@ -3015,7 +3021,7 @@ static void np_refresh_ui(void)
                 lv_text_get_size(&title_size, title, FONT_NP_TITLE, 0, 0,
                                  LV_COORD_MAX, LV_TEXT_FLAG_NONE);
                 int32_t title_w = title_size.x;
-                int32_t max_w = NP_INFO_W;
+                int32_t max_w = NP_MAIN_INFO_W;
                 if(title_w > max_w) title_w = max_w;
                 lv_obj_set_width(np_title, title_w);
             }
@@ -3502,14 +3508,6 @@ static lv_obj_t * np_vertical_gap(lv_obj_t * parent, int height)
     return gap;
 }
 
-/* Flexible spacer: splits the remaining vertical space with its sibling. */
-static lv_obj_t * np_flex_gap(lv_obj_t * parent)
-{
-    lv_obj_t * gap = np_vertical_gap(parent, 1);
-    lv_obj_set_flex_grow(gap, 1);
-    return gap;
-}
-
 /* Queue-open layout: cover on top, then title + star, artist - album,
  * progress, and one transport row (shuffle / prev / play / next / repeat). */
 static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
@@ -3783,21 +3781,25 @@ static void np_create(lv_obj_t * parent)
     else {
         lv_obj_set_size(left, LV_PCT(100), LV_PCT(100));
     }
-    lv_obj_set_style_pad_all(left, 20, 0);
+    lv_obj_set_style_pad_all(left, np_queue_visible ? 20 : 0, 0);
     lv_obj_set_style_pad_row(left, 0, 0);
-    lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
+    if(np_queue_visible) {
+        lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+    }
+    else {
+        lv_obj_set_layout(left, LV_LAYOUT_NONE);
+    }
 
     if(np_queue_visible) {
         np_build_vertical_left(left, now_cover, cover_color);
     }
     else {
-        /* Keep the cover/progress block where it was; the transport row is
-         * centred by the two flexible spacers below the progress bar. */
-        np_vertical_gap(left, NP_TOP_SPACER);
-
+        /* Cover and metadata share a top block; progress and transport
+         * controls have independent anchors below it. */
         lv_obj_t * top = lv_obj_create(left);
         lv_obj_set_size(top, NP_TOP_W, NP_COVER_SIZE);
+        lv_obj_set_pos(top, NP_MARGIN_X, NP_TOP_SPACER);
         lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(top, 0, 0);
         lv_obj_set_style_pad_all(top, 0, 0);
@@ -3810,13 +3812,14 @@ static void np_create(lv_obj_t * parent)
         np_cover_widget = make_cover(top, now_cover, cover_color, NP_COVER_SIZE);
 
         lv_obj_t * info = lv_obj_create(top);
-        lv_obj_set_height(info, NP_COVER_SIZE);
+        lv_obj_set_size(info, 0, NP_COVER_SIZE);
         lv_obj_set_flex_grow(info, 1);
         lv_obj_set_style_bg_opa(info, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(info, 0, 0);
         lv_obj_set_style_pad_all(info, 0, 0);
+        lv_obj_set_style_pad_bottom(info, NP_INFO_BOTTOM, 0);
         lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(info, LV_FLEX_ALIGN_CENTER,
+        lv_obj_set_flex_align(info, LV_FLEX_ALIGN_END,
                               LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
         lv_obj_set_style_pad_row(info, 0, 0);
         lv_obj_set_scrollable(info, false);
@@ -3859,6 +3862,10 @@ static void np_create(lv_obj_t * parent)
                                                 COL_MUTED, &bootstrap_icons_40);
         lv_obj_set_style_margin_left(star,
             -(NP_STAR_TARGET_SIZE - NP_STAR_ICON_SIZE) / 2, 0);
+        /* Align the visible glyph to the bottom inset while retaining its
+         * larger touch target, as on the text-aligned left edge. */
+        lv_obj_set_style_margin_bottom(star,
+            -(NP_STAR_TARGET_SIZE - NP_STAR_ICON_SIZE) / 2, 0);
         np_star_btn = star;
         np_star_icon = lv_obj_get_child(star, 0);
         /* Scale the glyph around its centre, preserving the button's hit
@@ -3869,10 +3876,10 @@ static void np_create(lv_obj_t * parent)
                                          LV_SCALE_NONE * NP_STAR_ICON_SIZE / 40, 0);
         lv_obj_add_event_cb(star, np_star_click_cb, LV_EVENT_CLICKED, NULL);
 
-        np_vertical_gap(left, NP_GAP_PROGRESS);
-
         lv_obj_t * progress_row = lv_obj_create(left);
         lv_obj_set_size(progress_row, NP_TOP_W, 32);
+        lv_obj_set_pos(progress_row, NP_MARGIN_X,
+                       NP_TOP_SPACER + NP_COVER_SIZE + NP_GAP_PROGRESS);
         lv_obj_set_style_bg_opa(progress_row, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(progress_row, 0, 0);
         lv_obj_set_style_pad_all(progress_row, 0, 0);
@@ -3899,13 +3906,13 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_width(np_time_dur, 88);
         lv_obj_set_style_text_align(np_time_dur, LV_TEXT_ALIGN_RIGHT, 0);
 
-        np_flex_gap(left);
-
         /* One transport row: shuffle, prev, play, next, repeat. Every button
          * uses the same 96x84 target and 48 px icon so the row reads evenly
          * and the touch targets are comfortable on the 5" panel. */
         lv_obj_t * controls = lv_obj_create(left);
         lv_obj_set_size(controls, NP_TOP_W, NP_BUTTON_H);
+        lv_obj_set_pos(controls, NP_MARGIN_X,
+                       SCREEN_H - NP_CONTROLS_BOTTOM - NP_BUTTON_H);
         lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(controls, 0, 0);
         lv_obj_set_style_pad_all(controls, 0, 0);
@@ -3942,8 +3949,6 @@ static void np_create(lv_obj_t * parent)
         lv_obj_add_event_cb(play, np_play_click_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(next, np_next_click_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(repeat, np_repeat_click_cb, LV_EVENT_CLICKED, NULL);
-
-        np_flex_gap(left);
     }
 
     uint32_t left_done = g_ui_trace ? perf_now() : 0;
