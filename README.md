@@ -157,7 +157,8 @@ It selects a dominant hue and two distinct accents, then builds soft ambient
 color lights across the whole screen. Broader overlapping fields spread the
 cover colors evenly, while preserving light and shade. Gray uses deep colors;
 Aqua uses matching pastels. The menu bar, clock area and Up Next panel show
-the gradient through a faint theme tint. Text and controls stay readable.
+the gradient through a faint theme tint. The selected menu tile and
+shuffle/repeat backgrounds also use translucent tints. Text and icons stay readable.
 
 A background worker renders at 320×180 and expands once to 1280×720 with the
 ESP32-P4 PPA. Eight-bit color channels survive scaling; the final conversion

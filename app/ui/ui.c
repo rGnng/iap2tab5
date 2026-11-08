@@ -234,6 +234,7 @@ typedef enum {
  * Focus engine
  * ------------------------------------------------------------------------- */
 static bool g_afc_sync_mode;
+static bool np_chrome_tinted;
 
 typedef void (*focus_activate_fn)(void * user);
 typedef void (*focus_adjust_fn)(int delta, void * user);
@@ -921,16 +922,37 @@ static void theme_button(lv_obj_t * button)
     lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_NONE, LV_STATE_CHECKED);
 }
 
-static void theme_mode_button(lv_obj_t * button, bool active)
+static void theme_mode_button(lv_obj_t * button, bool active, bool translucent)
 {
+    /* Override the theme's checked/pressed fills before changing state, so
+     * its transition also stays translucent rather than animating to solid. */
+    lv_obj_set_style_bg_opa(button, translucent ? LV_OPA_20 : LV_OPA_COVER, LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(button, translucent ? LV_OPA_30 :
+        (g_theme->id == UI_THEME_GRAY && !active ? LV_OPA_TRANSP : LV_OPA_COVER), LV_STATE_PRESSED);
     if(g_theme->id == UI_THEME_GRAY) {
         lv_obj_set_style_bg_color(button, lv_color_hex(COL_FOCUS), 0);
-        lv_obj_set_style_bg_opa(button, active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_opa(button,
+            active ? (translucent ? LV_OPA_20 : LV_OPA_COVER) : LV_OPA_TRANSP, 0);
     }
     else {
+        lv_obj_set_style_bg_opa(button,
+            translucent ? (active ? LV_OPA_20 : LV_OPA_10) : LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_grad_dir(button,
+            !translucent && g_theme->id == UI_THEME_AQUA ? LV_GRAD_DIR_VER : LV_GRAD_DIR_NONE, 0);
+        lv_obj_set_style_border_opa(button, translucent ? LV_OPA_20 : LV_OPA_COVER, 0);
+        if(g_theme->id == UI_THEME_WINDOWS_95) {
+            lv_obj_remove_event_cb(button, theme_bevel_draw);
+            if(!translucent) lv_obj_add_event_cb(button, theme_bevel_draw, LV_EVENT_DRAW_POST, NULL);
+        }
         if(active) lv_obj_add_state(button, LV_STATE_CHECKED);
         else lv_obj_remove_state(button, LV_STATE_CHECKED);
-        theme_mark_selected(button, active);
+        theme_mark_selected(button, active && !translucent);
+    }
+    /* Change only background opacity. Icons retain full contrast, including
+     * checked/pressed states and artwork arriving after the controls exist. */
+    if(translucent) {
+        lv_obj_set_style_text_color(lv_obj_get_child(button, 0),
+            lv_color_hex(active ? COL_ACCENT : COL_MUTED), 0);
     }
 }
 
@@ -1951,6 +1973,9 @@ static void ui_menu_update(void)
 {
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
+    lv_opa_t selected_opa = np_chrome_tinted ? LV_OPA_20 : LV_OPA_COVER;
+    uint32_t selected_fg = np_chrome_tinted && g_theme->id != UI_THEME_GRAY
+        ? COL_ACCENT : COL_MENU_TOP_FG;
 
     for(int i = 0; i < SCR_COUNT; i++) {
         if(g_menu_items[i] == NULL || g_menu_icons[i] == NULL) continue;
@@ -1959,16 +1984,16 @@ static void ui_menu_update(void)
         bool dimmed = !ui_screen_enabled((screen_id_t)i);
         if(dimmed) lv_obj_add_state(g_menu_items[i], LV_STATE_DISABLED);
         else lv_obj_remove_state(g_menu_items[i], LV_STATE_DISABLED);
-        /* The selected tile is a solid square: the full 96 x 96 touch area
-         * uses the focus grey fill, with a white icon and no edge strip. */
+        /* Gradient views retain a selected tint while showing the artwork
+         * colors through it. Text/icons stay opaque for legibility. */
         lv_obj_set_style_bg_color(g_menu_items[i],
                                   lv_color_hex(active ? COL_FOCUS : COL_BG), 0);
         lv_obj_set_style_bg_opa(g_menu_items[i],
-                                active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+                                active ? selected_opa : LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(g_menu_items[i], 0, 0);
         lv_obj_set_style_text_color(g_menu_icons[i],
                                     lv_color_hex(dimmed ? COL_DIM
-                                                : active ? COL_MENU_TOP_FG
+                                                : active ? selected_fg
                                                          : COL_MENU_BODY_FG), 0);
     }
 
@@ -3256,13 +3281,13 @@ static void np_refresh_snapshot(const player_snapshot_t * snapshot)
     if(first || snapshot->shuffle != old->shuffle) {
         lv_obj_set_style_text_color(np_shuffle_icon,
                                     lv_color_hex(snapshot->shuffle ? COL_ACCENT : COL_MUTED), 0);
-        theme_mode_button(np_shuffle_btn, snapshot->shuffle);
+        theme_mode_button(np_shuffle_btn, snapshot->shuffle, np_chrome_tinted);
     }
     if(first || snapshot->repeat != old->repeat) {
         bool active = snapshot->repeat != PLAYER_REPEAT_OFF;
         lv_obj_set_style_text_color(np_repeat_icon,
                                     lv_color_hex(active ? COL_ACCENT : COL_MUTED), 0);
-        theme_mode_button(np_repeat_btn, active);
+        theme_mode_button(np_repeat_btn, active, np_chrome_tinted);
         np_set_text(np_repeat_icon,
                     snapshot->repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE : ICON_REPEAT);
     }
@@ -3406,7 +3431,6 @@ static bool find_album(uint64_t album_id, player_album_t * out)
 static lv_image_dsc_t g_np_mesh_dsc;
 static lv_timer_t * np_gradient_timer;
 static uint64_t np_gradient_key, np_gradient_shown_key;
-static bool np_chrome_tinted;
 
 static void np_gradient_visibility(bool visible)
 {
@@ -3425,6 +3449,11 @@ static void np_gradient_visibility(bool visible)
         if(visible) lv_obj_remove_event_cb(clock, theme_bevel_draw);
         else lv_obj_add_event_cb(clock, theme_bevel_draw, LV_EVENT_DRAW_POST, NULL);
     }
+    ui_menu_update();
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+    if(np_shuffle_btn) theme_mode_button(np_shuffle_btn, snapshot.shuffle, visible);
+    if(np_repeat_btn) theme_mode_button(np_repeat_btn, snapshot.repeat != PLAYER_REPEAT_OFF, visible);
 }
 
 static void np_gradient_poll_cb(lv_timer_t * timer)

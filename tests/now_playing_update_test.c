@@ -105,6 +105,34 @@ static void check_shell_tint(unsigned index)
     }
 }
 
+static void check_mode_tints(void)
+{
+    bool shuffle=injected.shuffle;
+    player_repeat_t repeat=injected.repeat;
+    for(int active=0;active<2;active++) {
+        injected.shuffle=active;
+        injected.repeat=active?PLAYER_REPEAT_ONE:PLAYER_REPEAT_OFF;
+        np_tick();pump(300);
+        lv_obj_t *buttons[2]={np_shuffle_btn,np_repeat_btn};
+        for(unsigned i=0;i<2;i++) {
+            lv_opa_t expected=active?LV_OPA_20:
+                (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:LV_OPA_10);
+            check(lv_obj_get_style_bg_opa(buttons[i],0)==expected,
+                  "Shuffle and repeat backgrounds must remain faint in both active and inactive states");
+            check(lv_color_eq(lv_obj_get_style_text_color(lv_obj_get_child(buttons[i],0),0),
+                    lv_color_hex(active?COL_ACCENT:COL_MUTED)),
+                  "Mode icons need contrasting theme colors rather than translucent or white selection text");
+            lv_obj_add_state(buttons[i],LV_STATE_PRESSED);
+            pump(300);
+            check(lv_obj_get_style_bg_opa(buttons[i],0)==LV_OPA_30,
+                  "Pressed mode controls must still show the gradient through their backgrounds");
+            lv_obj_remove_state(buttons[i],LV_STATE_PRESSED);
+            pump(300);
+        }
+    }
+    injected.shuffle=shuffle;injected.repeat=repeat;np_tick();pump(300);
+}
+
 static void gradient_lifecycle(void)
 {
     settings_np_bg_action((void *)(intptr_t)NP_BG_COVER_GRADIENT);
@@ -125,6 +153,20 @@ static void gradient_lifecycle(void)
           lv_obj_get_style_bg_opa(lv_obj_get_parent(g_status_time),0)==LV_OPA_TRANSP,
           "Ready gradients must make the shell translucent without a second clock backdrop");
     check_shell_tint(0);check_shell_tint(1);
+    check(lv_obj_get_style_bg_opa(np_shuffle_btn,0)==(injected.shuffle?LV_OPA_20:
+            (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:LV_OPA_10)) &&
+          lv_obj_get_style_bg_opa(np_repeat_btn,0)==(injected.repeat!=PLAYER_REPEAT_OFF?LV_OPA_20:
+            (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:LV_OPA_10)),
+          "Late artwork must restyle existing mode controls even without a playback-state change");
+    check(lv_obj_get_style_bg_opa(g_menu_items[SCR_NOW_PLAYING],0)==LV_OPA_20,
+          "The selected Now Playing menu item must retain only a translucent tint");
+    check(lv_color_eq(lv_obj_get_style_text_color(g_menu_icons[SCR_NOW_PLAYING],0),
+            lv_color_hex(g_theme->id==UI_THEME_GRAY?COL_MENU_TOP_FG:COL_ACCENT)),
+          "The selected menu icon needs a contrasting foreground over its translucent tint");
+    ui_menu_update();
+    check(lv_obj_get_style_bg_opa(g_menu_items[SCR_NOW_PLAYING],0)==LV_OPA_20,
+          "Playback/menu refresh must not restore an opaque selection background");
+    check_mode_tints();
     uint64_t original_key=np_gradient_key;
     const uint8_t *original_pixels=g_np_mesh_dsc.data;
     const uint16_t *pixels=(const uint16_t *)original_pixels;
@@ -164,6 +206,8 @@ static void gradient_lifecycle(void)
           lv_obj_get_style_bg_opa(g_menubar,0)==LV_OPA_COVER &&
           lv_obj_get_style_bg_opa(lv_obj_get_parent(g_status_time),0)==LV_OPA_COVER,
           "Leaving Now Playing must restore the normal page, menu and clock backgrounds");
+    check(lv_obj_get_style_bg_opa(g_menu_items[SCR_ALBUMS],0)==LV_OPA_COVER,
+          "Other views must retain their ordinary opaque menu selection");
     np_gradient_poll_cb(NULL);
     check(g_current_screen==SCR_ALBUMS,"A late background result must not affect another tab");
     ui_select_screen(SCR_NOW_PLAYING); pump(300);
@@ -176,11 +220,14 @@ static void gradient_lifecycle(void)
     int original_theme=g_theme->id;
     g_system_config.theme=(original_theme+1)%UI_THEME_COUNT;ui_apply_theme();pump(200);
     check_shell_tint(0);check_shell_tint(1);
+    check_mode_tints();
     g_system_config.theme=original_theme;ui_apply_theme();pump(200);
     check_shell_tint(0);check_shell_tint(1);
     settings_np_bg_action((void *)(intptr_t)NP_BG_THEME); ui_rebuild_page(); pump(200);
     check(!np_gradient_backdrop && !np_gradient_key,"Theme mode must omit the cover gradient");
     check(!np_chrome_tinted,"Theme mode must retain the ordinary opaque shell");
+    check(lv_obj_get_style_bg_opa(g_menu_items[SCR_NOW_PLAYING],0)==LV_OPA_COVER,
+          "Theme background mode must retain its ordinary menu selection");
     ui_system_config_t retired=g_system_config;retired.np_bg_mode=3;
     ui_apply_saved_settings(&retired);ui_rebuild_page();pump(200);
     check(g_np_bg_mode==NP_BG_COVER_GRADIENT && g_system_config.np_bg_mode==2 &&
