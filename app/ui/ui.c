@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "theme.h"
 
 #include "icons.h"
 #include "fonts/inter_fonts.h"
@@ -58,38 +59,36 @@ static void * ui_alloc_aligned(size_t size)
 /* -------------------------------------------------------------------------
  * Theme / layout
  * ------------------------------------------------------------------------- */
-/* Section colors: four distinct gray zones.
- * Tune these values first when moving to the final in-car theme. */
-#define COL_MENU_TOP_BG   0x282828
-#define COL_MENU_TOP_FG   0xFFFFFF
-#define COL_MENU_BODY_BG  0x080808
-#define COL_MENU_BODY_FG  0xC8C8C8
-#define COL_MINI_BG       0x303030
-#define COL_MINI_FG       0xFFFFFF
-#define COL_MINI_MUTED    0xD0D0D0
-#define COL_MINI_DIM      0xA0A0A0
-#define COL_MAIN_BG       0x080808
-#define COL_MAIN_FG       0xF0F0F0
+static const ui_theme_t * g_theme = &ui_themes[UI_THEME_GRAY];
+#define COL_MENU_TOP_BG     (g_theme->menu_top_bg)
+#define COL_MENU_TOP_FG     (g_theme->menu_top_fg)
+#define COL_MENU_BODY_BG    (g_theme->menu_body_bg)
+#define COL_MENU_BODY_FG    (g_theme->menu_body_fg)
+#define COL_MINI_BG         (g_theme->mini_bg)
+#define COL_MINI_FG         (g_theme->mini_fg)
+#define COL_MINI_MUTED      (g_theme->mini_muted)
+#define COL_MINI_DIM        (g_theme->mini_dim)
+#define COL_MAIN_BG         (g_theme->bg)
+#define COL_MAIN_FG         (g_theme->text)
+#define COL_BG              (g_theme->bg)
+#define COL_STATUS          (g_theme->bg)
+#define COL_SURFACE         (g_theme->surface)
+#define COL_PANEL           (g_theme->panel)
+#define COL_PANEL_ALT       (g_theme->panel_alt)
+#define COL_BORDER          (g_theme->border)
+#define COL_TEXT            (g_theme->text)
+#define COL_MUTED           (g_theme->muted)
+#define COL_DIM             (g_theme->dim)
+#define COL_ACCENT          (g_theme->accent)
+#define COL_ACCENT_DARK     (g_theme->selection)
+#define COL_FOCUS           (g_theme->focus)
+#define COL_GREEN           (g_theme->green)
+#define COL_AMBER           (g_theme->amber)
+#define COL_RED             (g_theme->red)
+#define COL_PURPLE          (g_theme->purple)
+#define COL_CYAN            (g_theme->cyan)
 
-#define LIST_ROW_GAP      4
-
-#define COL_BG          0x080808
-#define COL_STATUS      0x080808
-#define COL_SURFACE     0x101010
-#define COL_PANEL       0x101010
-#define COL_PANEL_ALT   0x202020
-#define COL_BORDER      0x282828
-#define COL_TEXT        COL_MAIN_FG
-#define COL_MUTED       0x989898
-#define COL_DIM         0x686868
-#define COL_ACCENT      0xC8C8C8
-#define COL_ACCENT_DARK 0x282828
-#define COL_FOCUS       0x303030
-#define COL_GREEN       0xB8B8B8
-#define COL_AMBER       0xC8C8C8
-#define COL_RED         0xE8E8E8
-#define COL_PURPLE      0xA8A8A8
-#define COL_CYAN        0xB8B8B8
+#define LIST_ROW_GAP 4
 
 #define SCREEN_W   1280
 #define SCREEN_H   720
@@ -240,6 +239,7 @@ typedef struct {
 static void enable_event_bubble(lv_obj_t * obj);
 static void settings_update_system_labels(void);
 static void ui_page_teardown(void);
+static bool ui_apply_theme(void);
 
 static focus_item_t g_focus[MAX_FOCUS];
 static int g_focus_count;
@@ -328,11 +328,27 @@ static void ui_exit_edit(void)
     g_edit_mode = false;
 }
 
+/* Keep each label's normal color underneath a selection state. This also
+ * restores metadata colors correctly when virtual rows are recycled. */
+static void theme_mark_selected(lv_obj_t * obj, bool selected)
+{
+    if(g_theme->id == UI_THEME_GRAY) return;
+    if(lv_obj_check_type(obj, &lv_label_class)) {
+        if(selected) lv_obj_add_state(obj, LV_STATE_USER_1);
+        else lv_obj_remove_state(obj, LV_STATE_USER_1);
+    }
+    uint32_t count = lv_obj_get_child_count(obj);
+    for(uint32_t i = 0; i < count; i++) {
+        theme_mark_selected(lv_obj_get_child(obj, i), selected);
+    }
+}
+
 static void focus_visual(focus_item_t * item, bool focused)
 {
     if(item == NULL || item->obj == NULL || item->silent) return;
 
     if(item->fill) {
+        theme_mark_selected(item->obj, focused);
         lv_obj_set_style_bg_opa(item->obj, focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_obj_set_style_bg_color(item->obj, lv_color_hex(COL_FOCUS), 0);
         lv_obj_set_style_border_width(item->obj, focused ? 3 : 0, 0);
@@ -341,7 +357,7 @@ static void focus_visual(focus_item_t * item, bool focused)
     }
     else {
         lv_obj_set_style_outline_width(item->obj, focused ? 3 : 0, 0);
-        lv_obj_set_style_outline_color(item->obj, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_outline_color(item->obj, lv_color_hex(g_theme->outline), 0);
         lv_obj_set_style_outline_opa(item->obj, LV_OPA_COVER, 0);
         lv_obj_set_style_outline_pad(item->obj, 3, 0);
     }
@@ -524,6 +540,10 @@ static lv_obj_t * make_label(lv_obj_t * parent, const char * text,
     lv_label_set_text(label, text);
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    if(g_theme->id != UI_THEME_GRAY) {
+        lv_obj_set_style_text_color(label, lv_color_hex(g_theme->on_selection),
+                                    LV_STATE_USER_1);
+    }
     lv_obj_set_scrollable(label, false);
     lv_obj_set_scroll_chain(label, false);
     lv_obj_set_event_bubble(label, true);
@@ -679,7 +699,7 @@ static lv_obj_t * counter_box(lv_obj_t * parent, lv_obj_t ** label_out)
 {
     lv_obj_t * box = lv_obj_create(parent);
     lv_obj_set_size(box, 0, COUNTER_H);
-    lv_obj_set_style_bg_color(box, lv_color_hex(COL_ACCENT_DARK), 0);
+    lv_obj_set_style_bg_color(box, lv_color_hex(g_theme->counter), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(box, 0, 0);
     lv_obj_set_style_radius(box, 0, 0);
@@ -762,6 +782,72 @@ static lv_obj_t * make_icon(lv_obj_t * parent, const char * icon, uint32_t color
     return make_label(parent, icon, &bootstrap_icons_24, color);
 }
 
+/* Draw classic raised/sunken edges inside the existing bounds: no extra
+ * layout, shadow buffers, or changes to hit targets. Every corner is square. */
+static void theme_bevel_draw(lv_event_t * event)
+{
+    lv_obj_t * obj = lv_event_get_target_obj(event);
+    bool down = lv_obj_has_state(obj, LV_STATE_PRESSED) ||
+                lv_obj_has_state(obj, LV_STATE_CHECKED);
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_opa = LV_OPA_TRANSP;
+    dsc.radius = 0;
+    dsc.border_width = 2;
+    dsc.border_opa = LV_OPA_COVER;
+    dsc.border_side = LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_LEFT;
+    dsc.border_color = lv_color_hex(down ? g_theme->bevel_shadow
+                                        : g_theme->bevel_light);
+    lv_draw_rect(lv_event_get_layer(event), &dsc, &area);
+    dsc.border_side = LV_BORDER_SIDE_BOTTOM | LV_BORDER_SIDE_RIGHT;
+    dsc.border_color = lv_color_hex(down ? g_theme->bevel_light
+                                        : g_theme->bevel_shadow);
+    lv_draw_rect(lv_event_get_layer(event), &dsc, &area);
+}
+
+static void theme_chrome(lv_obj_t * obj, uint32_t bottom)
+{
+    if(g_theme->id == UI_THEME_AQUA) {
+        lv_obj_set_style_bg_grad_color(obj, lv_color_hex(bottom), 0);
+        lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
+    }
+    else if(g_theme->id == UI_THEME_WINDOWS_95) {
+        lv_obj_add_event_cb(obj, theme_bevel_draw, LV_EVENT_DRAW_POST, NULL);
+    }
+}
+
+static void theme_button(lv_obj_t * button)
+{
+    if(g_theme->id == UI_THEME_GRAY) return;
+    lv_obj_set_style_radius(button, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(button, 0, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(g_theme->button_top), 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(COL_BORDER), 0);
+    lv_obj_set_style_border_width(button, g_theme->id == UI_THEME_AQUA ? 1 : 0, 0);
+    theme_chrome(button, g_theme->button_bottom);
+    lv_obj_set_style_bg_color(button, lv_color_hex(g_theme->button_bottom),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_NONE, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(button, lv_color_hex(COL_FOCUS), LV_STATE_CHECKED);
+    lv_obj_set_style_bg_grad_dir(button, LV_GRAD_DIR_NONE, LV_STATE_CHECKED);
+}
+
+static void theme_mode_button(lv_obj_t * button, bool active)
+{
+    if(g_theme->id == UI_THEME_GRAY) {
+        lv_obj_set_style_bg_color(button, lv_color_hex(COL_FOCUS), 0);
+        lv_obj_set_style_bg_opa(button, active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    }
+    else {
+        if(active) lv_obj_add_state(button, LV_STATE_CHECKED);
+        else lv_obj_remove_state(button, LV_STATE_CHECKED);
+        theme_mark_selected(button, active);
+    }
+}
+
 static lv_obj_t * make_panel(lv_obj_t * parent)
 {
     lv_obj_t * panel = lv_obj_create(parent);
@@ -770,6 +856,9 @@ static lv_obj_t * make_panel(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_radius(panel, 0, 0);
+    if(g_theme->id == UI_THEME_WINDOWS_95) {
+        lv_obj_add_event_cb(panel, theme_bevel_draw, LV_EVENT_DRAW_POST, NULL);
+    }
     lv_obj_set_style_pad_all(panel, 18, 0);
     lv_obj_set_style_pad_row(panel, 10, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
@@ -803,6 +892,9 @@ static lv_obj_t * make_scroll(lv_obj_t * parent)
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_style_pad_row(list, LIST_ROW_GAP, 0);
     lv_obj_set_style_radius(list, 0, LV_PART_SCROLLBAR);
+    if(g_theme->id != UI_THEME_GRAY) {
+        lv_obj_set_style_bg_color(list, lv_color_hex(COL_MUTED), LV_PART_SCROLLBAR);
+    }
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -852,6 +944,17 @@ static lv_obj_t * make_flat_icon_button(lv_obj_t * parent, const char * icon,
     make_label(button, icon, font, fg);
     lv_obj_set_clickable(button, true);
     lv_obj_add_event_cb(button, feedback_touch_cb, LV_EVENT_CLICKED, NULL);
+    return button;
+}
+
+/* Transport controls have a theme frame. The secondary star stays flat so
+ * its larger hit target can extend left of the aligned 30 px glyph. */
+static lv_obj_t * make_icon_button(lv_obj_t * parent, const char * icon,
+                                   int width, int height, uint32_t fg,
+                                   const lv_font_t * font)
+{
+    lv_obj_t * button = make_flat_icon_button(parent, icon, width, height, fg, font);
+    theme_button(button);
     return button;
 }
 
@@ -1885,6 +1988,8 @@ static void build_mini_now(lv_obj_t * parent)
     lv_obj_set_clickable(g_mini, true);
     lv_obj_add_event_cb(g_mini, mini_now_click_cb, LV_EVENT_CLICKED, NULL);
 
+    theme_chrome(g_mini, g_theme->button_bottom);
+
     g_mini_cover = make_cover(g_mini, NULL, COL_PANEL, 56);
 
     lv_obj_t * text = lv_obj_create(g_mini);
@@ -1994,6 +2099,7 @@ static void build_menubar(lv_obj_t * parent)
     lv_obj_set_flex_align(time_area, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(time_area, false);
+    theme_chrome(time_area, 0x163F70);
     g_status_time = make_label(time_area, "--:--", FONT_CLOCK,
                                COL_MENU_TOP_FG);
     lv_obj_set_width(g_status_time, LV_PCT(100));
@@ -2167,7 +2273,6 @@ void ui_debug_scroll(int dy)
 
 static void update_clock(void)
 {
-    static char last[16] = "";
     static bool last_12h;
     time_t now = time(NULL) + g_clock_offset_min * 60;
     struct tm local;
@@ -2182,9 +2287,8 @@ static void update_clock(void)
     else {
         strftime(text, sizeof(text), "%H:%M", &local);
     }
-    if(strcmp(text, last) != 0 || g_clock_12h != last_12h) {
+    if(strcmp(text, lv_label_get_text(g_status_time)) != 0 || g_clock_12h != last_12h) {
         last_12h = g_clock_12h;
-        snprintf(last, sizeof(last), "%s", text);
         lv_obj_set_style_text_font(g_status_time,
                                    g_clock_12h ? FONT_CLOCK_12
                                                : FONT_CLOCK, 0);
@@ -2197,6 +2301,7 @@ static void settings_time_blink_tick(void);
 static void ui_tick_cb(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
+    if(ui_apply_theme()) return;
     static uint32_t last_second;
     uint32_t perf_t0 = g_ui_trace ? perf_now() : 0;
     uint32_t perf_t1 = 0, perf_t2 = 0, perf_t3 = 0, perf_t4 = 0;
@@ -2786,13 +2891,8 @@ static void np_refresh_ui(void)
     lv_obj_set_style_text_color(np_repeat_icon,
                                 lv_color_hex(snapshot.repeat != PLAYER_REPEAT_OFF
                                              ? COL_ACCENT : COL_MUTED), 0);
-    lv_obj_set_style_bg_color(np_shuffle_btn, lv_color_hex(COL_FOCUS), 0);
-    lv_obj_set_style_bg_opa(np_shuffle_btn,
-                            snapshot.shuffle ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_bg_color(np_repeat_btn, lv_color_hex(COL_FOCUS), 0);
-    lv_obj_set_style_bg_opa(np_repeat_btn,
-                            snapshot.repeat != PLAYER_REPEAT_OFF
-                            ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    theme_mode_button(np_shuffle_btn, snapshot.shuffle);
+    theme_mode_button(np_repeat_btn, snapshot.repeat != PLAYER_REPEAT_OFF);
     lv_label_set_text(np_repeat_icon,
                       snapshot.repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE : ICON_REPEAT);
     lv_label_set_text(np_star_icon,
@@ -3251,7 +3351,7 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     np_progress = lv_bar_create(progress_row);
     lv_obj_set_height(np_progress, 8);
     lv_obj_set_flex_grow(np_progress, 1);
-    lv_obj_set_style_bg_color(np_progress, lv_color_hex(0x22303F), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(np_progress, lv_color_hex(g_theme->progress), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(np_progress, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(np_progress, lv_color_hex(COL_ACCENT),
                               LV_PART_INDICATOR);
@@ -3273,24 +3373,24 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(controls, false);
 
-    lv_obj_t * shuffle = make_flat_icon_button(controls, ICON_SHUFFLE, 56, 56,
+    lv_obj_t * shuffle = make_icon_button(controls, ICON_SHUFFLE, 56, 56,
                                                 COL_MUTED, &bootstrap_icons_32);
     np_shuffle_btn = shuffle;
     np_shuffle_icon = lv_obj_get_child(shuffle, 0);
     lv_obj_add_event_cb(shuffle, np_shuffle_click_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t * prev = make_flat_icon_button(controls, ICON_PREV, 84, 70,
+    lv_obj_t * prev = make_icon_button(controls, ICON_PREV, 84, 70,
                                             COL_TEXT, &bootstrap_icons_48);
-    lv_obj_t * play = make_flat_icon_button(controls, ICON_PLAY, 108, 80,
+    lv_obj_t * play = make_icon_button(controls, ICON_PLAY, 108, 80,
                                             COL_ACCENT, &bootstrap_icons_48);
-    lv_obj_t * next = make_flat_icon_button(controls, ICON_NEXT, 84, 70,
+    lv_obj_t * next = make_icon_button(controls, ICON_NEXT, 84, 70,
                                             COL_TEXT, &bootstrap_icons_48);
     np_play_icon = lv_obj_get_child(play, 0);
     lv_obj_add_event_cb(prev, np_prev_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(play, np_play_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(next, np_next_click_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t * repeat = make_flat_icon_button(controls, ICON_REPEAT, 56, 56,
+    lv_obj_t * repeat = make_icon_button(controls, ICON_REPEAT, 56, 56,
                                                COL_MUTED, &bootstrap_icons_32);
     np_repeat_btn = repeat;
     np_repeat_icon = lv_obj_get_child(repeat, 0);
@@ -3435,8 +3535,8 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_size(scrim, LV_PCT(100), LV_PCT(100));
         lv_obj_set_pos(scrim, 0, 0);
         lv_obj_set_ignore_layout(scrim, true);
-        lv_obj_set_style_bg_color(scrim, lv_color_hex(0x000000), 0);
-        lv_obj_set_style_bg_opa(scrim, LV_OPA_60, 0);
+        lv_obj_set_style_bg_color(scrim, lv_color_hex(g_theme->scrim), 0);
+        lv_obj_set_style_bg_opa(scrim, g_theme->scrim_opa, 0);
         lv_obj_set_style_border_width(scrim, 0, 0);
         lv_obj_set_style_radius(scrim, 0, 0);
         lv_obj_set_style_pad_all(scrim, 0, 0);
@@ -3560,7 +3660,7 @@ static void np_create(lv_obj_t * parent)
         np_progress = lv_bar_create(progress_row);
         lv_obj_set_height(np_progress, 10);
         lv_obj_set_flex_grow(np_progress, 1);
-        lv_obj_set_style_bg_color(np_progress, lv_color_hex(0x22303F),
+        lv_obj_set_style_bg_color(np_progress, lv_color_hex(g_theme->progress),
                                   LV_PART_MAIN);
         lv_obj_set_style_bg_opa(np_progress, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_color(np_progress, lv_color_hex(COL_ACCENT),
@@ -3587,20 +3687,20 @@ static void np_create(lv_obj_t * parent)
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollable(controls, false);
 
-        lv_obj_t * shuffle = make_flat_icon_button(controls, ICON_SHUFFLE,
+        lv_obj_t * shuffle = make_icon_button(controls, ICON_SHUFFLE,
                                                     NP_BUTTON_W, NP_BUTTON_H,
                                                     COL_MUTED,
                                                     &bootstrap_icons_48);
-        lv_obj_t * prev = make_flat_icon_button(controls, ICON_PREV,
+        lv_obj_t * prev = make_icon_button(controls, ICON_PREV,
                                                 NP_BUTTON_W, NP_BUTTON_H,
                                                 COL_TEXT, &bootstrap_icons_48);
-        lv_obj_t * play = make_flat_icon_button(controls, ICON_PLAY,
+        lv_obj_t * play = make_icon_button(controls, ICON_PLAY,
                                                 NP_BUTTON_W, NP_BUTTON_H,
                                                 COL_ACCENT, &bootstrap_icons_48);
-        lv_obj_t * next = make_flat_icon_button(controls, ICON_NEXT,
+        lv_obj_t * next = make_icon_button(controls, ICON_NEXT,
                                                 NP_BUTTON_W, NP_BUTTON_H,
                                                 COL_TEXT, &bootstrap_icons_48);
-        lv_obj_t * repeat = make_flat_icon_button(controls, ICON_REPEAT,
+        lv_obj_t * repeat = make_icon_button(controls, ICON_REPEAT,
                                                   NP_BUTTON_W, NP_BUTTON_H,
                                                   COL_MUTED,
                                                   &bootstrap_icons_48);
@@ -3783,6 +3883,7 @@ static void albums_apply_row_style(lv_obj_t * row, int index)
     lv_obj_set_style_border_width(row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+    theme_mark_selected(row, selected);
 }
 
 static void albums_apply_shuffle_row_style(void)
@@ -3797,6 +3898,7 @@ static void albums_apply_shuffle_row_style(void)
     lv_obj_set_style_border_width(albums_shuffle_row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(albums_shuffle_row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(albums_shuffle_row, lv_color_hex(COL_ACCENT), 0);
+    theme_mark_selected(albums_shuffle_row, selected);
 }
 
 static void albums_update_selection(void)
@@ -4410,7 +4512,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(controls, false);
 
-    lv_obj_t * shuffle = make_flat_icon_button(
+    lv_obj_t * shuffle = make_icon_button(
         controls, ICON_SHUFFLE, 56, 56,
         snapshot.shuffle ? COL_ACCENT : COL_MUTED, &bootstrap_icons_32);
     albums_shuffle_icon = lv_obj_get_child(shuffle, 0);
@@ -4421,7 +4523,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
         touch_add_clickable(shuffle, albums_shuffle_touch_cb, NULL);
     }
 
-    lv_obj_t * play = make_flat_icon_button(
+    lv_obj_t * play = make_icon_button(
         controls, ICON_PLAY_OUTLINE, 56, 56, COL_TEXT, &bootstrap_icons_32);
     if(interactive) {
         albums_play_focus = focus_add_clickable(play, albums_play_all_action,
@@ -4700,6 +4802,7 @@ static void artists_apply_row_style(lv_obj_t * row, int index)
     lv_obj_set_style_border_width(row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+    theme_mark_selected(row, selected);
 }
 
 static void artists_fill_row(int slot, int index)
@@ -5111,7 +5214,7 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(controls, false);
 
-    lv_obj_t * shuffle = make_flat_icon_button(
+    lv_obj_t * shuffle = make_icon_button(
         controls, ICON_SHUFFLE, 56, 56,
         snapshot.shuffle ? COL_ACCENT : COL_MUTED, &bootstrap_icons_32);
     artists_shuffle_icon = lv_obj_get_child(shuffle, 0);
@@ -5122,7 +5225,7 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
         touch_add_clickable(shuffle, artists_shuffle_touch_cb, NULL);
     }
 
-    lv_obj_t * play = make_flat_icon_button(
+    lv_obj_t * play = make_icon_button(
         controls, ICON_PLAY_OUTLINE, 56, 56, COL_TEXT, &bootstrap_icons_32);
     if(interactive) {
         artists_play_focus = focus_add_clickable(play, artists_play_all_action,
@@ -5418,9 +5521,9 @@ static void artists_create(lv_obj_t * parent)
 #define CTX_MENU_ROW_H      64
 #define CTX_MENU_MAX_ITEMS  8
 
-#define COL_CTX_PANEL       0x202020
-#define COL_CTX_GROUP       0x181818
-#define COL_CTX_BORDER      0x484848
+#define COL_CTX_PANEL       (g_theme->context_panel)
+#define COL_CTX_GROUP       (g_theme->context_group)
+#define COL_CTX_BORDER      (g_theme->context_border)
 
 typedef struct {
     lv_obj_t * row;
@@ -5467,6 +5570,7 @@ static void context_menu_focus_set(int index)
     for(int i = 0; i < g_ctx_menu_item_count; i++) {
         context_menu_item_t * item = &g_ctx_menu_items[i];
         bool focused = (i == index);
+        theme_mark_selected(item->row, focused);
         lv_obj_set_style_bg_opa(item->row, focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_obj_set_style_bg_color(item->row, lv_color_hex(COL_FOCUS), 0);
         lv_obj_set_style_border_width(item->row, focused ? 3 : 0, 0);
@@ -5806,6 +5910,7 @@ static void songs_apply_selection(lv_obj_t * row, bool selected)
     lv_obj_set_style_border_width(row, selected ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+    theme_mark_selected(row, selected);
 }
 
 static void songs_fill_row(int slot, int index,
@@ -6468,7 +6573,7 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(controls, false);
 
-    lv_obj_t * shuffle = make_flat_icon_button(
+    lv_obj_t * shuffle = make_icon_button(
         controls, ICON_SHUFFLE, 56, 56,
         snapshot.shuffle ? COL_ACCENT : COL_MUTED, &bootstrap_icons_32);
     if(interactive) {
@@ -6478,7 +6583,7 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
         touch_add_clickable(shuffle, playlists_shuffle_touch_cb, NULL);
     }
 
-    lv_obj_t * play = make_flat_icon_button(
+    lv_obj_t * play = make_icon_button(
         controls, ICON_PLAY_OUTLINE, 56, 56, COL_TEXT, &bootstrap_icons_32);
     if(interactive) {
         playlists_play_focus = focus_add_clickable(play, playlists_play_action,
@@ -6631,6 +6736,7 @@ static void playlists_create(lv_obj_t * parent)
         if(i == playlists_selected) {
             lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
             lv_obj_set_style_bg_color(row, lv_color_hex(COL_ACCENT_DARK), 0);
+            theme_mark_selected(row, true);
         }
 
         if(!playlists_detail_open) {
@@ -7006,7 +7112,8 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(settings_brightness < 0) settings_brightness = 0;
     if(settings_brightness > 100) settings_brightness = 100;
     g_usb_mode = cfg->usb_mode == 2 ? USB_MODE_BOTH : USB_MODE_HOST;
-    g_system_config.theme = cfg->theme;
+    g_theme = ui_theme_get(cfg->theme);
+    g_system_config.theme = g_theme->id;
     g_system_config.boot_screen = cfg->boot_screen;
     g_system_config.ble_enabled = cfg->ble_enabled;
 
@@ -7505,10 +7612,14 @@ static void settings_time_apply_blink(void)
         if(fields[i] == NULL) continue;
         bool on = active && settings_time_segment == segments[i] && blink;
         lv_obj_set_style_bg_opa(fields[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        theme_mark_selected(fields[i], on);
     }
 
     uint32_t arrow_fg = edit ? COL_TEXT : COL_DIM;
     uint32_t arrow_bg = edit ? COL_FOCUS : COL_ACCENT_DARK;
+    if(g_theme->id != UI_THEME_GRAY) {
+        arrow_bg = g_theme->button_bottom;
+    }
     lv_obj_t * buttons[] = {
         settings_time_down_button,
         settings_time_up_button,
@@ -7563,6 +7674,7 @@ static lv_obj_t * settings_time_touch_button(lv_obj_t * parent,
         lv_obj_clear_flag(button, LV_OBJ_FLAG_CLICKABLE);
     }
     lv_obj_t * label = make_label(button, icon, &bootstrap_icons_32, COL_DIM);
+    theme_button(button);
     if(icon_out != NULL) *icon_out = label;
     return button;
 }
@@ -8670,6 +8782,7 @@ static void settings_create(lv_obj_t * parent)
         if(i == settings_selected) {
             lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
             lv_obj_set_style_bg_color(row, lv_color_hex(COL_ACCENT_DARK), 0);
+            theme_mark_selected(row, true);
         }
 
         if(!settings_detail_open) {
@@ -8940,6 +9053,7 @@ static void afc_sync_update(void)
 static void afc_sync_tick_cb(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
+    if(ui_apply_theme()) return;
     afc_sync_update();
 }
 
@@ -8965,6 +9079,7 @@ static lv_obj_t * afc_sync_button(lv_obj_t * parent, const char * text,
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     make_label(button, text, FONT_H2, COL_TEXT);
+    theme_button(button);
     focus_add_clickable(button, afc_sync_action, NULL,
                         (void *)(intptr_t)action, true);
     return button;
@@ -9136,7 +9251,6 @@ static void ui_afc_sync_build(lv_obj_t * screen)
 
     ui_set_hint("UP/DOWN Select   ENTER Run");
     afc_sync_update();
-    lv_timer_create(afc_sync_tick_cb, 500, NULL);
     if(g_focus_count > 0) focus_select(0);
 }
 
@@ -9257,6 +9371,48 @@ static void ui_marquee_tick(lv_timer_t * timer)
     ui_marquee_start(target);
 }
 
+/* Apply on the LVGL timer thread, after input callbacks have unwound. Config
+ * publication from the web task only changes the requested ID. Rebuild the
+ * widgets once; retain library/art caches, current page, selection and player. */
+static bool ui_apply_theme(void)
+{
+    const ui_theme_t * next = ui_theme_get(g_system_config.theme);
+    if(next == g_theme) return false;
+    if(g_ctx_menu_open) context_menu_close();
+    int saved_focus = g_focus_index;
+    g_theme = next;
+
+    lv_obj_t * screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_text_color(screen, lv_color_hex(COL_TEXT), 0);
+    if(g_afc_sync_mode) {
+        focus_clear();
+        lv_obj_clean(screen);
+        ui_afc_sync_build(screen);
+    }
+    else {
+        lv_obj_delete(g_menubar);
+        lv_obj_delete(g_mini);
+        memset(g_menu_items, 0, sizeof(g_menu_items));
+        memset(g_menu_icons, 0, sizeof(g_menu_icons));
+        build_menubar(screen);
+        build_mini_now(g_content);
+        /* Force title, art and time into the new mini-player widgets even
+         * when playback is paused and its revision has not changed. */
+        g_mini_track_id = UINT64_MAX;
+        g_mini_art_rev = UINT32_MAX;
+        g_mini_rev = UINT32_MAX;
+        g_mini_elapsed = UINT32_MAX;
+        ui_menubar_apply_side();
+        lv_obj_set_style_bg_color(g_page, lv_color_hex(COL_MAIN_BG), 0);
+        ui_layout_page_area();
+        ui_rebuild_page();
+        update_clock();
+    }
+    if(saved_focus >= 0 && saved_focus < g_focus_count) focus_select(saved_focus);
+    return true;
+}
+
 /* -------------------------------------------------------------------------
  * Public entry point
  * ------------------------------------------------------------------------- */
@@ -9282,6 +9438,7 @@ void ui_init(void)
 
     if(g_afc_sync_mode) {
         ui_afc_sync_build(screen);
+        lv_timer_create(afc_sync_tick_cb, 500, NULL);
         return;
     }
 

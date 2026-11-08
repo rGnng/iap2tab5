@@ -26,6 +26,7 @@ idf_component_register(
         "../../app/backend/mock_player.c"
         "../../app/backend/ble_remote.c"
         "../../app/ui/ui.c"
+        "../../app/ui/theme.c"
         "../../app/ui/boot.c"
         ${UI_FONT_SRCS}
     INCLUDE_DIRS

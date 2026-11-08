@@ -647,6 +647,7 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "wifi_mode", g_app_config.wifi_mode);
     cJSON_AddBoolToObject(root, "sound_enabled", g_app_config.sound_enabled);
     cJSON_AddNumberToObject(root, "sound_mode", g_app_config.sound_mode);
+    cJSON_AddNumberToObject(root, "theme", g_app_config.theme);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
@@ -693,7 +694,16 @@ static esp_err_t config_post(httpd_req_t * req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
     }
 
-    const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "screen_flip");
+    const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "theme");
+    if(item != NULL) {
+        if(!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
+           item->valueint < 0 || item->valueint > 2) {
+            cJSON_Delete(root);
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid theme");
+        }
+        g_app_config.theme = (uint8_t)item->valueint;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "screen_flip");
     if(cJSON_IsNumber(item)) {
         g_app_config.screen_flip = (item->valueint == 180) ? 180 : 0;
     }
