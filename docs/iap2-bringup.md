@@ -221,6 +221,42 @@ work. If the pack does not fit, existing SD and per-cover caches serve the
 artwork. Failed font reads release their allocation and log the read/allocation
 failure rather than retaining a partial buffer.
 
+### Tab transitions
+
+Selecting a library or Settings tab updates the menubar and paints its
+heading and `Loading...` first. Now Playing opens directly in its normal
+layout without a transition heading or loading screen. A single timer builds the destination only after that display refresh.
+The library/settings detail preview waits for the list frame as well; its
+existing 140 ms selection timer then fills the right pane. Mini-player
+artwork reads also wait until the initial destination frame has painted.
+Loading and populated pages use the same header helper, padding, height and
+font, so the heading stays at the same coordinates.
+
+A newer tab request cancels the pending build and preview. Rotary, Enter,
+context and paging keys received during loading are replayed in order for
+the selected page; switching tabs drops the old page's queued input. Replays
+suppress the feedback already played when the key arrived. Media commands
+and further tab selection remain immediate. Page ticks and marquee/time
+callbacks do not inspect unbuilt widgets. Timer allocation failure falls back
+to synchronous construction.
+
+Device samples with the 20,688-track library (Gray, two passes per tab):
+
+| Destination | Previous first frame | Destination heading first frame |
+| --- | ---: | ---: |
+| Albums | 370–376 ms | 85–88 ms |
+| Artists | 253–258 ms | 68–72 ms |
+| Songs | 152–169 ms | 69–71 ms |
+| Playlists | 131–141 ms | 71 ms |
+| Settings | 145–155 ms | 67–70 ms |
+
+These measurements describe initial visual feedback, not completion of all
+page content or artwork. Trace mode reports `tab_build`, `tab_frame`,
+`tab_content_build` and `tab_content_frame` separately. Validation: 109 host
+tests, firmware/simulator builds, rapid tab changes and queued input, Gray /
+Aqua / Windows 95 views, identical heading pixels before/after loading, OTA,
+iPod authentication and Japanese-font/memory checks.
+
 ### Queue editing investigation (2026-11-08)
 
 The checked [Accessory Interface Specification R32](https://www.scribd.com/document/863231068/Accessory-Interface-Specification-R32-No-Watermark),

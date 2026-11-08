@@ -884,6 +884,22 @@ static lv_obj_t * make_panel(lv_obj_t * parent)
     return panel;
 }
 
+/* Loading and populated pages share this exact header geometry. */
+static lv_obj_t * make_page_header(lv_obj_t * parent, const char * title, int height)
+{
+    lv_obj_t * head = lv_obj_create(parent);
+    lv_obj_set_size(head, LV_PCT(100), height);
+    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(head, 0, 0);
+    lv_obj_set_style_pad_all(head, 0, 0);
+    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollable(head, false);
+    make_label(head, title, FONT_PAGE_TITLE, COL_TEXT);
+    return head;
+}
+
 static lv_obj_t * make_panel_content(lv_obj_t * panel, int pad)
 {
     lv_obj_t * content = lv_obj_create(panel);
@@ -1698,6 +1714,15 @@ static screen_id_t g_ble_return_screen = SCR_COUNT;
 static bool g_ctx_menu_open;
 static bool g_device_available;
 static bool g_ui_trace;
+static uint32_t g_tab_start_us;
+static bool g_tab_frame_pending;
+static bool g_tab_content_frame_pending;
+static bool g_page_loading, g_page_wait_frame;
+static screen_id_t g_page_loading_screen = SCR_COUNT;
+static lv_timer_t * g_page_load_timer, * g_page_detail_timer;
+#define PAGE_LOADING_KEYS 64
+static ui_key_t g_page_loading_keys[PAGE_LOADING_KEYS];
+static int g_page_loading_key_count;
 
 static uint32_t perf_now(void)
 {
@@ -1735,6 +1760,7 @@ static void np_toggle_queue(void);
 static void context_menu_open(void);
 static void context_menu_close(void);
 static bool context_menu_key(ui_key_t key);
+static void ui_dispatch_key(ui_key_t key);
 
 static void menu_click_async(void * arg)
 {
@@ -2083,7 +2109,7 @@ static void ui_layout_page_area(void)
     int top = show_mini ? MINI_NOW_H : 0;
     lv_obj_set_pos(g_page, 0, top);
     lv_obj_set_size(g_page, LV_PCT(100), SCREEN_H - top);
-    if(show_mini) ui_mini_update();
+    if(show_mini && !g_page_loading) ui_mini_update();
 }
 
 static void build_menubar(lv_obj_t * parent)
@@ -2279,6 +2305,7 @@ void ui_debug_trace(bool enabled)
 
 void ui_debug_scroll(int dy)
 {
+    if(g_page_loading) return;
     if(g_current_screen == SCR_ALBUMS && albums_left_list != NULL) {
         lv_obj_scroll_by(albums_left_list, 0, dy, LV_ANIM_OFF);
     }
@@ -2367,12 +2394,12 @@ static void ui_tick_cb(lv_timer_t * timer)
     }
     if(g_ui_trace) perf_t5 = perf_now();
 
-    if(g_current_screen < SCR_COUNT && g_pages[g_current_screen].tick) {
+    if(!g_page_loading && g_current_screen < SCR_COUNT && g_pages[g_current_screen].tick) {
         g_pages[g_current_screen].tick();
     }
     if(g_ui_trace) perf_t6 = perf_now();
 
-    if(g_current_screen != SCR_NOW_PLAYING) ui_mini_update();
+    if(!g_page_loading && g_current_screen != SCR_NOW_PLAYING) ui_mini_update();
     if(g_ui_trace) {
         uint32_t perf_t7 = perf_now();
         uint32_t dt = perf_t7 - perf_t0;
@@ -2393,25 +2420,131 @@ static void ui_tick_cb(lv_timer_t * timer)
 static void settings_time_blink_timer_cb(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
-    settings_time_blink_tick();
+    if(!g_page_loading) settings_time_blink_tick();
+}
+
+static void ui_page_cancel_load(void)
+{
+    if(g_page_load_timer) lv_timer_pause(g_page_load_timer);
+    if(g_page_detail_timer) lv_timer_pause(g_page_detail_timer);
+    g_page_loading = g_page_wait_frame = false;
+    g_page_loading_screen = SCR_COUNT;
+    g_page_detail_timer = NULL;
+    g_page_loading_key_count = 0;
+    g_tab_frame_pending = g_tab_content_frame_pending = false;
+}
+
+static void ui_page_loading_shell(void)
+{
+    static const char * names[SCR_COUNT] = {
+        "Now Playing", "Albums", "Artists", "Songs", "Playlists", "Bluetooth Remote", "Settings"
+    };
+    lv_obj_t * panel = make_panel(g_page);
+    lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
+    bool bluetooth = g_current_screen == SCR_BLUETOOTH;
+    lv_obj_set_style_pad_all(panel, bluetooth ? 22 : 16, 0);
+    lv_obj_set_style_pad_row(panel, 0, 0);
+    if(g_current_screen != SCR_NOW_PLAYING) {
+        make_page_header(panel, names[g_current_screen], bluetooth ? 48 : 56);
+    }
+    make_label(panel, "Loading...", FONT_CAPTION, COL_MUTED);
+}
+
+/* Called only after the destination shell has completed a display refresh.
+ * A newer tab request cancels this single timer and replaces its target. */
+static void ui_page_load_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    if(!g_page_loading || g_page_loading_screen != g_current_screen) return;
+    screen_id_t screen = g_current_screen;
+    uint32_t start = g_ui_trace ? perf_now() : 0;
+    lv_obj_clean(g_page);
+    g_pages[screen].create(g_page);
+    if(g_page_detail_timer) lv_timer_pause(g_page_detail_timer);
+    g_page_loading = false;
+    ui_menu_update();
+    if(screen != SCR_NOW_PLAYING) ui_mini_update();
+    g_tab_content_frame_pending = true;
+    if(g_ui_trace) UI_PERF_LOG("tab_content_build: screen=%d build=%u us",
+        screen, (unsigned)(perf_now() - start));
+
+    /* Preserve rotary/Enter input received while the shell was visible.
+     * Tab navigation itself is immediate and clears this queue. */
+    ui_key_t keys[PAGE_LOADING_KEYS];
+    int count = g_page_loading_key_count;
+    memcpy(keys, g_page_loading_keys, (size_t)count * sizeof(keys[0]));
+    g_page_loading_key_count = 0;
+    for(int i = 0; i < count; i++) {
+        /* Feedback was already emitted when the physical key arrived. */
+        bool old_scope = g_key_feedback_scope;
+        bool old_sent = g_key_feedback_sent;
+        g_key_feedback_scope = g_key_feedback_sent = true;
+        ui_dispatch_key(keys[i]);
+        g_key_feedback_scope = old_scope;
+        g_key_feedback_sent = old_sent;
+        if(g_current_screen != screen || g_page_loading) break;
+    }
+}
+
+static bool ui_page_defer_key(ui_key_t key)
+{
+    if(!g_page_loading) return false;
+    switch(key) {
+        case UI_KEY_UP:
+        case UI_KEY_DOWN:
+        case UI_KEY_ENTER:
+        case UI_KEY_CONTEXT:
+        case UI_KEY_PAGE_UP:
+        case UI_KEY_PAGE_DOWN:
+            break;
+        case UI_KEY_SCREEN_PREV:
+            if(g_current_screen != SCR_NOW_PLAYING) return false;
+            break;
+        default: return false;
+    }
+    if(g_page_loading_key_count < PAGE_LOADING_KEYS) {
+        g_page_loading_keys[g_page_loading_key_count++] = key;
+    }
+    return true;
+}
+
+static void ui_tab_refresh_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    if(g_page_loading && g_page_wait_frame &&
+       g_page_loading_screen == g_current_screen) {
+        g_page_wait_frame = false;
+        lv_timer_reset(g_page_load_timer);
+        lv_timer_resume(g_page_load_timer);
+    }
+    if(!g_page_loading && g_page_detail_timer) {
+        lv_timer_reset(g_page_detail_timer);
+        lv_timer_resume(g_page_detail_timer);
+        g_page_detail_timer = NULL;
+    }
+    if(g_tab_frame_pending) {
+        g_tab_frame_pending = false;
+        if(g_ui_trace) UI_PERF_LOG("tab_frame: screen=%d ready=%u us",
+            g_current_screen, (unsigned)(perf_now() - g_tab_start_us));
+    }
+    if(g_tab_content_frame_pending) {
+        g_tab_content_frame_pending = false;
+        if(g_ui_trace) UI_PERF_LOG("tab_content_frame: screen=%d ready=%u us",
+            g_current_screen, (unsigned)(perf_now() - g_tab_start_us));
+    }
 }
 
 static void ui_show_screen(screen_id_t id)
 {
-    if(g_afc_sync_mode) return;
-    if(id < 0 || id >= SCR_COUNT) return;
-
+    if(g_afc_sync_mode || id < 0 || id >= SCR_COUNT) return;
     if(g_ctx_menu_open) context_menu_close();
-
-    if(g_current_screen == SCR_SETTINGS && id != SCR_SETTINGS) {
-        ble_remote_scan_stop();
-    }
-
+    if(g_current_screen == SCR_SETTINGS && id != SCR_SETTINGS) ble_remote_scan_stop();
     if(id == g_current_screen) {
-        if(g_pages[id].same_key) g_pages[id].same_key();
+        if(!g_page_loading && g_pages[id].same_key) g_pages[id].same_key();
         return;
     }
 
+    g_tab_start_us = perf_now();
     if(id != SCR_BLUETOOTH) g_ble_return_screen = SCR_COUNT;
     g_current_screen = id;
     ui_exit_edit();
@@ -2419,19 +2552,35 @@ static void ui_show_screen(screen_id_t id)
     ui_page_teardown();
     lv_obj_clean(g_page);
     ui_set_hint("");
-    ui_layout_page_area();
-    uint32_t trace_start = lv_tick_get();
-    if(g_pages[id].enter) g_pages[id].enter();
-    g_pages[id].create(g_page);
-    if(g_ui_trace || getenv("IAP2TAB5_TRACE")) {
-        fprintf(stderr, "[trace] create screen %d in %u ms\n", (int)id,
-                (unsigned)(lv_tick_get() - trace_start));
+    if(g_page_load_timer == NULL && id != SCR_NOW_PLAYING) {
+        g_page_load_timer = lv_timer_create(ui_page_load_cb, 16, NULL);
     }
+    if(g_page_load_timer) lv_timer_pause(g_page_load_timer);
+    /* Now Playing has no page heading and opens directly in its normal layout. */
+    g_page_loading = id != SCR_NOW_PLAYING && g_page_load_timer != NULL;
+    g_page_loading_screen = id;
+    ui_layout_page_area();
+    if(g_pages[id].enter) g_pages[id].enter();
+    if(g_page_loading) {
+        ui_page_loading_shell();
+        g_page_wait_frame = true;
+    }
+    else g_pages[id].create(g_page);
     ui_menu_update();
+    g_tab_frame_pending = true;
+    if(g_ui_trace) UI_PERF_LOG("tab_build: screen=%d build=%u us",
+        g_current_screen, (unsigned)(perf_now() - g_tab_start_us));
 }
 
 static void ui_rebuild_page(void)
 {
+    if(g_page_loading) {
+        lv_timer_pause(g_page_load_timer);
+        lv_obj_clean(g_page);
+        ui_page_loading_shell();
+        g_page_wait_frame = true;
+        return;
+    }
     ui_exit_edit();
     focus_clear();
     ui_page_teardown();
@@ -2453,6 +2602,12 @@ static void ui_back(void)
         return;
     }
     ui_feedback_emit(UI_FEEDBACK_BACK, true);
+    if(g_page_loading) {
+        screen_id_t target = g_current_screen == SCR_BLUETOOTH && g_ble_return_screen != SCR_COUNT ?
+            g_ble_return_screen : SCR_NOW_PLAYING;
+        ui_show_screen(target);
+        return;
+    }
     if(g_pages[g_current_screen].back && g_pages[g_current_screen].back()) {
         return;
     }
@@ -2514,7 +2669,7 @@ static void ui_handle_media_key(ui_key_t key)
         default:
             return;
     }
-    if(g_current_screen < SCR_COUNT && g_pages[g_current_screen].tick) {
+    if(!g_page_loading && g_current_screen < SCR_COUNT && g_pages[g_current_screen].tick) {
         g_pages[g_current_screen].tick();
     }
 }
@@ -2543,6 +2698,8 @@ static void ui_dispatch_key(ui_key_t key)
         }
         return;
     }
+
+    if(ui_page_defer_key(key)) return;
 
     if(g_ctx_menu_open) {
         /* Media keys are global hardware keys and stay available while the
@@ -4274,7 +4431,7 @@ static void albums_schedule_detail(void)
         lv_timer_pause(albums_detail_timer);
     }
     lv_timer_reset(albums_detail_timer);
-    lv_timer_resume(albums_detail_timer);
+    if(g_page_detail_timer != albums_detail_timer) lv_timer_resume(albums_detail_timer);
 }
 
 static void albums_select_visual(int index)
@@ -4687,6 +4844,9 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
 
 static void albums_create(lv_obj_t * parent)
 {
+    albums_shuffle_icon = NULL;
+    albums_play_focus = -1;
+    albums_detail_title = NULL;
     albums_cancel_work();
     albums_right_content = NULL;
     albums_left_list = NULL;
@@ -4721,16 +4881,7 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_t * left_content = make_panel_content(left, 16);
     lv_obj_set_style_pad_row(left_content, 0, 0);
 
-    lv_obj_t * head = lv_obj_create(left_content);
-    lv_obj_set_size(head, LV_PCT(100), ALBUMS_HEADER_H);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    make_label(head, "Albums", FONT_PAGE_TITLE, COL_TEXT);
+    lv_obj_t * head = make_page_header(left_content, "Albums", ALBUMS_HEADER_H);
     counter_create(head, &albums_counter);
     albums_update_count();
 
@@ -4820,7 +4971,12 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(right, 0, 0);
     albums_right_content = make_panel_content(right, 16);
     lv_obj_set_style_pad_row(albums_right_content, 0, 0);
-    albums_render_detail(albums_right_content, albums_detail_open);
+    if(g_page_loading && !albums_detail_open) {
+        make_label(albums_right_content, "Loading...", FONT_CAPTION, COL_MUTED);
+        albums_schedule_detail();
+        g_page_detail_timer = albums_detail_timer;
+    }
+    else albums_render_detail(albums_right_content, albums_detail_open);
 
     lv_obj_update_layout(list);
     if(albums_selected < 0) {
@@ -5034,7 +5190,7 @@ static void artists_schedule_detail(void)
         lv_timer_pause(artists_detail_timer);
     }
     lv_timer_reset(artists_detail_timer);
-    lv_timer_resume(artists_detail_timer);
+    if(g_page_detail_timer != artists_detail_timer) lv_timer_resume(artists_detail_timer);
 }
 
 static void artists_select(int index)
@@ -5492,6 +5648,9 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
 
 static void artists_create(lv_obj_t * parent)
 {
+    artists_shuffle_icon = NULL;
+    artists_play_focus = -1;
+    artists_detail_name = NULL;
     if(artists_detail_timer) lv_timer_pause(artists_detail_timer);
     artists_detail_dirty = false;
     artists_right_content = NULL;
@@ -5517,16 +5676,7 @@ static void artists_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(left, 16, 0);
     lv_obj_set_style_pad_row(left, 0, 0);
 
-    lv_obj_t * head = lv_obj_create(left);
-    lv_obj_set_size(head, LV_PCT(100), 56);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    make_label(head, "Artists", FONT_PAGE_TITLE, COL_TEXT);
+    lv_obj_t * head = make_page_header(left, "Artists", 56);
     counter_create(head, &artists_counter);
     artists_update_count();
 
@@ -5590,7 +5740,12 @@ static void artists_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(right, 0, 0);
     artists_right_content = make_panel_content(right, 16);
     lv_obj_set_style_pad_row(artists_right_content, 0, 0);
-    artists_render_detail(artists_right_content, artists_detail_open);
+    if(g_page_loading && !artists_detail_open) {
+        make_label(artists_right_content, "Loading...", FONT_CAPTION, COL_MUTED);
+        artists_schedule_detail();
+        g_page_detail_timer = artists_detail_timer;
+    }
+    else artists_render_detail(artists_right_content, artists_detail_open);
 
     lv_obj_update_layout(list);
     lv_obj_scroll_to_y(list, artists_left_scroll_y, LV_ANIM_OFF);
@@ -6158,6 +6313,7 @@ static void songs_swipe_page(int direction)
  * USB keyboard or the serial debug keys. */
 static bool ui_list_page(int direction)
 {
+    if(g_page_loading) return true;
     if(g_current_screen == SCR_ALBUMS) {
         albums_swipe_page(direction);
         return true;
@@ -6316,17 +6472,8 @@ static void songs_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(panel, 16, 0);
     lv_obj_set_style_pad_row(panel, 0, 0);
 
-    lv_obj_t * head = lv_obj_create(panel);
-    lv_obj_set_size(head, LV_PCT(100), 56);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
+    lv_obj_t * head = make_page_header(panel, "Songs", 56);
     lv_obj_set_style_pad_right(head, 14, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    make_label(head, "Songs", FONT_PAGE_TITLE, COL_TEXT);
     counter_create(head, &songs_counter);
 
     songs_list = lv_obj_create(panel);
@@ -6461,7 +6608,7 @@ static void playlists_schedule_detail(void)
         lv_timer_pause(playlists_detail_timer);
     }
     lv_timer_reset(playlists_detail_timer);
-    lv_timer_resume(playlists_detail_timer);
+    if(g_page_detail_timer != playlists_detail_timer) lv_timer_resume(playlists_detail_timer);
 }
 
 static void playlists_row_focus(void * user)
@@ -6761,6 +6908,7 @@ static void playlists_swipe_page(int direction)
 
 static void playlists_create(lv_obj_t * parent)
 {
+    playlists_play_focus = -1;
     if(playlists_detail_timer) lv_timer_pause(playlists_detail_timer);
     playlists_detail_dirty = false;
     playlists_right_content = NULL;
@@ -6781,16 +6929,7 @@ static void playlists_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(left, 16, 0);
     lv_obj_set_style_pad_row(left, 0, 0);
 
-    lv_obj_t * head = lv_obj_create(left);
-    lv_obj_set_size(head, LV_PCT(100), 56);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    make_label(head, "Playlists", FONT_PAGE_TITLE, COL_TEXT);
+    lv_obj_t * head = make_page_header(left, "Playlists", 56);
     counter_create(head, &playlists_counter);
 
     lv_obj_t * list = make_scroll(left);
@@ -6854,7 +6993,12 @@ static void playlists_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(right, 0, 0);
     playlists_right_content = make_panel_content(right, 16);
     lv_obj_set_style_pad_row(playlists_right_content, 0, 0);
-    playlists_render_detail(playlists_right_content, playlists_detail_open);
+    if(g_page_loading && !playlists_detail_open) {
+        make_label(playlists_right_content, "Loading...", FONT_CAPTION, COL_MUTED);
+        playlists_schedule_detail();
+        g_page_detail_timer = playlists_detail_timer;
+    }
+    else playlists_render_detail(playlists_right_content, playlists_detail_open);
 
     lv_obj_update_layout(list);
     lv_obj_scroll_to_y(list, playlists_left_scroll_y, LV_ANIM_OFF);
@@ -6956,16 +7100,7 @@ static void ble_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(root, 22, 0);
     lv_obj_set_style_pad_row(root, 12, 0);
 
-    lv_obj_t * head = lv_obj_create(root);
-    lv_obj_set_size(head, LV_PCT(100), 48);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    make_label(head, "Bluetooth Remote", FONT_PAGE_TITLE, COL_TEXT);
+    lv_obj_t * head = make_page_header(root, "Bluetooth Remote", 48);
     make_label(head, status, FONT_H2, scanning ? COL_ACCENT : COL_MUTED);
 
     lv_obj_t * list = make_scroll(root);
@@ -8669,7 +8804,7 @@ static void settings_schedule_detail(void)
         lv_timer_pause(settings_detail_timer);
     }
     lv_timer_reset(settings_detail_timer);
-    lv_timer_resume(settings_detail_timer);
+    if(g_page_detail_timer != settings_detail_timer) lv_timer_resume(settings_detail_timer);
 }
 
 /* The master-detail pages defer right-panel rendering to a 140 ms timer.
@@ -8678,6 +8813,7 @@ static void settings_schedule_detail(void)
  * every page timer and drop its dangling content pointer before teardown. */
 static void ui_page_teardown(void)
 {
+    ui_page_cancel_load();
     if(np_queue_fill_timer) lv_timer_pause(np_queue_fill_timer);
     np_queue_wait_frame = false;
     np_queue_list = np_queue_loading = np_queue_spacer = NULL;
@@ -8861,16 +8997,7 @@ static void settings_create(lv_obj_t * parent)
     lv_obj_set_style_pad_all(left, 16, 0);
     lv_obj_set_style_pad_row(left, 0, 0);
 
-    lv_obj_t * head = lv_obj_create(left);
-    lv_obj_set_size(head, LV_PCT(100), 56);
-    lv_obj_set_style_bg_opa(head, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(head, 0, 0);
-    lv_obj_set_style_pad_all(head, 0, 0);
-    lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(head, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_scrollable(head, false);
-    make_label(head, "Settings", FONT_PAGE_TITLE, COL_TEXT);
+    lv_obj_t * head = make_page_header(left, "Settings", 56);
     counter_create(head, &settings_counter);
     settings_update_count();
 
@@ -8907,7 +9034,12 @@ static void settings_create(lv_obj_t * parent)
     lv_obj_set_scrollbar_mode(settings_right_content, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_scroll_elastic(settings_right_content, true);
     lv_obj_set_scrollable(settings_right_content, true);
-    settings_render_detail(settings_right_content, settings_detail_open);
+    if(g_page_loading && !settings_detail_open) {
+        make_label(settings_right_content, "Loading...", FONT_CAPTION, COL_MUTED);
+        settings_schedule_detail();
+        g_page_detail_timer = settings_detail_timer;
+    }
+    else settings_render_detail(settings_right_content, settings_detail_open);
 
     if(settings_detail_open) {
         if(settings_time_open) {
@@ -9212,7 +9344,7 @@ void ui_handle_key_repeat(ui_key_t key, int count)
         return;
     }
 
-    if(!g_afc_sync_mode && !g_ctx_menu_open &&
+    if(!g_afc_sync_mode && !g_ctx_menu_open && !g_page_loading &&
        (key == UI_KEY_UP || key == UI_KEY_DOWN)) {
         const int delta = key == UI_KEY_UP ? -count : count;
 
@@ -9297,6 +9429,7 @@ static char g_marquee_key_text[96];
 static void ui_marquee_tick(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
+    if(g_page_loading) return;
     lv_obj_t * target = marquee_target_label();
     int index = g_current_screen == SCR_ALBUMS ? albums_selected
               : g_current_screen == SCR_ARTISTS ? artists_selected
@@ -9377,6 +9510,8 @@ void ui_init(void)
      * its background preload here too can allocate two whole-library copies. */
     thumbs_init();
 
+    lv_display_add_event_cb(lv_display_get_default(), ui_tab_refresh_cb,
+                             LV_EVENT_REFR_READY, NULL);
     lv_display_add_event_cb(lv_display_get_default(), np_display_refresh_cb,
                              LV_EVENT_REFR_READY, NULL);
     lv_obj_t * screen = lv_screen_active();
