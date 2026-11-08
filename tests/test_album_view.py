@@ -37,18 +37,30 @@ PRELUDE = r'''
 #define LV_UNUSED(x) (void)(x)
 #define UI_PERF_LOG(...) do { if(0) printf(__VA_ARGS__); } while(0)
 #define COL_PANEL 0
+#define COL_FOCUS 48
+#define COL_ACCENT_DARK 40
+#define COL_ACCENT 200
+#define LV_OPA_COVER 255
+#define LV_OPA_TRANSP 0
+#define LV_BORDER_SIDE_LEFT 1
+#define LV_ANIM_OFF 0
 #define SCR_ALBUMS 1
 #define REAL_THUMB_SIZE 54
 #define N 100
 
-typedef struct { int top, height; bool hidden, scrolling; const void *src; } lv_obj_t;
+typedef struct {
+    int top, height, bg_opa, border_width;
+    bool hidden, scrolling;
+    const void *src;
+} lv_obj_t;
 typedef struct lv_timer_t {
     void (*cb)(struct lv_timer_t *); uint32_t period, last; bool paused;
 } lv_timer_t;
 typedef int lv_event_t;
 typedef struct { uint64_t id; char title[32], artist[32]; uint32_t color; } player_album_t;
-static lv_obj_t list, rows[10], covers[10], titles[10], artists[10];
+static lv_obj_t list, rows[10], covers[10], titles[10], artists[10], shuffle_row;
 static lv_obj_t *albums_left_list, *albums_rows[10], *albums_row_covers[10];
+static lv_obj_t *albums_shuffle_row;
 static lv_obj_t *albums_row_titles[10], *albums_row_artists[10];
 static uint64_t albums_row_album_ids[10];
 static int albums_row_indices[10];
@@ -56,6 +68,8 @@ static bool albums_row_visible[10], albums_row_selected[10], albums_row_cover_pe
 static uint8_t albums_row_cover_attempts[10];
 static uint32_t albums_row_cover_attempt_tick[10];
 static int albums_selected, albums_first_index, albums_view_top, albums_view_h;
+static int albums_left_scroll_y;
+static bool albums_detail_open;
 static int g_current_screen, count;
 static bool g_ui_trace, albums_refresh_pending;
 static uint32_t tick, albums_last_scroll_tick, read_cost, spent_us;
@@ -79,12 +93,22 @@ static void lv_obj_set_user_data(lv_obj_t *o, void *p) { (void)o; (void)p; }
 static void lv_label_set_text(lv_obj_t *o, const char *s) { (void)o; (void)s; text_writes++; }
 static int lv_color_hex(int c) { return c; }
 static void lv_obj_set_style_bg_color(lv_obj_t *o, int c, int part) { (void)o; (void)c; (void)part; }
+static void lv_obj_set_style_bg_opa(lv_obj_t *o, int v, int part) { (void)part; o->bg_opa = v; }
+static void lv_obj_set_style_border_width(lv_obj_t *o, int v, int part) { (void)part; o->border_width = v; }
+static void lv_obj_set_style_border_side(lv_obj_t *o, int v, int part) { (void)o; (void)v; (void)part; }
+static void lv_obj_set_style_border_color(lv_obj_t *o, int v, int part) { (void)o; (void)v; (void)part; }
 static void lv_image_set_src(lv_obj_t *o, const void *s) { o->src = s; }
 static const void *lv_image_get_src(lv_obj_t *o) { return o->src; }
 static int lv_obj_get_scroll_top(lv_obj_t *o) { return o->top; }
+static int lv_obj_get_scroll_y(lv_obj_t *o) { return o->top; }
 static int lv_obj_get_height(lv_obj_t *o) { return o->height; }
 static bool lv_obj_is_scrolling(lv_obj_t *o) { return o->scrolling; }
-static void albums_apply_row_style(lv_obj_t *o, int i) { (void)o; (void)i; }
+static void albums_scroll_cb(lv_event_t *event);
+static void lv_obj_scroll_to_y(lv_obj_t *o, int y, int anim) {
+    (void)anim;
+    o->top = y;
+    albums_scroll_cb(NULL);
+}
 static const void *thumb_for_album_cached(const player_album_t *a) {
     return cached[a->id-1] ? (const void *)(uintptr_t)a->id : NULL;
 }
@@ -130,6 +154,8 @@ void setup(int n) {
     timer_count = 0; albums_refresh_timer = albums_cover_timer = NULL;
     albums_refresh_pending = false; g_current_screen = SCR_ALBUMS;
     albums_first_index = -1; albums_selected = 0; albums_last_scroll_tick = tick;
+    albums_left_scroll_y = 70; albums_detail_open = false;
+    shuffle_row = (lv_obj_t){0}; albums_shuffle_row = &shuffle_row;
     memset(cached, 0, sizeof(cached)); memset(missing, 0, sizeof(missing));
     memset(read_calls, 0, sizeof(read_calls)); memset(fail_left, 0, sizeof(fail_left));
     memset(covers, 0, sizeof(covers)); memset(albums_row_album_ids, 0, sizeof(albums_row_album_ids));
@@ -143,7 +169,7 @@ void setup(int n) {
         albums_row_covers[i] = &covers[i]; albums_row_titles[i] = &titles[i];
         albums_row_artists[i] = &artists[i];
     }
-    albums_refresh_rows(); albums_schedule_covers();
+    albums_refresh_rows(); albums_update_selection(); albums_schedule_covers();
 }
 void advance(int ms) {
     while(ms-- > 0) {
@@ -158,7 +184,25 @@ void advance(int ms) {
 }
 void scroll_to(int top) { list.top = top; albums_scroll_cb(NULL); }
 void touch_scroll(int active) { list.scrolling = active != 0; albums_scroll_cb(NULL); }
-void leave_page(void) { albums_cancel_work(); albums_left_list = NULL; g_current_screen = 0; }
+void leave_page(void) {
+    albums_save_position(); albums_cancel_work();
+    albums_left_list = NULL; g_current_screen = 0;
+}
+void enter_page(void) {
+    albums_enter(); g_current_screen = SCR_ALBUMS;
+    albums_left_list = &list; list.top = albums_left_scroll_y;
+    albums_refresh_rows(); albums_update_selection(); albums_schedule_covers();
+}
+void choose(int index) { albums_selected = index; albums_scroll_to_selected(); }
+void set_selection(int index) { albums_selected = index; }
+int selection(void) { return albums_selected; }
+int scroll_top(void) { return list.top; }
+int focused(int index) {
+    if(index < 0) return shuffle_row.border_width == 3 && shuffle_row.bg_opa == 255;
+    for(int i=0; i<10; i++) if(albums_row_indices[i] == index)
+        return rows[i].border_width == 3 && rows[i].bg_opa == 255;
+    return 0;
+}
 void fail_reads(int index, int n) { fail_left[index] = n; }
 void mark_missing(int index) { missing[index] = true; }
 void set_read_cost(int us) { read_cost = us; }
@@ -207,10 +251,13 @@ class AlbumViewTests(unittest.TestCase):
         source = (ROOT / 'app/ui/ui.c').read_text()
         constants = '\n'.join(re.findall(r'^#define ALBUMS_.*$', source, re.M))
         functions = '\n\n'.join(function(source, name) for name in (
-            'albums_row_top', 'albums_first_for_top', 'albums_fill_row',
+            'albums_row_top', 'albums_first_for_top', 'albums_save_position',
+            'albums_apply_row_style', 'albums_apply_shuffle_row_style',
+            'albums_update_selection', 'albums_fill_row',
             'albums_refresh_rows', 'albums_refresh_timer_cb', 'albums_schedule_refresh',
             'albums_cover_timer_cb', 'albums_schedule_covers', 'albums_cancel_work',
-            'albums_scroll_cb', 'thumb_pack_load_task', 'real_thumb_read'))
+            'albums_scroll_cb', 'albums_scroll_to_selected', 'albums_enter',
+            'thumb_pack_load_task', 'real_thumb_read'))
         unit = work / 'albums.c'
         unit.write_text(PRELUDE + constants + '\n' + functions + '\n' + DRIVER)
         lib = work / 'albums.so'
@@ -236,6 +283,44 @@ class AlbumViewTests(unittest.TestCase):
         self.assertEqual(self.lib.visible_blank(), 0)
         self.assertEqual(self.lib.labels(), labels)  # No retained text rebuild.
         self.assertEqual(self.lib.reads(-1), 9)
+
+    def test_first_up_reveals_and_highlights_shuffle_in_one_step(self):
+        self.assertTrue(self.lib.focused(0))
+        self.lib.choose(-1)
+        self.assertEqual(self.lib.scroll_top(), 0)
+        self.assertTrue(self.lib.focused(-1))
+        self.assertFalse(self.lib.focused(0))
+        self.lib.advance(300)
+        self.assertEqual(self.lib.selection(), -1)
+        self.assertTrue(self.lib.focused(-1))
+        self.lib.choose(-2)  # Repeated Up clamps to Shuffle All.
+        self.assertEqual(self.lib.selection(), -1)
+        self.assertTrue(self.lib.focused(-1))
+        self.lib.choose(0)
+        self.assertTrue(self.lib.focused(0))
+        self.assertFalse(self.lib.focused(-1))
+
+    def test_returning_from_minus_item_selects_first_album(self):
+        for minus_item in (-1, -2):
+            self.lib.setup(60)
+            self.lib.choose(-1)
+            self.lib.set_selection(minus_item)
+            self.lib.leave_page()
+            self.lib.enter_page()
+            self.assertEqual(self.lib.selection(), 0)
+            self.assertEqual(self.lib.scroll_top(), 70)
+            self.assertTrue(self.lib.focused(0))
+            self.assertFalse(self.lib.focused(-1))
+
+    def test_returning_from_regular_album_keeps_selection_and_position(self):
+        self.lib.choose(15)
+        top = self.lib.scroll_top()
+        self.assertGreater(top, 70)
+        self.lib.leave_page()
+        self.lib.enter_page()
+        self.assertEqual(self.lib.selection(), 15)
+        self.assertEqual(self.lib.scroll_top(), top)
+        self.assertTrue(self.lib.focused(15))
 
     def test_continuous_scroll_updates_rows_without_reads(self):
         for top in (140, 490, 840, 1190):

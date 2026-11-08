@@ -329,6 +329,10 @@ also yields to the idle task periodically so the task watchdog stays happy.
   reversal. Row-binding work peaked at 1.812 ms in those bursts (excluding
   rendering); artwork batches took 5.2–13.4 ms and yielded after a slow read.
   The nine-cover cold viewport settled about 306 ms after the final scroll.
+  Selection highlighting also includes the separate Shuffle All row when
+  scrolling refreshes the pool. Negative-index actions are not restored after
+  leaving Albums: returning selects item 1 and scrolls past the action row.
+  Regular album selections retain their scroll position across tab changes.
 - PPA is enabled in two places:
   - `CONFIG_LVGL_PORT_ENABLE_PPA=y` rotates each partial flush with the PPA
     SRM engine instead of `lv_draw_sw_rotate`.

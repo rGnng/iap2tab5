@@ -3742,11 +3742,16 @@ static void albums_update_count(void)
     counter_set(&albums_counter, albums_selected + 1, count);
 }
 
-static void albums_rebuild(void)
+static void albums_save_position(void)
 {
     if(albums_left_list) {
         albums_left_scroll_y = lv_obj_get_scroll_y(albums_left_list);
     }
+}
+
+static void albums_rebuild(void)
+{
+    albums_save_position();
     ui_rebuild_page();
 }
 
@@ -4131,9 +4136,9 @@ static void albums_scroll_to_selected(void)
     if(first != albums_first_index || actual != albums_view_top) {
         albums_refresh_rows();
     }
-    else {
-        albums_update_selection();
-    }
+    /* Shuffle All is outside the recycled album pool. Refresh its highlight
+     * on this same key press even when scrolling required a row refresh. */
+    albums_update_selection();
 }
 
 static void albums_select(int index)
@@ -4277,6 +4282,12 @@ static void albums_shuffle_touch_cb(lv_event_t * event)
 static void albums_enter(void)
 {
     albums_detail_open = false;
+    /* Minus items are temporary actions, not remembered album selections.
+     * A new visit starts at visible item 1 if an action was selected. */
+    if(albums_selected < 0) {
+        albums_selected = 0;
+        albums_left_scroll_y = albums_row_top(0);
+    }
 }
 
 static bool albums_back(void)
@@ -4613,7 +4624,12 @@ static void albums_create(lv_obj_t * parent)
     albums_render_detail(albums_right_content, albums_detail_open);
 
     lv_obj_update_layout(list);
-    if(albums_left_scroll_y < albums_row_top(0)) {
+    if(albums_selected < 0) {
+        /* A rebuild within this visit may keep the active action visible;
+         * albums_enter() resets it only when returning from another page. */
+        albums_left_scroll_y = 0;
+    }
+    else if(albums_left_scroll_y < albums_row_top(0)) {
         albums_left_scroll_y = albums_row_top(0);
     }
     lv_obj_scroll_to_y(list, albums_left_scroll_y, LV_ANIM_OFF);
@@ -8454,6 +8470,7 @@ static void settings_schedule_detail(void)
 static void ui_page_teardown(void)
 {
     ui_marquee_stop();
+    albums_save_position();
     albums_cancel_work();
     albums_left_list = NULL;
     if(albums_detail_timer) lv_timer_pause(albums_detail_timer);
