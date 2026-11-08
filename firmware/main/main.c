@@ -9,6 +9,7 @@
 #include "ble_remote.h"
 #include "charge.h"
 #include "debug_log.h"
+#include "display_diag.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -776,6 +777,9 @@ void app_main(void)
 
     bsp_display_backlight_on();
     bsp_display_brightness_set(g_app_config.brightness);
+    bsp_display_lock(0);
+    display_diag_init(display);
+    bsp_display_unlock();
     esp_err_t charge_err = charge_apply(g_app_config.charge_enabled,
                                         g_app_config.qc_high);
     if(charge_err != ESP_OK) {

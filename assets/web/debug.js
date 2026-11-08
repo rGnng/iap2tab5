@@ -81,6 +81,16 @@ function setLevel() {
   T.api('/api/loglevel?tag='+encodeURIComponent($('tag').value)+'&level='+$('level').value,{method:'POST'})
     .then(function(t) { toast(t); }).catch(function(e) { toast(e.message,true); });
 }
+async function markFlicker() {
+  $('mark_flicker').disabled=true;
+  try {
+    var d=JSON.parse(await T.api('/api/display/mark',{method:'POST'}));
+    toast('Marked #'+d.marker+' at '+(d.marker_uptime_ms/1000).toFixed(1)+' s; saving trace');
+    var a=document.createElement('a'); a.href='/api/display/trace'; a.download='tab5-display.csv'; a.click();
+    refresh();
+  } catch(e) { toast(e.message,true); }
+  finally { $('mark_flicker').disabled=false; }
+}
 function render(s,c,p) {
   if(s.uptime_s<uptime) {
     lastId=0; lines.push('— Device restarted —'); if(!paused) connectLog();
@@ -88,12 +98,24 @@ function render(s,c,p) {
   uptime=s.uptime_s;
   $('chips').innerHTML=T.chip('Firmware',s.firmware,'')+T.chip('Device',s.iap2_identified ? 'Linked' : s.iap2_mode ? 'Waiting' : 'Library Sync',s.iap2_identified ? 'ok' : '');
   $('screen_state').textContent=s.screen_on===undefined ? '—' : s.screen_on ? 'On' : 'Off';
+  var d=s.display || {};
+  $('display_rows').innerHTML=d.available ?
+    T.row('Backlight PWM',d.pwm_duty+' / 1023 · '+d.pwm_hz+' Hz')+
+    T.row('Sampled PWM changes',d.pwm_duty_changes+' duty · '+d.pwm_freq_changes+' frequency')+
+    T.row('VSYNC callbacks',d.vsync_gap_us ? (1000000/d.vsync_gap_us).toFixed(1)+' Hz' : 'Waiting')+
+    T.row('VSYNC max gap',(d.vsync_max_gap_us/1000).toFixed(2)+' ms')+
+    T.row('Gaps over 25 ms',d.vsync_gaps_over_25ms)+
+    T.row('Render last / max',(d.render_last_us/1000).toFixed(2)+' / '+(d.render_max_us/1000).toFixed(2)+' ms')+
+    T.row('DMA wait timeouts',d.dma_wait_timeouts)+T.row('Draw / rotation errors',d.draw_errors+' / '+d.rotation_errors)+
+    T.row('Internal free / largest',T.bytes(d.internal_free)+' / '+T.bytes(d.internal_largest))+
+    T.row('Last marker',d.marker ? '#'+d.marker+' · '+(d.marker_uptime_ms/1000).toFixed(1)+' s uptime' : 'None') : T.row('Recorder','Unavailable');
   var pwr=T.power(p,c);
   $('battery_metrics').innerHTML='<div class="metric"><span>Battery</span><strong class="'+pwr.cls+'">'+T.escape(pwr.state)+'</strong></div>'+ 
     '<div class="metric"><span>Voltage</span><strong>'+T.escape(pwr.voltage)+'</strong></div>';
   $('power_rows').innerHTML=T.row('Current flow',pwr.flow,pwr.cls)+T.row('Charger requested',c.charge_enabled ? 'Enabled' : 'Disabled')+
     T.row('Charger output',p.chg_en===undefined ? 'Unavailable' : pwr.enabled ? 'Enabled' : 'Disabled')+T.row('Charge current',c.qc_high ? 'Reduced' : 'Standard');
   $('power_raw').innerHTML=T.row('INA226',pwr.valid ? 'Available' : 'Unavailable')+T.row('Signed current',pwr.current)+
+    T.row('LCD enable',p.lcd_enable_ok ? (p.lcd_enabled ? 'High' : 'Low') : 'Unavailable')+
     T.row('CHG_STAT',p.chg_stat)+T.row('nCHG_QC_EN',p.nchg_qc_en)+T.row('QC push-pull',p.qc_driven)+
     T.row('Expander output',T.hex(p.expander_output))+T.row('Direction',T.hex(p.expander_direction))+T.row('High-Z',T.hex(p.expander_highz));
   $('system_rows').innerHTML=T.row('Uptime',T.time(s.uptime_s))+T.row('Last reset',T.reset(s.reset_reason))+T.row('Free heap',T.bytes(s.free_heap))+

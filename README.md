@@ -509,6 +509,8 @@ over the air. The dashboard shows Tab5 charging current separately from the
 iPod battery, and offers Screen Off settings and iPod volume buttons.
 The `/debug` page adds resumable live logs with filtering, display capture,
 named navigation/media controls, keypad gesture tests, and power/link diagnostics.
+Its display recorder samples backlight PWM and display timing at 10 Hz. Use
+**Mark flicker + save** after a visible pulse to download the preceding trace.
 Enable **Debug log to SD** to retain logs in `/sdcard/debug.log` across resets.
 The web server has no authentication, so use it on a trusted network.
 

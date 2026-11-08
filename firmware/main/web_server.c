@@ -34,6 +34,7 @@
 #include "afc_client.h"
 #include "iap2_host.h"
 #include "debug_log.h"
+#include "display_diag.h"
 
 static const char * TAG = "web";
 
@@ -390,6 +391,11 @@ static esp_err_t power_get(httpd_req_t * req)
     cJSON_AddBoolToObject(root, "chg_en", charge_read_enabled());
     cJSON_AddBoolToObject(root, "qc_driven",
                           (direction & ~highz & IO_EXPANDER_PIN_NUM_5) != 0);
+    uint32_t lcd_level = 0;
+    esp_io_expander_handle_t lcd_io = bsp_io_expander_init();
+    bool lcd_ok = lcd_io && esp_io_expander_get_level(lcd_io, BSP_LCD_EN, &lcd_level) == ESP_OK;
+    cJSON_AddBoolToObject(root, "lcd_enable_ok", lcd_ok);
+    if(lcd_ok) cJSON_AddBoolToObject(root, "lcd_enabled", (lcd_level & BSP_LCD_EN) != 0);
 
     char * text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -809,6 +815,107 @@ static esp_err_t config_post(httpd_req_t * req)
     return httpd_resp_sendstr(req, reply);
 }
 
+static void display_diag_json(cJSON *root)
+{
+    display_diag_sample_t sample;
+    if(!display_diag_latest(&sample)) {
+        cJSON_AddBoolToObject(root, "available", false);
+        return;
+    }
+    cJSON_AddBoolToObject(root, "available", true);
+    cJSON_AddNumberToObject(root, "sample_interval_ms", DISPLAY_DIAG_INTERVAL_MS);
+    cJSON_AddNumberToObject(root, "history_capacity", DISPLAY_DIAG_CAPACITY);
+    cJSON_AddNumberToObject(root, "requested_brightness", g_app_config.brightness);
+#define DIAG_FIELD(name) cJSON_AddNumberToObject(root, #name, sample.name)
+    DIAG_FIELD(seq); DIAG_FIELD(uptime_ms); DIAG_FIELD(pwm_duty); DIAG_FIELD(pwm_hz);
+    DIAG_FIELD(pwm_duty_changes); DIAG_FIELD(pwm_freq_changes);
+    DIAG_FIELD(renders); DIAG_FIELD(render_last_us); DIAG_FIELD(render_max_us);
+    DIAG_FIELD(internal_free); DIAG_FIELD(internal_largest);
+#undef DIAG_FIELD
+#define PORT_FIELD(name) cJSON_AddNumberToObject(root, #name, sample.display.name)
+    PORT_FIELD(vsync_count); PORT_FIELD(vsync_gap_us); PORT_FIELD(vsync_max_gap_us);
+    PORT_FIELD(vsync_gaps_over_25ms); PORT_FIELD(copy_submitted); PORT_FIELD(copy_completed);
+    PORT_FIELD(copy_last_us); PORT_FIELD(copy_max_us); PORT_FIELD(dma_wait_timeouts);
+    PORT_FIELD(draw_errors); PORT_FIELD(rotation_errors);
+#undef PORT_FIELD
+    uint32_t marker, marker_ms;
+    display_diag_last_marker(&marker, &marker_ms);
+    cJSON_AddNumberToObject(root, "marker", marker);
+    cJSON_AddNumberToObject(root, "marker_uptime_ms", marker_ms);
+}
+
+static esp_err_t display_diag_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    if(!root) return httpd_resp_send_500(req);
+    display_diag_json(root);
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if(!body) return httpd_resp_send_500(req);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_sendstr(req, body);
+    cJSON_free(body);
+    return err;
+}
+
+static esp_err_t display_mark_post(httpd_req_t *req)
+{
+    uint32_t uptime_ms;
+    if(!display_diag_mark(&uptime_ms)) return httpd_resp_send_500(req);
+    return display_diag_get(req);
+}
+
+static int display_sample_csv(char *out, size_t cap, const display_diag_sample_t *s)
+{
+    const lvgl_port_display_stats_t *d = &s->display;
+    return snprintf(out, cap,
+        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n",
+        (unsigned long)s->seq, (unsigned long)s->uptime_ms, (unsigned long)s->pwm_duty,
+        (unsigned long)s->pwm_hz, (unsigned long)s->pwm_duty_changes, (unsigned long)s->pwm_freq_changes,
+        (unsigned long)d->vsync_count, (unsigned long)d->vsync_gap_us, (unsigned long)d->vsync_max_gap_us,
+        (unsigned long)d->vsync_gaps_over_25ms, (unsigned long)d->copy_submitted, (unsigned long)d->copy_completed,
+        (unsigned long)d->copy_last_us, (unsigned long)d->copy_max_us, (unsigned long)d->dma_wait_timeouts,
+        (unsigned long)d->draw_errors, (unsigned long)d->rotation_errors,
+        (unsigned long)s->renders, (unsigned long)s->render_last_us, (unsigned long)s->render_max_us,
+        (unsigned long)s->internal_free, (unsigned long)s->internal_largest);
+}
+
+static esp_err_t display_trace_get(httpd_req_t *req)
+{
+    char cursor[24] = "0";
+    query_value(req, "since", cursor, sizeof(cursor));
+    display_diag_sample_t *samples = heap_caps_malloc(DISPLAY_DIAG_CAPACITY * sizeof(*samples),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *chunk = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!samples || !chunk) { free(samples); free(chunk); return httpd_resp_send_500(req); }
+    uint32_t next, dropped, marker, marker_ms;
+    size_t count = display_diag_read((uint32_t)strtoul(cursor, NULL, 10), samples,
+                                     DISPLAY_DIAG_CAPACITY, &next, &dropped);
+    display_diag_last_marker(&marker, &marker_ms);
+    char header[96];
+    snprintf(header, sizeof(header), "attachment; filename=tab5-display-%u-%ums.csv", (unsigned)marker, (unsigned)marker_ms);
+    httpd_resp_set_hdr(req, "Content-Disposition", header);
+    char next_text[16], dropped_text[16];
+    snprintf(next_text, sizeof(next_text), "%u", (unsigned)next);
+    snprintf(dropped_text, sizeof(dropped_text), "%u", (unsigned)dropped);
+    httpd_resp_set_hdr(req, "X-Diag-Next", next_text);
+    httpd_resp_set_hdr(req, "X-Diag-Dropped", dropped_text);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_type(req, "text/csv; charset=utf-8");
+    esp_err_t err = httpd_resp_send_chunk(req,
+        "seq,uptime_ms,pwm_duty,pwm_hz,pwm_duty_changes,pwm_freq_changes,vsync_count,vsync_gap_us,vsync_max_gap_us,vsync_gaps_over_25ms,copy_submitted,copy_completed,copy_last_us,copy_max_us,dma_wait_timeouts,draw_errors,rotation_errors,renders,render_last_us,render_max_us,internal_free,internal_largest\n",
+        HTTPD_RESP_USE_STRLEN);
+    size_t used = 0;
+    for(size_t i = 0; err == ESP_OK && i < count; i++) {
+        if(used + 512 > 4096) { err = httpd_resp_send_chunk(req, chunk, used); used = 0; }
+        if(err == ESP_OK) used += (size_t)display_sample_csv(chunk + used, 4096 - used, &samples[i]);
+    }
+    if(err == ESP_OK && used) err = httpd_resp_send_chunk(req, chunk, used);
+    free(samples); free(chunk);
+    return err == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : err;
+}
+
 static esp_err_t status_get(httpd_req_t * req)
 {
     cJSON * root = cJSON_CreateObject();
@@ -921,6 +1028,8 @@ static esp_err_t status_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     const esp_partition_t * ota = esp_ota_get_next_update_partition(NULL);
+    cJSON *display = cJSON_AddObjectToObject(root, "display");
+    if(display) display_diag_json(display);
     cJSON_AddStringToObject(root, "ota_partition", ota ? ota->label : "none");
 
     char * text = cJSON_PrintUnformatted(root);
@@ -1365,6 +1474,13 @@ esp_err_t web_server_start(void)
     const httpd_uri_t charge = {
         .uri = "/api/charge", .method = HTTP_POST, .handler = charge_post,
     };
+    const httpd_uri_t diagnostics[] = {
+        {.uri="/api/display", .method=HTTP_GET, .handler=display_diag_get},
+        {.uri="/api/display/trace", .method=HTTP_GET, .handler=display_trace_get},
+        {.uri="/api/display/mark", .method=HTTP_POST, .handler=display_mark_post},
+    };
+    for(size_t i=0; i < sizeof(diagnostics)/sizeof(diagnostics[0]); i++)
+        ESP_ERROR_CHECK(httpd_register_uri_handler(server, &diagnostics[i]));
 
     const httpd_uri_t assets[] = {
         {.uri="/style.css", .method=HTTP_GET, .handler=asset_get, .user_ctx=(void *)WEB_STYLE_CSS},

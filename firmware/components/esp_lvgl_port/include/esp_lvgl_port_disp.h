@@ -31,6 +31,15 @@ extern "C" {
  */
 bool lvgl_port_display_wait_flush(lv_display_t *disp, uint32_t timeout_ms);
 
+/* Passive counters. VSYNC gaps measure callback delivery, not optical output. */
+typedef struct {
+    uint32_t vsync_count, vsync_last_us, vsync_gap_us, vsync_max_gap_us;
+    uint32_t vsync_gaps_over_25ms;
+    uint32_t copy_submitted, copy_completed, copy_last_us, copy_max_us;
+    uint32_t dma_wait_timeouts, draw_errors, rotation_errors;
+} lvgl_port_display_stats_t;
+bool lvgl_port_display_get_stats(lv_display_t *disp, lvgl_port_display_stats_t *out);
+
 /**
  * @brief Rotation configuration
  */

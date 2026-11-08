@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -50,12 +51,15 @@
 #endif
 
 static const char *TAG = "LVGL";
+static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /*******************************************************************************
 * Types definitions
 *******************************************************************************/
 
 typedef struct {
+    lvgl_port_display_stats_t stats;
+    uint32_t copy_started_us;
     lvgl_port_disp_type_t     disp_type;    /* Display type */
     esp_lcd_panel_io_handle_t io_handle;      /* LCD panel IO handle */
     esp_lcd_panel_handle_t    panel_handle;   /* LCD panel handle */
@@ -102,6 +106,54 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
 static void lvgl_port_disp_size_update_callback(lv_event_t *e);
 static void lvgl_port_disp_rotation_update(lvgl_port_display_ctx_t *disp_ctx);
 static void lvgl_port_display_invalidate_callback(lv_event_t *e);
+
+bool lvgl_port_display_get_stats(lv_display_t *disp, lvgl_port_display_stats_t *out)
+{
+    if(!disp || !out) return false;
+    lvgl_port_display_ctx_t *ctx = lv_display_get_driver_data(disp);
+    if(!ctx) return false;
+    portENTER_CRITICAL(&s_stats_lock);
+    *out = ctx->stats;
+    portEXIT_CRITICAL(&s_stats_lock);
+    return true;
+}
+
+#if (SOC_MIPI_DSI_SUPPORTED && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
+static bool IRAM_ATTR lvgl_port_diag_vsync(esp_lcd_panel_handle_t panel,
+    esp_lcd_dpi_panel_event_data_t *event, void *user_ctx)
+{
+    (void)panel; (void)event;
+    lvgl_port_display_ctx_t *ctx = lv_display_get_driver_data(user_ctx);
+    uint32_t now = (uint32_t)esp_timer_get_time();
+    portENTER_CRITICAL_ISR(&s_stats_lock);
+    if(ctx->stats.vsync_count) {
+        uint32_t gap = now - ctx->stats.vsync_last_us;
+        ctx->stats.vsync_gap_us = gap;
+        if(gap > ctx->stats.vsync_max_gap_us) ctx->stats.vsync_max_gap_us = gap;
+        if(gap > 25000) ctx->stats.vsync_gaps_over_25ms++;
+    }
+    ctx->stats.vsync_last_us = now;
+    ctx->stats.vsync_count++;
+    portEXIT_CRITICAL_ISR(&s_stats_lock);
+    return false;
+}
+#endif
+
+static esp_err_t lvgl_port_diag_draw(lvgl_port_display_ctx_t *ctx,
+    int x1, int y1, int x2, int y2, const void *pixels)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    ctx->copy_started_us = (uint32_t)esp_timer_get_time();
+    ctx->stats.copy_submitted++;
+    portEXIT_CRITICAL(&s_stats_lock);
+    esp_err_t err = esp_lcd_panel_draw_bitmap(ctx->panel_handle, x1, y1, x2, y2, pixels);
+    if(err != ESP_OK) {
+        portENTER_CRITICAL(&s_stats_lock);
+        ctx->stats.draw_errors++;
+        portEXIT_CRITICAL(&s_stats_lock);
+    }
+    return err;
+}
 
 /*******************************************************************************
 * Public API functions
@@ -163,7 +215,7 @@ lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg,
                 return NULL;
             }
         }
-        esp_lcd_dpi_panel_event_callbacks_t cbs = {0};
+        esp_lcd_dpi_panel_event_callbacks_t cbs = {.on_vsync = lvgl_port_diag_vsync};
         if (dsi_cfg->flags.avoid_tearing) {
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
             cbs.on_frame_buf_complete = lvgl_port_flush_dpi_vsync_ready_callback;
@@ -527,10 +579,20 @@ static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io
 static bool lvgl_port_flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io,
         esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
+    (void)panel_io; (void)edata;
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
     BaseType_t need_yield = pdFALSE;
     lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_driver_data(disp_drv);
+    if(disp_ctx != NULL) {
+        uint32_t now = (uint32_t)esp_timer_get_time();
+        portENTER_CRITICAL_ISR(&s_stats_lock);
+        uint32_t duration = now - disp_ctx->copy_started_us;
+        disp_ctx->stats.copy_completed++;
+        disp_ctx->stats.copy_last_us = duration;
+        if(duration > disp_ctx->stats.copy_max_us) disp_ctx->stats.copy_max_us = duration;
+        portEXIT_CRITICAL_ISR(&s_stats_lock);
+    }
     if (disp_ctx != NULL && disp_ctx->trans_sem != NULL) {
         xSemaphoreGiveFromISR(disp_ctx->trans_sem, &need_yield);
     }
@@ -697,7 +759,11 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
     if (disp_ctx->disp_type == LVGL_PORT_DISP_TYPE_DSI &&
         !(disp_ctx->flags.direct_mode || disp_ctx->flags.full_refresh) &&
         disp_ctx->trans_sem != NULL) {
-        xSemaphoreTake(disp_ctx->trans_sem, pdMS_TO_TICKS(1000));
+        if(xSemaphoreTake(disp_ctx->trans_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            portENTER_CRITICAL(&s_stats_lock);
+            disp_ctx->stats.dma_wait_timeouts++;
+            portEXIT_CRITICAL(&s_stats_lock);
+        }
     }
 
     /* SW rotation enabled */
@@ -726,6 +792,11 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
             };
             /* Do operation */
             esp_err_t err = lvgl_port_ppa_rotate(disp_ctx->ppa_handle, &rotate_cfg);
+            if(err != ESP_OK) {
+                portENTER_CRITICAL(&s_stats_lock);
+                disp_ctx->stats.rotation_errors++;
+                portEXIT_CRITICAL(&s_stats_lock);
+            }
             if (err == ESP_OK) {
                 color_map = lvgl_port_ppa_get_output_buffer(disp_ctx->ppa_handle);
                 offsetx1 = rotate_cfg.area.x1;
@@ -772,13 +843,13 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
             && (disp_ctx->flags.direct_mode || disp_ctx->flags.full_refresh)) {
         if (lv_disp_flush_is_last(drv)) {
             /* If the interface is I80 or SPI, this step cannot be used for drawing. */
-            esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, 0, 0, lv_disp_get_hor_res(drv), lv_disp_get_ver_res(drv), color_map);
+            lvgl_port_diag_draw(disp_ctx, 0, 0, lv_disp_get_hor_res(drv), lv_disp_get_ver_res(drv), color_map);
             /* Waiting for the last frame buffer to complete transmission */
             xSemaphoreTake(disp_ctx->trans_sem, 0);
             xSemaphoreTake(disp_ctx->trans_sem, portMAX_DELAY);
         }
     } else {
-        esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
+        lvgl_port_diag_draw(disp_ctx, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
     }
 
     if (disp_ctx->disp_type == LVGL_PORT_DISP_TYPE_RGB || (disp_ctx->disp_type == LVGL_PORT_DISP_TYPE_DSI

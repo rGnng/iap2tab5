@@ -234,6 +234,9 @@ Useful endpoints:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/status` | JSON status (build time, USB mode, iAP2, heap, SD) |
+| `GET /api/display` | actual backlight PWM registers, VSYNC/DMA/render counters and internal memory |
+| `GET /api/display/trace?since=N` | CSV of up to 1024 recent samples at 100 ms intervals; `X-Diag-Next` resumes collection |
+| `POST /api/display/mark` | timestamp an observed flicker in the live/SD log |
 | `GET /api/config` / `POST /api/config` | read/write `/sdcard/config.json` |
 | `GET /api/log?since=N` | log text after sequence N (`X-Log-Seq`) |
 | `GET /api/log/stream?since=N` | live SSE log stream; resumes with `Last-Event-ID` |
@@ -248,6 +251,15 @@ Useful endpoints:
 | `POST /api/charge?en=0\|1` | enable/disable the IP2326 charger and persist it |
 | `POST /api/reboot` | reboot |
 | `POST /api/ota` | raw firmware image upload; verified over WiFi |
+
+The debug page's **Mark flicker + save** button marks the observation and
+downloads the preceding display trace. The recorder uses a bounded PSRAM ring
+and does not write samples to SD. PWM readings sample the hardware duty/frequency
+registers; VSYNC gaps measure interrupt callback delivery. These do not measure
+optical brightness, USB input voltage, or directly count LCD FIFO underruns.
+The INA226 measures the battery connector, so its voltage is not a USB power
+measurement when the battery has been removed. `lcd_enabled` in `/api/power`
+reads the LCD enable pin separately.
 
 Example OTA upload:
 

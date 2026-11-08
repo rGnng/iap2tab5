@@ -6,6 +6,7 @@ idf_component_register(
         "app_config.c"
         "charge.c"
         "debug_log.c"
+        "display_diag.c"
         "feedback.c"
         "serial_input.c"
         "rtc_time.c"

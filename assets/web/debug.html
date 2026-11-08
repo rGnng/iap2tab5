@@ -39,6 +39,12 @@
   </div></section>
 </div>
 <div>
+  <section><h2>Display recorder</h2><div class="body">
+    <div class="rows" id="display_rows"></div>
+    <div class="actions"><button id="mark_flicker" onclick="markFlicker()">Mark flicker + save</button><a href="/api/display/trace" download>Download trace CSV</a></div>
+    <div class="hint">Records the last 102 seconds at 10 samples/sec in memory. Mark immediately after a pulse to save the preceding trace.</div>
+    <div class="hint">PWM registers and frame callbacks cannot measure optical brightness or USB input voltage.</div>
+  </div></section>
   <section><h2>Tab5 battery</h2><div class="body"><div class="metrics" id="battery_metrics"></div><div class="rows" id="power_rows"></div>
     <details><summary>Raw power readings</summary><div class="rows" id="power_raw"></div></details></div></section>
   <section><h2>System</h2><div class="body rows" id="system_rows"></div></section>

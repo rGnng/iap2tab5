@@ -60,6 +60,10 @@ class WebUITests(unittest.TestCase):
         path = request.url.split('/api/', 1)[1]
         if request.method == 'POST':
             self.writes.append((path, request.post_data))
+            if path == 'display/mark':
+                self.status['display'].update(marker=1, marker_uptime_ms=100000)
+                route.fulfill(json=self.status['display'])
+                return
             if path == 'config':
                 self.config.update(json.loads(request.post_data))
             route.fulfill(body='OK')
@@ -69,6 +73,9 @@ class WebUITests(unittest.TestCase):
             route.fulfill(json=self.config)
         elif path == 'power':
             route.fulfill(json=self.power)
+        elif path == 'display/trace':
+            route.fulfill(body='seq,uptime_ms,pwm_duty,pwm_hz\n1,100000,409,5000\n',
+                          content_type='text/csv', headers={'Content-Disposition':'attachment; filename=tab5-display.csv'})
         else:
             route.fulfill(body='log line', headers={'X-Log-Seq': '1'})
 
@@ -117,6 +124,21 @@ class WebUITests(unittest.TestCase):
         self.assertEqual([p for p,b in self.writes], ['key?k=shuffle','key?k=volup','key?k=screenoff','key?k=wake'])
         self.page.set_viewport_size({'width': 390, 'height': 844})
         self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+        self.assertFalse(self.errors)
+
+    def test_display_recorder_and_marker_download(self):
+        self.status['display'] = dict(available=True, pwm_duty=409, pwm_hz=5000,
+            pwm_duty_changes=0, pwm_freq_changes=0, vsync_gap_us=17461,
+            vsync_max_gap_us=17470, vsync_gaps_over_25ms=0, render_last_us=100,
+            render_max_us=1200, dma_wait_timeouts=0, draw_errors=0,
+            rotation_errors=0, internal_free=80000, internal_largest=32000, marker=0)
+        self.open('/debug')
+        self.assertIn('409 / 1023 · 5000 Hz', self.page.locator('#display_rows').inner_text())
+        with self.page.expect_download() as download:
+            self.page.locator('#mark_flicker').click()
+        self.assertEqual(download.value.suggested_filename, 'tab5-display.csv')
+        self.assertEqual(self.writes[0][0], 'display/mark')
+        self.page.wait_for_function('document.getElementById("display_rows").textContent.includes("#1")')
         self.assertFalse(self.errors)
 
     def test_debug_log_resume_filter_and_gestures(self):
