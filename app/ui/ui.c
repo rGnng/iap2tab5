@@ -936,10 +936,11 @@ static void theme_mode_button(lv_obj_t * button, bool active, bool translucent)
     }
     else {
         lv_obj_set_style_bg_opa(button,
-            translucent ? (active ? LV_OPA_20 : LV_OPA_10) : LV_OPA_COVER, 0);
+            translucent ? (active ? LV_OPA_20 : (LV_OPA_10 / 2)) : LV_OPA_COVER, 0);
         lv_obj_set_style_bg_grad_dir(button,
             !translucent && g_theme->id == UI_THEME_AQUA ? LV_GRAD_DIR_VER : LV_GRAD_DIR_NONE, 0);
-        lv_obj_set_style_border_opa(button, translucent ? LV_OPA_20 : LV_OPA_COVER, 0);
+        lv_obj_set_style_border_opa(button,
+            translucent ? (active ? LV_OPA_20 : LV_OPA_10) : LV_OPA_COVER, 0);
         if(g_theme->id == UI_THEME_WINDOWS_95) {
             lv_obj_remove_event_cb(button, theme_bevel_draw);
             if(!translucent) lv_obj_add_event_cb(button, theme_bevel_draw, LV_EVENT_DRAW_POST, NULL);
@@ -952,7 +953,7 @@ static void theme_mode_button(lv_obj_t * button, bool active, bool translucent)
      * checked/pressed states and artwork arriving after the controls exist. */
     if(translucent) {
         lv_obj_set_style_text_color(lv_obj_get_child(button, 0),
-            lv_color_hex(active ? COL_ACCENT : COL_MUTED), 0);
+            lv_color_hex(active ? COL_ACCENT : COL_DIM), 0);
     }
 }
 
@@ -2109,10 +2110,10 @@ static void ui_mini_update(void)
 
     lv_obj_set_style_text_color(g_mini_shuffle,
                                 lv_color_hex(snapshot.shuffle ? COL_MINI_FG
-                                                              : COL_MUTED), 0);
+                                                              : COL_DIM), 0);
     lv_obj_set_style_text_color(g_mini_repeat,
                                 lv_color_hex(snapshot.repeat != PLAYER_REPEAT_OFF
-                                             ? COL_MINI_FG : COL_MUTED), 0);
+                                             ? COL_MINI_FG : COL_DIM), 0);
     lv_label_set_text(g_mini_repeat,
                       snapshot.repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE
                                                            : ICON_REPEAT);
@@ -2201,8 +2202,8 @@ static void build_mini_now(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(modes, false);
 
-    g_mini_shuffle = make_icon(modes, ICON_SHUFFLE, COL_MUTED);
-    g_mini_repeat = make_icon(modes, ICON_REPEAT, COL_MUTED);
+    g_mini_shuffle = make_icon(modes, ICON_SHUFFLE, COL_DIM);
+    g_mini_repeat = make_icon(modes, ICON_REPEAT, COL_DIM);
     g_mini_star = make_icon(modes, ICON_STAR, COL_MINI_MUTED);
 }
 
@@ -3280,13 +3281,13 @@ static void np_refresh_snapshot(const player_snapshot_t * snapshot)
     }
     if(first || snapshot->shuffle != old->shuffle) {
         lv_obj_set_style_text_color(np_shuffle_icon,
-                                    lv_color_hex(snapshot->shuffle ? COL_ACCENT : COL_MUTED), 0);
+                                    lv_color_hex(snapshot->shuffle ? COL_ACCENT : COL_DIM), 0);
         theme_mode_button(np_shuffle_btn, snapshot->shuffle, np_chrome_tinted);
     }
     if(first || snapshot->repeat != old->repeat) {
         bool active = snapshot->repeat != PLAYER_REPEAT_OFF;
         lv_obj_set_style_text_color(np_repeat_icon,
-                                    lv_color_hex(active ? COL_ACCENT : COL_MUTED), 0);
+                                    lv_color_hex(active ? COL_ACCENT : COL_DIM), 0);
         theme_mode_button(np_repeat_btn, active, np_chrome_tinted);
         np_set_text(np_repeat_icon,
                     snapshot->repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE : ICON_REPEAT);

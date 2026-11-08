@@ -112,15 +112,22 @@ static void check_mode_tints(void)
     for(int active=0;active<2;active++) {
         injected.shuffle=active;
         injected.repeat=active?PLAYER_REPEAT_ONE:PLAYER_REPEAT_OFF;
+        injected.revision++;
         np_tick();pump(300);
+        ui_mini_update();
+        check(lv_color_eq(lv_obj_get_style_text_color(g_mini_shuffle,0),
+                lv_color_hex(active?COL_MINI_FG:COL_DIM)) &&
+              lv_color_eq(lv_obj_get_style_text_color(g_mini_repeat,0),
+                lv_color_hex(active?COL_MINI_FG:COL_DIM)),
+              "Mini-player mode icons must share the dim inactive appearance and retain bright active colors");
         lv_obj_t *buttons[2]={np_shuffle_btn,np_repeat_btn};
         for(unsigned i=0;i<2;i++) {
             lv_opa_t expected=active?LV_OPA_20:
-                (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:LV_OPA_10);
+                (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:(LV_OPA_10 / 2));
             check(lv_obj_get_style_bg_opa(buttons[i],0)==expected,
                   "Shuffle and repeat backgrounds must remain faint in both active and inactive states");
             check(lv_color_eq(lv_obj_get_style_text_color(lv_obj_get_child(buttons[i],0),0),
-                    lv_color_hex(active?COL_ACCENT:COL_MUTED)),
+                    lv_color_hex(active?COL_ACCENT:COL_DIM)),
                   "Mode icons need contrasting theme colors rather than translucent or white selection text");
             lv_obj_add_state(buttons[i],LV_STATE_PRESSED);
             pump(300);
@@ -130,7 +137,8 @@ static void check_mode_tints(void)
             pump(300);
         }
     }
-    injected.shuffle=shuffle;injected.repeat=repeat;np_tick();pump(300);
+    injected.shuffle=shuffle;injected.repeat=repeat;injected.revision++;
+    np_tick();ui_mini_update();pump(300);
 }
 
 static void gradient_lifecycle(void)
@@ -154,9 +162,9 @@ static void gradient_lifecycle(void)
           "Ready gradients must make the shell translucent without a second clock backdrop");
     check_shell_tint(0);check_shell_tint(1);
     check(lv_obj_get_style_bg_opa(np_shuffle_btn,0)==(injected.shuffle?LV_OPA_20:
-            (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:LV_OPA_10)) &&
+            (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:(LV_OPA_10 / 2))) &&
           lv_obj_get_style_bg_opa(np_repeat_btn,0)==(injected.repeat!=PLAYER_REPEAT_OFF?LV_OPA_20:
-            (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:LV_OPA_10)),
+            (g_theme->id==UI_THEME_GRAY?LV_OPA_TRANSP:(LV_OPA_10 / 2))),
           "Late artwork must restyle existing mode controls even without a playback-state change");
     check(lv_obj_get_style_bg_opa(g_menu_items[SCR_NOW_PLAYING],0)==LV_OPA_20,
           "The selected Now Playing menu item must retain only a translucent tint");
