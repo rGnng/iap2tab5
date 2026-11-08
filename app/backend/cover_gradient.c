@@ -28,6 +28,8 @@
 
 typedef struct {
     uint64_t key;
+    uint32_t tint_rgb;
+    uint8_t tint_opacity;
     cover_gradient_sample_t samples[COVER_GRADIENT_SAMPLES];
 } gradient_job_t;
 
@@ -148,7 +150,7 @@ static void process(gradient_job_t * job)
     unlock();
 
     bool success = false, accelerated = false;
-    uint64_t palette_end = start, mesh_end = start, scale_end = start;
+    uint64_t palette_end = start, mesh_end = start, scale_end = start, finish_end = start;
     if(!small_image) small_image = allocate(SMALL_BYTES);
     if(!output[slot]) output[slot] = allocate(OUTPUT_BYTES);
     if(!small_image || !output[slot]) goto done;
@@ -167,6 +169,10 @@ static void process(gradient_job_t * job)
             COVER_GRADIENT_WIDTH, COVER_GRADIENT_HEIGHT);
     }
     scale_end = now_us();
+    if(!wanted(job->key)) goto done;
+    cover_gradient_finish(output[slot], COVER_GRADIENT_WIDTH, COVER_GRADIENT_HEIGHT,
+                           job->tint_rgb, job->tint_opacity);
+    finish_end = now_us();
     success = true;
 done:
     lock();
@@ -178,10 +184,11 @@ done:
     }
     unlock();
     if(current && success) {
-        GRADIENT_LOG("ready key=%016llx accelerator=%s palette=%u mesh=%u scale=%u total=%u us",
+        GRADIENT_LOG("ready key=%016llx accelerator=%s palette=%u mesh=%u scale=%u finish=%u total=%u us",
             (unsigned long long)job->key, accelerated ? "PPA" : "CPU",
             (unsigned)(palette_end - start), (unsigned)(mesh_end - palette_end),
-            (unsigned)(scale_end - mesh_end), (unsigned)(scale_end - start));
+            (unsigned)(scale_end - mesh_end), (unsigned)(finish_end - scale_end),
+            (unsigned)(finish_end - start));
     }
     else if(current) GRADIENT_LOG("failed key=%016llx; retaining theme background",
                                   (unsigned long long)job->key);
@@ -219,7 +226,8 @@ static bool initialize(void)
 }
 
 uint64_t cover_gradient_request(const void * pixels, size_t bytes, unsigned width,
-                                unsigned height, size_t stride, cover_gradient_format_t format)
+                                unsigned height, size_t stride, cover_gradient_format_t format,
+                                uint32_t tint_rgb, uint8_t tint_opacity)
 {
     if(!initialize()) return 0;
     gradient_job_t * job = allocate(sizeof(*job));
@@ -227,13 +235,17 @@ uint64_t cover_gradient_request(const void * pixels, size_t bytes, unsigned widt
     if(!cover_gradient_sample(pixels, bytes, width, height, stride, format, job->samples)) {
         free(job); return 0;
     }
-    /* Sample content, rather than a reused image descriptor or file name,
-     * identifies artwork. Repeated iAP2 revisions need no repeated work. */
+    /* Sample content and tint identify the finished image. Repeated iAP2
+     * revisions need no repeated work; a theme change invalidates the tint. */
     uint64_t key = UINT64_C(14695981039346656037);
     const uint8_t * data = (const uint8_t *)job->samples;
     for(size_t i = 0; i < sizeof(job->samples); i++) key = (key ^ data[i]) * UINT64_C(1099511628211);
+    for(unsigned shift = 0; shift < 24; shift += 8) key = (key ^ ((tint_rgb >> shift) & 255u)) * UINT64_C(1099511628211);
+    key = (key ^ tint_opacity) * UINT64_C(1099511628211);
     if(!key) key = 1;
     job->key = key;
+    job->tint_rgb = tint_rgb;
+    job->tint_opacity = tint_opacity;
     lock();
     desired_key = key;
     bool reused = front_key == key || ready_key == key || work_key == key;

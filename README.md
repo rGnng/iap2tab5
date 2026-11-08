@@ -154,8 +154,9 @@ wakes the screen without activating a control. USB, playback and Wi-Fi keep runn
 current iPod artwork, including artwork that arrives after the page opens.
 It builds a 320×180 mesh in a background worker, expands it once to 1280×720
 with the ESP32-P4 PPA, and caches the RGB565 result. Matching artwork reuses
-the background; page changes cancel obsolete work. The simulator and a device
-without an available PPA use a CPU scaling fallback.
+the background; page changes cancel obsolete work. A strong, stationary 4×4
+Bayer finish combines the theme tint and halftone texture in the cached image.
+The simulator and devices without an available PPA use a CPU scaling fallback.
 
 ## Build and set up the Tab5
 

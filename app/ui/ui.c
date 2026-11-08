@@ -3018,7 +3018,7 @@ static int np_last_queue_count = -1;
 static uint32_t np_last_queue_rev;
 static player_snapshot_t np_rendered_snapshot;
 static bool np_rendered_valid;
-static lv_obj_t * np_gradient_backdrop, * np_gradient_scrim;
+static lv_obj_t * np_gradient_backdrop;
 static void np_gradient_source(const void * source);
 
 typedef enum {
@@ -3374,7 +3374,6 @@ static uint64_t np_gradient_key, np_gradient_shown_key;
 static void np_gradient_visibility(bool visible)
 {
     if(np_gradient_backdrop) lv_obj_set_hidden(np_gradient_backdrop, !visible);
-    if(np_gradient_scrim) lv_obj_set_hidden(np_gradient_scrim, !visible);
 }
 
 static void np_gradient_poll_cb(lv_timer_t * timer)
@@ -3415,7 +3414,8 @@ static uint64_t np_gradient_request_source(const void * source)
             size_t stride = header.stride ? header.stride : header.w * (header.cf == LV_COLOR_FORMAT_RGB565 ? 2 : 4);
             return cover_gradient_request(image->data, image->data_size,
                 header.w, header.h, stride, header.cf == LV_COLOR_FORMAT_RGB565
-                    ? COVER_GRADIENT_RGB565 : COVER_GRADIENT_ARGB8888);
+                    ? COVER_GRADIENT_RGB565 : COVER_GRADIENT_ARGB8888,
+                g_theme->scrim, g_theme->scrim_opa);
         }
     }
 
@@ -3446,7 +3446,8 @@ static uint64_t np_gradient_request_source(const void * source)
     lv_canvas_finish_layer(canvas, &layer);
     const lv_image_dsc_t * image = lv_canvas_get_image(canvas);
     uint64_t key = cover_gradient_request(image->data, image->data_size,
-        image->header.w, image->header.h, image->header.stride, COVER_GRADIENT_ARGB8888);
+        image->header.w, image->header.h, image->header.stride, COVER_GRADIENT_ARGB8888,
+        g_theme->scrim, g_theme->scrim_opa);
     lv_obj_delete(canvas);
     free(buffer);
     return key;
@@ -3475,7 +3476,7 @@ static void np_gradient_source(const void * source)
 static void np_gradient_detach(void)
 {
     if(np_gradient_timer) lv_timer_pause(np_gradient_timer);
-    np_gradient_backdrop = np_gradient_scrim = NULL;
+    np_gradient_backdrop = NULL;
     np_gradient_key = np_gradient_shown_key = 0;
     cover_gradient_cancel();
 }
@@ -3751,22 +3752,21 @@ static void np_create(lv_obj_t * parent)
             lv_obj_set_style_blur_quality(backdrop, LV_BLUR_QUALITY_AUTO, 0);
         }
 
-        /* Keep the colors recognizable but leave enough contrast for the
-         * title, metadata and transport controls. */
-        lv_obj_t * scrim = lv_obj_create(root);
-        lv_obj_set_size(scrim, LV_PCT(100), LV_PCT(100));
-        lv_obj_set_pos(scrim, 0, 0);
-        lv_obj_set_ignore_layout(scrim, true);
-        lv_obj_set_style_bg_color(scrim, lv_color_hex(g_theme->scrim), 0);
-        lv_obj_set_style_bg_opa(scrim, g_theme->scrim_opa, 0);
-        lv_obj_set_style_border_width(scrim, 0, 0);
-        lv_obj_set_style_radius(scrim, 0, 0);
-        lv_obj_set_style_pad_all(scrim, 0, 0);
-        lv_obj_set_clickable(scrim, false);
-        lv_obj_set_scrollable(scrim, false);
-        if(mesh_bg) {
-            np_gradient_scrim = scrim;
-            lv_obj_set_hidden(scrim, true);
+        if(blurred_bg) {
+            /* Gradients already contain the tint and Bayer finish. Applying
+             * another overlay would quantize away that texture. Only the
+             * legacy blurred background needs an LVGL scrim. */
+            lv_obj_t * scrim = lv_obj_create(root);
+            lv_obj_set_size(scrim, LV_PCT(100), LV_PCT(100));
+            lv_obj_set_pos(scrim, 0, 0);
+            lv_obj_set_ignore_layout(scrim, true);
+            lv_obj_set_style_bg_color(scrim, lv_color_hex(g_theme->scrim), 0);
+            lv_obj_set_style_bg_opa(scrim, g_theme->scrim_opa, 0);
+            lv_obj_set_style_border_width(scrim, 0, 0);
+            lv_obj_set_style_radius(scrim, 0, 0);
+            lv_obj_set_style_pad_all(scrim, 0, 0);
+            lv_obj_set_clickable(scrim, false);
+            lv_obj_set_scrollable(scrim, false);
         }
     }
 

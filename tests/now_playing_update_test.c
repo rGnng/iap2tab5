@@ -28,6 +28,7 @@ static unsigned art_variant;
 static uint32_t queue_rev, art_rev;
 static unsigned renders, deleted, copies;
 static unsigned global_song_reads, member_song_reads;
+static uint32_t observed_background;
 static uint8_t pixels[1280 * 40 * 4];
 static void test_snapshot(player_snapshot_t *out)
 { if(inject) *out=injected; else player_get_snapshot(out); }
@@ -55,7 +56,13 @@ static bool test_artist_song_get(uint64_t id, int index, player_track_t *out)
 static void check(bool condition, const char *message)
 { if(!condition) { fprintf(stderr,"FAIL: %s\n",message); exit(1); } }
 static void flush(lv_display_t *d, const lv_area_t *a, uint8_t *p)
-{ LV_UNUSED(a); LV_UNUSED(p); lv_display_flush_ready(d); }
+{
+    if(a->x1<=1100 && a->x2>=1100 && a->y1<=695 && a->y2>=695) {
+        size_t offset=(size_t)(695-a->y1)*lv_area_get_width(a)+(1100-a->x1);
+        memcpy(&observed_background,p+offset*4,4);
+    }
+    lv_display_flush_ready(d);
+}
 static void rendered(lv_event_t *e) { LV_UNUSED(e); renders++; }
 static void destroyed(lv_event_t *e) { LV_UNUSED(e); deleted++; }
 static void pump(int ms)
@@ -73,11 +80,18 @@ static void gradient_lifecycle(void)
     lv_obj_t *title=np_title;
     art_ready=true; art_rev++; np_tick(); pump(200);
     check(np_title==title,"Late artwork must not rebuild the page");
-    check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop) &&
-          !lv_obj_is_hidden(np_gradient_scrim),"Live RGB565 artwork must generate a visible gradient");
+    check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop),
+          "Live RGB565 artwork must generate a visible gradient");
     uint64_t original_key=np_gradient_key;
     const uint8_t *original_pixels=g_np_mesh_dsc.data;
     const uint16_t *pixels=(const uint16_t *)original_pixels;
+    lv_area_t bounds; lv_obj_get_coords(np_gradient_backdrop,&bounds);
+    uint16_t expected=pixels[(695-bounds.y1)*COVER_GRADIENT_WIDTH+1100-bounds.x1];
+    unsigned r=expected>>11, g=(expected>>5)&63, b=expected&31;
+    check(abs((int)((observed_background>>16)&255)-(int)((r<<3)|(r>>2)))<=1 &&
+          abs((int)((observed_background>>8)&255)-(int)((g<<2)|(g>>4)))<=1 &&
+          abs((int)(observed_background&255)-(int)((b<<3)|(b>>2)))<=1,
+          "Cached tint and Bayer texture must reach the screen without a second overlay");
     check(pixels[0]!=pixels[(COVER_GRADIENT_HEIGHT/2)*COVER_GRADIENT_WIDTH+COVER_GRADIENT_WIDTH/2],
           "Colored artwork must produce a varying background");
     unsigned before=renders;

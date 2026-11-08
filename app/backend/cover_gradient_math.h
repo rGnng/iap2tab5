@@ -26,5 +26,10 @@ void cover_gradient_render(const cover_gradient_color_t palette[COVER_GRADIENT_C
 void cover_gradient_scale_cpu(const uint8_t * input, unsigned width, unsigned height,
                               size_t stride, uint16_t * output,
                               unsigned out_width, unsigned out_height);
+/* Bake the theme tint and a strong stationary 4x4 Bayer texture into RGB565 in place.
+ * This keeps fractional tint levels as spatial coverage, without an RGB888
+ * output buffer or a per-frame overlay that would quantize the pattern away. */
+void cover_gradient_finish(uint16_t * pixels, unsigned width, unsigned height,
+                           uint32_t tint_rgb, uint8_t tint_opacity);
 
 #endif

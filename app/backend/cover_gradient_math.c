@@ -166,3 +166,55 @@ void cover_gradient_scale_cpu(const uint8_t * input, unsigned width, unsigned he
         }
     }
 }
+
+static uint16_t finish_level(unsigned blend, unsigned maximum, unsigned phase,
+                              unsigned span)
+{
+    const int denominator = 255 * 255;
+    int numerator = (int)blend, ceiling = (int)maximum * denominator;
+    int headroom = numerator < ceiling-numerator ? numerator : ceiling-numerator;
+    int amplitude = (int)(span * denominator * 15u / 32u);
+    if(amplitude > headroom) amplitude = headroom;
+    /* Symmetric ordered texture, faded near black/white instead of clipping
+     * the pattern and changing the average brightness of dark regions. */
+    int offset = ((int)phase*2-15) * amplitude / 15;
+    return (uint16_t)((numerator + offset + denominator/2) / denominator);
+}
+
+void cover_gradient_finish(uint16_t * pixels, unsigned width, unsigned height,
+                           uint32_t tint_rgb, uint8_t tint_opacity)
+{
+    if(!pixels || !tint_opacity) return;
+    /* A stronger, stationary 4x4 Bayer texture breaks up the remaining source
+     * quantization contours. Red/blue span four 5-bit steps; green spans eight
+     * 6-bit steps, giving comparable perceived brightness variation. */
+    static const uint8_t bayer[4][4] = {
+        {0,8,2,10}, {12,4,14,6}, {3,11,1,9}, {15,7,13,5}
+    };
+    unsigned keep = 255u * (255u - tint_opacity);
+    unsigned red = ((tint_rgb >> 16) & 255u) * 31u * tint_opacity;
+    unsigned green = ((tint_rgb >> 8) & 255u) * 63u * tint_opacity;
+    unsigned blue = (tint_rgb & 255u) * 31u * tint_opacity;
+    /* Only 32/64/32 input levels and 16 thresholds exist. A 4 KB lookup
+     * table replaces millions of repeated blend/division calculations. */
+    uint16_t reds[16][32], greens[16][64], blues[16][32];
+    for(unsigned phase = 0; phase < 16; phase++) {
+        for(unsigned value = 0; value < 32; value++) {
+            reds[phase][value] = (uint16_t)(finish_level(value*keep + red,31,phase,4) << 11);
+            blues[phase][value] = finish_level(value*keep + blue,31,phase,4);
+        }
+        for(unsigned value = 0; value < 64; value++) {
+            greens[phase][value] = (uint16_t)(finish_level(value*keep + green,63,phase,8) << 5);
+        }
+    }
+    for(unsigned y = 0; y < height; y++) {
+        const uint8_t * phases = bayer[y&3];
+        uint16_t * row = pixels + (size_t)y * width;
+        for(unsigned x = 0; x < width; x += 4) {
+            for(unsigned cell = 0; cell < 4 && x+cell < width; cell++) {
+                unsigned value = row[x+cell], phase = phases[cell];
+                row[x+cell] = reds[phase][value>>11] | greens[phase][(value>>5)&63u] | blues[phase][value&31u];
+            }
+        }
+    }
+}

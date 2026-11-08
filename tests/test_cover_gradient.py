@@ -54,9 +54,12 @@ class CoverGradientTests(unittest.TestCase):
         cls.lib.cover_gradient_render.argtypes = [C.POINTER(Color), C.c_void_p, C.c_uint, C.c_uint, C.c_size_t]
         cls.lib.cover_gradient_scale_cpu.argtypes = [C.c_void_p, C.c_uint, C.c_uint, C.c_size_t,
                                                     C.c_void_p, C.c_uint, C.c_uint]
-        cls.lib.cover_gradient_request.argtypes = [C.c_void_p, C.c_size_t, C.c_uint, C.c_uint, C.c_size_t, C.c_int]
+        cls.lib.cover_gradient_request.argtypes = [C.c_void_p, C.c_size_t, C.c_uint, C.c_uint,
+                                                  C.c_size_t, C.c_int, C.c_uint32, C.c_uint8]
         cls.lib.cover_gradient_request.restype = C.c_uint64
         cls.lib.cover_gradient_poll.argtypes = [C.c_uint64, C.POINTER(C.POINTER(C.c_uint16))]
+        cls.lib.cover_gradient_finish.argtypes = [C.POINTER(C.c_uint16), C.c_uint, C.c_uint,
+                                                 C.c_uint32, C.c_uint8]
 
     def setUp(self):
         self.lib.cover_gradient_cancel()
@@ -132,7 +135,7 @@ class CoverGradientTests(unittest.TestCase):
     def test_result_cache_supersession_and_displayed_buffer_ownership(self):
         def request(pixel):
             image = (C.c_uint16*SAMPLES)(*([pixel]*SAMPLES))
-            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0)
+            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,0,0)
         def poll(key):
             pixels = C.POINTER(C.c_uint16)()
             state = self.lib.cover_gradient_poll(key,C.byref(pixels))
@@ -168,6 +171,68 @@ class CoverGradientTests(unittest.TestCase):
             for _ in range(5): self.lib.cover_gradient_render(palette,pixels,w,h,w*3)
             timings.append((time.perf_counter()-start)/5*1000)
         print(f'\nHost Bezier mesh: full={timings[0]:.2f} ms, small={timings[1]:.2f} ms')
+
+    def test_bayer_finish_is_static_and_keeps_tile_average_close_to_tint(self):
+        for pixel in (0,0xffff,0x1234,0xad31):
+            for tint,alpha in ((0,153),(0xf4f7fb,216),(0xc0c0c0,230)):
+                a = (C.c_uint16*64)(*([pixel]*64))
+                b = (C.c_uint16*64)(*([pixel]*64))
+                self.lib.cover_gradient_finish(a,8,8,tint,alpha)
+                self.lib.cover_gradient_finish(b,8,8,tint,alpha)
+                self.assertEqual(list(a),list(b))
+                for y in range(8):
+                    for x in range(8):self.assertEqual(a[y*8+x],a[(y%4)*8+x%4])
+                for shift,maximum,color_shift in ((11,31,16),(5,63,8),(0,31,0)):
+                    actual = sum((p>>shift)&maximum for p in a)/64
+                    original = (pixel>>shift)&maximum
+                    target = (tint>>color_shift)&255
+                    expected = original*(255-alpha)/255 + target*maximum*alpha/(255*255)
+                    self.assertLessEqual(abs(actual-expected),0.251 if maximum==63 else 0.126)
+        original = [0,0xffff,0x1234,0xad31]
+        pixels = (C.c_uint16*4)(*original)
+        self.lib.cover_gradient_finish(pixels,2,2,0,0)
+        self.assertEqual(list(pixels),original)
+
+    def test_bayer_finish_retains_more_dark_gradient_levels(self):
+        means = []
+        for red in range(32):
+            pixels = (C.c_uint16*16)(*([red<<11]*16))
+            self.lib.cover_gradient_finish(pixels,4,4,0,153)
+            mean = sum(p>>11 for p in pixels)/16
+            self.assertLessEqual(abs(mean-red*.4),.126)
+            means.append(mean)
+        self.assertEqual(len(set(means)),32)
+        self.assertTrue(all(a<b for a,b in zip(means,means[1:])))
+        self.assertGreater(len(set(means)),len({round(red*.4) for red in range(32)}))
+
+    def test_strong_texture_spreads_midtones_but_preserves_black_and_white(self):
+        image = (C.c_uint16*16)(*([(12<<11)|(24<<5)|12]*16))
+        self.lib.cover_gradient_finish(image,4,4,0,153)
+        for shift,mask,minimum_spread in ((11,31,3),(5,63,6),(0,31,3)):
+            levels = [(p>>shift)&mask for p in image]
+            self.assertGreaterEqual(max(levels)-min(levels),minimum_spread)
+        for pixel,tint in ((0,0),(0xffff,0xffffff)):
+            image = (C.c_uint16*15)(*([pixel]*15))
+            self.lib.cover_gradient_finish(image,3,5,tint,255)
+            self.assertEqual(list(image),[pixel]*15)
+
+    def test_theme_tint_is_in_cache_identity_and_not_reapplied(self):
+        image = (C.c_uint16*SAMPLES)(*([0xf800]*SAMPLES))
+        def request(tint,alpha):
+            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,tint,alpha)
+        def poll(key):
+            pixels = C.POINTER(C.c_uint16)()
+            self.assertEqual(self.lib.cover_gradient_poll(key,C.byref(pixels)),1)
+            return pixels
+        dark = request(0,153)
+        pixels = poll(dark)
+        sample = list(pixels[:8])
+        self.assertEqual(request(0,153),dark)
+        self.assertEqual(list(poll(dark)[:8]),sample)
+        light = request(0xf4f7fb,216)
+        self.assertNotEqual(dark,light)
+        self.assertGreater(sum(unpack(poll(light)[0])),sum(unpack(sample[0])))
+        self.assertEqual(list(pixels[:8]),sample)
 
 
 if __name__ == '__main__':
