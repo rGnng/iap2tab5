@@ -2991,12 +2991,6 @@ static void np_queue_row(lv_obj_t * parent, int queue_index, bool current)
     lv_obj_set_height(artist, 34);
     ui_text_clip(artist);
 
-    char duration[16];
-    format_time(track.duration_sec, duration, sizeof(duration));
-    lv_obj_t * length = make_label(row, duration, FONT_NUM, COL_MUTED);
-    lv_obj_set_width(length, 56);
-    lv_obj_set_style_text_align(length, LV_TEXT_ALIGN_RIGHT, 0);
-
     focus_add_clickable(row, np_queue_action, NULL, (void *)(intptr_t)queue_index, true);
 }
 
