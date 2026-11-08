@@ -727,7 +727,6 @@ void app_main(void)
     ui_set_afc_action_cb(ui_afc_action_handler);
     ui_set_afc_sync_mode(!g_app_config.iap2_mode);
     ui_set_artwork_dir(app_config_artwork_dir());
-    ui_set_thumb_pack_dir(app_config_library_dir());
     char np_cache_dir[160];
     snprintf(np_cache_dir, sizeof(np_cache_dir), "%s/np",
              app_config_library_dir());

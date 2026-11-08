@@ -468,20 +468,62 @@ void player_set_change_callback(player_change_cb_t callback)
     change_callback = callback;
 }
 
-static const player_track_t *track_by_id(uint64_t id)
+/* Compact PID -> track offset index: 128 KiB in PSRAM instead of scanning
+ * 20k large metadata records once for every queue row and UI snapshot.
+ * The library is immutable after player_init(); album sorting keeps offsets. */
+#define TRACK_ID_SLOTS 65536u
+_Static_assert(MAX_TRACKS < UINT16_MAX && MAX_TRACKS < TRACK_ID_SLOTS / 2,
+               "track ID index must fit all track offsets with room for probing");
+static MOCK_LARGE_BSS uint16_t track_id_slots[TRACK_ID_SLOTS];
+static bool track_id_index_ready;
+
+static uint32_t track_id_hash(uint64_t id)
 {
+    id ^= id >> 30;
+    id *= UINT64_C(0xbf58476d1ce4e5b9);
+    id ^= id >> 27;
+    id *= UINT64_C(0x94d049bb133111eb);
+    id ^= id >> 31;
+    return (uint32_t)id & (TRACK_ID_SLOTS - 1);
+}
+
+static void track_id_index_build(void)
+{
+    memset(track_id_slots, 0, sizeof(track_id_slots));
     for(int i = 0; i < track_count; i++) {
-        if(tracks[i].id == id) return &tracks[i];
+        uint32_t slot = track_id_hash(tracks[i].id);
+        while(track_id_slots[slot] != 0) {
+            /* Preserve the linear lookup's first-match behavior. */
+            if(tracks[track_id_slots[slot] - 1].id == tracks[i].id) break;
+            slot = (slot + 1) & (TRACK_ID_SLOTS - 1);
+        }
+        if(track_id_slots[slot] == 0) track_id_slots[slot] = (uint16_t)(i + 1);
     }
-    return NULL;
+    track_id_index_ready = true;
 }
 
 static int track_index_by_id(uint64_t id)
 {
-    for(int i = 0; i < track_count; i++) {
-        if(tracks[i].id == id) return i;
+    if(!track_id_index_ready) {
+        for(int i = 0; i < track_count; i++) {
+            if(tracks[i].id == id) return i;
+        }
+        return -1;
+    }
+    uint32_t slot = track_id_hash(id);
+    for(uint32_t n = 0; n < TRACK_ID_SLOTS; n++) {
+        uint16_t entry = track_id_slots[slot];
+        if(entry == 0) return -1;
+        if(tracks[entry - 1].id == id) return entry - 1;
+        slot = (slot + 1) & (TRACK_ID_SLOTS - 1);
     }
     return -1;
+}
+
+static const player_track_t *track_by_id(uint64_t id)
+{
+    int index = track_index_by_id(id);
+    return index >= 0 ? &tracks[index] : NULL;
 }
 
 /* iAP2 tags and the SQLite tags occasionally differ by punctuation. Prefer
@@ -1080,6 +1122,7 @@ static void load_library(void)
 
 void player_init(void)
 {
+    track_id_index_ready = false;
     track_count = 0;
     album_count = 0;
     artist_count = 0;
@@ -1111,6 +1154,7 @@ void player_init(void)
     album_seen_dirty_since_us = 0;
 
     load_library();
+    track_id_index_build();
 
 #if defined(ESP_PLATFORM)
     album_seen_load();

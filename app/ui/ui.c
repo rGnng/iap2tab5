@@ -18,6 +18,7 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
                                        lv_font_kerning_t kerning,
                                        size_t cache_size);
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -169,14 +170,20 @@ static void fonts_init(void)
         return;
     }
 #if defined(ESP_PLATFORM)
+    UI_PERF_LOG("Japanese font memory: bytes=%ld free=%u largest=%u", size,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     jp_font_data = heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM);
 #else
     jp_font_data = malloc((size_t)size);
 #endif
-    if(jp_font_data == NULL ||
-       fread(jp_font_data, 1, (size_t)size, f) != (size_t)size) {
+    size_t font_read = jp_font_data != NULL ? fread(jp_font_data, 1, (size_t)size, f) : 0;
+    if(jp_font_data == NULL || font_read != (size_t)size) {
+        UI_PERF_LOG("Japanese font read failed: allocated=%d read=%u/%ld error=%d errno=%d",
+            jp_font_data != NULL, (unsigned)font_read, size, ferror(f), errno);
         fclose(f);
-        UI_PERF_LOG("Japanese font read failed");
+        free(jp_font_data);
+        jp_font_data = NULL;
         return;
     }
     fclose(f);
@@ -1037,7 +1044,6 @@ static void thumbs_init(void)
 #define COVER_CACHE_SLOTS 192
 
 static char s_thumb_pack_path[128];
-static char s_thumb_pack_dir[128];
 static FILE * s_thumb_pack_file;
 static uint8_t * s_thumb_pack_ram;
 static size_t s_thumb_pack_ram_size;
@@ -1045,12 +1051,6 @@ static bool s_thumb_pack_ram_ready;
 static uint32_t s_thumb_pack_count;
 static uint8_t s_thumb_valid[512];
 static bool s_thumb_pack_ready;
-
-void ui_set_thumb_pack_dir(const char * dir)
-{
-    snprintf(s_thumb_pack_dir, sizeof(s_thumb_pack_dir), "%s",
-             dir != NULL ? dir : "");
-}
 
 #if defined(ESP_PLATFORM)
 typedef struct {
@@ -1069,7 +1069,14 @@ static void thumb_pack_load_task(void * p)
         FILE * f = fopen(a->path, "rb");
         if(f != NULL) {
             uint32_t t0 = (uint32_t)esp_timer_get_time();
-            uint8_t * ram = ui_alloc_aligned(bytes);
+            /* Full-cache preload is optional. Keep room for fonts, display
+             * layers and JPEG/USB buffers; SD remains the fallback. */
+            const size_t reserve = 4u * 1024u * 1024u;
+            size_t available = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            uint8_t * ram = available > bytes && available - bytes >= reserve ?
+                ui_alloc_aligned(bytes) : NULL;
+            if(ram == NULL) UI_PERF_LOG("thumb preload skipped: bytes=%u free=%u reserve=%u",
+                (unsigned)bytes, (unsigned)available, (unsigned)reserve);
             if(ram != NULL && fread(ram, 1, bytes, f) == bytes) {
                 s_thumb_pack_ram = ram;
                 s_thumb_pack_ram_size = bytes;
@@ -2704,9 +2711,39 @@ static uint64_t g_np_cover_track_id;
 #define NP_STAR_TARGET_SIZE    56
 
 static lv_obj_t * np_queue_list;
-static counter_t np_queue_counter;
 static bool np_queue_visible = false;
 static int np_queue_focus_start;
+#define NP_QUEUE_FILL_MS 16
+#define NP_QUEUE_FILL_BATCH 4
+#define NP_QUEUE_FILL_BUDGET_US 8000
+static lv_timer_t * np_queue_fill_timer;
+static lv_obj_t * np_queue_loading, * np_queue_spacer;
+static bool np_queue_wait_frame;
+static int np_queue_fill_next, np_queue_fill_end, np_queue_fill_current;
+static uint32_t np_queue_fill_rev;
+static uint32_t np_queue_fill_start_us;
+static void np_queue_fill_cb(lv_timer_t * timer);
+static uint32_t np_queue_lookup_us, np_queue_widget_us;
+static uint32_t np_toggle_start_us;
+static bool np_toggle_frame_pending;
+
+static void np_display_refresh_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    /* A zero-delay/async callback may run before LVGL renders. Resume only
+     * after the empty panel has actually completed its first refresh. */
+    if(np_queue_wait_frame && np_queue_list != NULL && np_queue_visible &&
+       g_current_screen == SCR_NOW_PLAYING) {
+        np_queue_wait_frame = false;
+        lv_timer_reset(np_queue_fill_timer);
+        lv_timer_resume(np_queue_fill_timer);
+    }
+    if(np_toggle_frame_pending) {
+        np_toggle_frame_pending = false;
+        if(g_ui_trace) UI_PERF_LOG("np_queue_frame: open=%d ready=%u us",
+            np_queue_visible, (unsigned)(perf_now() - np_toggle_start_us));
+    }
+}
 static uint64_t np_last_track;
 static int np_last_queue_count = -1;
 static uint32_t np_last_queue_rev;
@@ -2908,17 +2945,6 @@ static void np_refresh_ui(void)
                       snapshot.starred ? ICON_STAR_FILL : ICON_STAR);
     lv_obj_set_style_text_color(np_star_icon,
                                 lv_color_hex(snapshot.starred ? COL_ACCENT : COL_MUTED), 0);
-
-    if(np_queue_counter.group) {
-        int index = player_queue_index();
-        int count = player_queue_count();
-        if(index >= 0 && count > 0) {
-            counter_set(&np_queue_counter, index + 1, count);
-        }
-        else {
-            counter_set(&np_queue_counter, 0, 0);
-        }
-    }
 }
 
 static void np_tick(void)
@@ -2959,29 +2985,24 @@ static bool np_back(void)
     return true;
 }
 
-static void np_queue_row(lv_obj_t * parent, int queue_index, bool current)
+static void np_queue_row(lv_obj_t * parent, int queue_index)
 {
+    uint32_t lookup_start = g_ui_trace ? perf_now() : 0;
     player_track_t track;
     if(!player_queue_at(queue_index, &track)) return;
+    uint32_t widget_start = g_ui_trace ? perf_now() : 0;
+    if(g_ui_trace) np_queue_lookup_us += widget_start - lookup_start;
 
     lv_obj_t * row = make_row(parent, NP_QUEUE_ROW_H);
     lv_obj_set_style_pad_right(row, 16, 0);
     lv_obj_set_style_pad_column(row, 10, 0);
     lv_obj_t * marker = make_label(row, "", FONT_NUM, COL_MUTED);
     lv_obj_set_width(marker, 30);
-    if(current) {
-        lv_label_set_text(marker, ICON_PLAY);
-        lv_obj_set_style_text_font(marker, &bootstrap_icons_24, 0);
-        lv_obj_set_style_text_color(marker, lv_color_hex(COL_ACCENT), 0);
-    }
-    else {
-        char number[16];
-        snprintf(number, sizeof(number), "%02d", queue_index + 1);
-        lv_label_set_text(marker, number);
-    }
+    char number[16];
+    snprintf(number, sizeof(number), "%02d", g_focus_count - np_queue_focus_start + 1);
+    lv_label_set_text(marker, number);
 
-    lv_obj_t * title = make_label(row, track.title, FONT_H2,
-                                  current ? COL_ACCENT : COL_TEXT);
+    lv_obj_t * title = make_label(row, track.title, FONT_H2, COL_TEXT);
     lv_obj_set_flex_grow(title, 1);
     lv_obj_set_height(title, 34);
     ui_text_fade(title);
@@ -2992,6 +3013,52 @@ static void np_queue_row(lv_obj_t * parent, int queue_index, bool current)
     ui_text_clip(artist);
 
     focus_add_clickable(row, np_queue_action, NULL, (void *)(intptr_t)queue_index, true);
+    if(g_ui_trace) np_queue_widget_us += perf_now() - widget_start;
+}
+
+static void np_queue_fill_cb(lv_timer_t * timer)
+{
+    if(g_current_screen != SCR_NOW_PLAYING || !np_queue_visible || np_queue_list == NULL) {
+        lv_timer_pause(timer);
+        return;
+    }
+    if(player_queue_revision() != np_queue_fill_rev ||
+       player_queue_index() != np_queue_fill_current) {
+        lv_timer_pause(timer);
+        ui_rebuild_page();
+        return;
+    }
+    int old_count = g_focus_count;
+    uint32_t batch_start = perf_now();
+    int attempted = 0;
+    while(np_queue_fill_next < np_queue_fill_end) {
+        int before = g_focus_count;
+        np_queue_row(np_queue_list, np_queue_fill_next++);
+        if(g_focus_count > before) {
+            /* Rows precede the tail spacer, including the first row. */
+            lv_obj_move_to_index(g_focus[g_focus_count - 1].obj,
+                                 lv_obj_get_index(np_queue_spacer));
+        }
+        if(++attempted >= NP_QUEUE_FILL_BATCH ||
+           (uint32_t)(perf_now() - batch_start) >= NP_QUEUE_FILL_BUDGET_US) break;
+    }
+    lv_obj_set_height(np_queue_spacer,
+        (np_queue_fill_end - np_queue_fill_next) * NP_QUEUE_ROW_H);
+    if(g_focus_count > np_queue_focus_start) lv_obj_set_hidden(np_queue_loading, true);
+    if(old_count == np_queue_focus_start && g_focus_count > old_count) {
+        focus_select(np_queue_focus_start);
+    }
+    perf_log_us("np_queue_batch", batch_start);
+    if(np_queue_fill_next >= np_queue_fill_end) {
+        lv_timer_pause(timer);
+        lv_obj_set_hidden(np_queue_spacer, true);
+        if(g_focus_count == np_queue_focus_start) {
+            lv_label_set_text(np_queue_loading, "Queue details unavailable");
+        }
+        if(g_ui_trace) UI_PERF_LOG("np_queue_filled: rows=%d lookup=%u widgets=%u elapsed=%u us",
+            g_focus_count - np_queue_focus_start, (unsigned)np_queue_lookup_us,
+            (unsigned)np_queue_widget_us, (unsigned)(perf_now() - np_queue_fill_start_us));
+    }
 }
 
 static bool find_album(uint64_t album_id, player_album_t * out)
@@ -3258,12 +3325,13 @@ static bool np_mesh_prepare(const char * cover_path)
 
 static void np_toggle_queue(void)
 {
-    if(player_queue_count() <= 0) {
-        ui_set_hint("Queue is empty");
-        return;
-    }
+    if(ui_device_blocked()) return;
+    np_toggle_start_us = perf_now();
     np_queue_visible = !np_queue_visible;
     ui_rebuild_page();
+    np_toggle_frame_pending = true;
+    if(g_ui_trace) UI_PERF_LOG("np_queue_toggle: open=%d build=%u us",
+        np_queue_visible, (unsigned)(perf_now() - np_toggle_start_us));
 }
 
 static lv_obj_t * np_vertical_gap(lv_obj_t * parent, int height)
@@ -3445,14 +3513,14 @@ static void np_placeholder(lv_obj_t * parent)
 
 static void np_create(lv_obj_t * parent)
 {
-    np_queue_counter.group = NULL;
+    uint32_t create_start = g_ui_trace ? perf_now() : 0;
+    np_queue_lookup_us = np_queue_widget_us = 0;
     np_queue_list = NULL;
     np_meta = NULL;
     np_artist = NULL;
     np_album = NULL;
     np_star_btn = NULL;
     np_cover_widget = NULL;
-    if(player_queue_count() <= 0) np_queue_visible = false;
 
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
@@ -3721,6 +3789,7 @@ static void np_create(lv_obj_t * parent)
         np_flex_gap(left);
     }
 
+    uint32_t left_done = g_ui_trace ? perf_now() : 0;
     np_queue_focus_start = g_focus_count;
     if(np_queue_visible) {
         /* Right: queue */
@@ -3741,7 +3810,6 @@ static void np_create(lv_obj_t * parent)
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollable(queue_head, false);
         make_label(queue_head, "Up Next", FONT_H2, COL_TEXT);
-        counter_create(queue_head, &np_queue_counter);
 
         np_queue_list = make_scroll(right);
         lv_obj_set_flex_grow(np_queue_list, 0);
@@ -3749,13 +3817,32 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_style_pad_right(np_queue_list, 0, 0);
         lv_obj_set_style_pad_row(np_queue_list, 0, 0);
         int total = player_queue_count();
-        int current = player_queue_index();
-        int start = current >= 0 ? current + 1 : total;
-        for(int i = start; i < total && i < start + NP_QUEUE_MAX_ROWS; i++) {
-            np_queue_row(np_queue_list, i, false);
-        }
-        if(start >= total) {
-            make_label(np_queue_list, "No upcoming songs", FONT_CAPTION, COL_MUTED);
+        np_queue_fill_current = player_queue_index();
+        int start = np_queue_fill_current >= 0 ? np_queue_fill_current + 1 : total;
+        np_queue_fill_next = start;
+        np_queue_fill_end = total < start + NP_QUEUE_MAX_ROWS ? total : start + NP_QUEUE_MAX_ROWS;
+        np_queue_fill_rev = player_queue_revision();
+        np_queue_fill_start_us = perf_now();
+        np_queue_loading = make_label(np_queue_list,
+            start < total ? "Loading queue..." : "No upcoming songs", FONT_CAPTION, COL_MUTED);
+        if(start < total) {
+            /* Floating status doesn't add height to the reserved row extent. */
+            lv_obj_set_ignore_layout(np_queue_loading, true);
+            np_queue_spacer = lv_obj_create(np_queue_list);
+            lv_obj_set_size(np_queue_spacer, LV_PCT(100), (np_queue_fill_end - start) * NP_QUEUE_ROW_H);
+            lv_obj_set_style_bg_opa(np_queue_spacer, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(np_queue_spacer, 0, 0);
+            lv_obj_set_style_pad_all(np_queue_spacer, 0, 0);
+            lv_obj_set_scrollable(np_queue_spacer, false);
+            lv_obj_set_clickable(np_queue_spacer, false);
+            if(np_queue_fill_timer == NULL) {
+                np_queue_fill_timer = lv_timer_create(np_queue_fill_cb, NP_QUEUE_FILL_MS, NULL);
+            }
+            if(np_queue_fill_timer != NULL) {
+                lv_timer_pause(np_queue_fill_timer);
+                np_queue_wait_frame = true;
+            }
+            else lv_label_set_text(np_queue_loading, "Queue details unavailable");
         }
     }
 
@@ -3764,6 +3851,10 @@ static void np_create(lv_obj_t * parent)
     g_np_cover_track_id = snapshot.track.id;
     np_refresh_ui();
     ui_set_hint("UP/DOWN Select   ENTER Play/Jump   7 Play/Pause");
+    if(g_ui_trace) UI_PERF_LOG("np_build: open=%d left=%u lookup=%u widgets=%u total=%u us rows=%d",
+        np_queue_visible, (unsigned)(left_done - create_start),
+        (unsigned)np_queue_lookup_us, (unsigned)np_queue_widget_us,
+        (unsigned)(perf_now() - create_start), g_focus_count - np_queue_focus_start);
 }
 
 /* -------------------------------------------------------------------------
@@ -8587,6 +8678,10 @@ static void settings_schedule_detail(void)
  * every page timer and drop its dangling content pointer before teardown. */
 static void ui_page_teardown(void)
 {
+    if(np_queue_fill_timer) lv_timer_pause(np_queue_fill_timer);
+    np_queue_wait_frame = false;
+    np_queue_list = np_queue_loading = np_queue_spacer = NULL;
+    np_toggle_frame_pending = false;
     ui_marquee_stop();
     albums_save_position();
     albums_cancel_work();
@@ -9276,14 +9371,14 @@ void ui_init(void)
     player_init();
     player_sort_albums(g_sort_field, g_sort_desc);
     g_device_available = player_device_available();
-    if(s_thumb_pack_dir[0] != '\0') {
-        char path[160];
-        snprintf(path, sizeof(path), "%s/thumbs.bin", s_thumb_pack_dir);
-        ui_set_thumb_pack_path(path, player_library_album_count());
-    }
-    thumbs_init();
+    /* The language font is required; the later whole-library preload is optional. */
     fonts_init();
+    /* main binds the thumbnail pack once, after thumb_cache_open(). Starting
+     * its background preload here too can allocate two whole-library copies. */
+    thumbs_init();
 
+    lv_display_add_event_cb(lv_display_get_default(), np_display_refresh_cb,
+                             LV_EVENT_REFR_READY, NULL);
     lv_obj_t * screen = lv_screen_active();
     lv_obj_set_scrollable(screen, false);
     lv_obj_set_style_bg_color(screen, lv_color_hex(COL_BG), 0);

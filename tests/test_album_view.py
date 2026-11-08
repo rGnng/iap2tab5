@@ -144,6 +144,9 @@ static uint32_t s_thumb_pack_count;
 static uint8_t s_thumb_valid[512];
 static FILE *s_thumb_pack_file;
 static char s_artwork_dir[64];
+#define MALLOC_CAP_SPIRAM 1
+static size_t pack_free_bytes = 32u * 1024u * 1024u;
+static size_t heap_caps_get_free_size(int caps) { (void)caps; return pack_free_bytes; }
 static void *ui_alloc_aligned(size_t n) { return malloc(n); }
 static int64_t esp_timer_get_time(void) { return perf_now(); }
 static void vTaskDelete(void *p) { (void)p; }
@@ -151,6 +154,7 @@ static void vTaskDelete(void *p) { (void)p; }
 
 DRIVER = r'''
 void setup(int n) {
+    pack_free_bytes = 32u * 1024u * 1024u;
     count = n; tick = 1000; spent_us = 0; read_cost = 0; text_writes = 0;
     timer_count = 0; albums_refresh_timer = albums_cover_timer = NULL;
     albums_refresh_pending = false; g_current_screen = SCR_ALBUMS;
@@ -226,6 +230,7 @@ int visible_blank(void) {
 int active_timers(void) {
     int n=0; for(int i=0; i<timer_count; i++) n += !timers[i].paused; return n;
 }
+void set_pack_memory(size_t bytes) { pack_free_bytes = bytes; }
 int load_pack(const char *path, int albums) {
     free(s_thumb_pack_ram); s_thumb_pack_ram = NULL;
     s_thumb_pack_ram_ready = false; s_thumb_pack_ram_size = 0;
@@ -396,6 +401,16 @@ class AlbumViewTests(unittest.TestCase):
         self.lib.advance(1000)
         self.assertEqual(self.lib.reads(-1), calls)
         self.assertEqual(self.lib.active_timers(), 0)
+
+    def test_optional_pack_reserves_memory_for_font_and_rendering(self):
+        path = Path(self.temp.name) / 'memory-pack.bin'
+        data = bytes(64 + 2 * 54 * 54 * 2)
+        path.write_bytes(data)
+        reserve = 4 * 1024 * 1024
+        self.lib.set_pack_memory(len(data) + reserve - 1)
+        self.assertFalse(self.lib.load_pack(str(path).encode(), 2))
+        self.lib.set_pack_memory(len(data) + reserve)
+        self.assertTrue(self.lib.load_pack(str(path).encode(), 2))
 
     def test_psram_pack_includes_header_and_last_thumbnail(self):
         path = Path(self.temp.name) / 'thumbs.bin'

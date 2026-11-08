@@ -191,7 +191,35 @@ The hardware build loads the real library from
 are simulator-only. Library counts are gated on the device connection, so
 with no iPod the library pages are empty and Now Playing shows `No track`.
 The Now Playing queue panel uses the device's parsed queue list and starts
-after the current track. At the end of the list it shows `No upcoming songs`.
+after the current track. There is no position/total counter. Displayed songs
+are numbered consecutively from 01, while actions retain the original device
+queue index. At the end of the list it shows `No upcoming songs`.
+
+Opening the panel uses the queue already in RAM; it does not request it from
+iOS. The panel completes its first display refresh before a timer binds rows
+in batches (at most four rows, with an 8 ms row-binding budget before yielding;
+one slow row and layout work can exceed it). A tail spacer reserves the scroll extent.
+Closing/switching pages cancels the timer; a changed queue restarts binding.
+Track PID lookups use a 128 KiB index instead of repeatedly scanning the
+20,688 metadata records. Trace mode logs panel construction, first refresh,
+row-batch work and completion separately.
+
+On the connected device (20,688 tracks, 14 upcoming rows, three toggles during
+startup library synchronization), first refresh fell from 304–338 ms to
+117–138 ms. Blocking panel construction fell from 196–202 ms to 19–20 ms;
+metadata lookups for all 14 rows fell from 106–108 ms to under 1 ms. These are
+first-panel timings: the rows populate after that refresh, rather than all
+being present at once. Validation includes 96 host tests, simulator checks in
+all three themes, OTA, and two boots confirming the Japanese font loads and
+roughly 10 MiB of PSRAM remains free.
+
+The Japanese font loads before the optional whole-pack thumbnail preload.
+Only `main` binds that pack, after `thumb_cache_open()`; binding it in `ui_init()`
+as well could start two 12 MB preloads while the first was still in flight.
+Preloading now leaves at least 4 MiB of PSRAM for rendering, decoder and USB
+work. If the pack does not fit, existing SD and per-cover caches serve the
+artwork. Failed font reads release their allocation and log the read/allocation
+failure rather than retaining a partial buffer.
 
 ### Queue editing investigation (2026-11-08)
 
