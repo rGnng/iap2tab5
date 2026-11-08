@@ -46,6 +46,7 @@ endif()
 # Application
 # -----------------------------------------------------------------------------
 set(UI_SOURCES
+    app/backend/screen_idle.c
     app/backend/mock_player.c
     app/backend/ble_remote.c
     app/ui/boot.c
@@ -112,6 +113,14 @@ if(IAP2TAB5_BUILD_UI_TESTS)
     foreach(theme RANGE 0 2)
         add_test(NAME album_touch_theme_${theme} COMMAND album_touch_test ${theme})
     endforeach()
+    add_executable(screen_off_test tests/screen_off_test.c
+        third_party/cjson/cJSON.c ${UI_SOURCES})
+    target_include_directories(screen_off_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(screen_off_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
+    target_link_libraries(screen_off_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
+    add_test(NAME screen_off_input COMMAND screen_off_test)
 endif()
 
 # Convenience: `cmake --build build --target run`

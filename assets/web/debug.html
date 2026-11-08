@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>TAB5 · Debug</title>
+<link rel="stylesheet" href="/style.css"><script src="/common.js"></script>
+</head>
+<body>
+<header><div class="brand"><span class="dot"></span>TAB5<span class="sub">/ DEBUG</span></div>
+<nav><a href="/">Dashboard</a><a href="/debug" class="on">Debug</a></nav><div class="chips" id="chips"></div></header>
+<main class="debug-main">
+<div class="debug-grid">
+<div>
+  <section><h2>Display<span class="spacer"></span><span id="screen_state" class="micro">—</span></h2><div class="body">
+    <div class="screen"><span id="preview_hint" class="muted">Capture the current display</span><img id="preview" alt="Tab5 display capture" hidden></div>
+    <div class="actions"><button id="capture" onclick="captureScreen()">Capture</button><a href="/api/screenshot.bmp" download="tab5.bmp">Download BMP</a>
+      <button data-key="screenoff">Screen off</button><button data-key="wake">Wake</button></div>
+    <div class="controls" id="pages"></div>
+    <div class="controls" id="navigation"></div>
+    <div class="controls" id="media"></div>
+    <details><summary>Keypad gestures</summary>
+      <div class="controls"><button id="knob_hold" onclick="toggleHold('knob')" aria-pressed="false">Knob down</button>
+        <button onclick="gesture('knobccw')">Held turn −</button><button onclick="gesture('knobcw')">Held turn +</button>
+        <button id="topright_hold" onclick="toggleHold('topright')" aria-pressed="false">Top-right down</button>
+        <button onclick="cancelGestures()">Cancel holds</button></div>
+      <div class="hint">Release Knob to test Enter; hold and turn for iPod volume. Hold top-right to star; a short press opens the context menu.</div>
+    </details>
+  </div></section>
+  <section><h2>Live log<span class="spacer"></span><span id="stream_state" class="micro">Connecting</span></h2><div class="body">
+    <div class="log-toolbar"><button id="log_pause" onclick="toggleLog()">Pause</button><button onclick="clearLog()">Clear view</button>
+      <button onclick="downloadLog()">Download view</button><input type="text" id="log_filter" placeholder="Filter log" aria-label="Filter log">
+      <label class="check"><input type="checkbox" id="autoscroll" checked> Follow</label></div>
+    <pre id="live_log" aria-label="Live device log"></pre>
+    <details><summary>Logging</summary><div class="controls">
+      <label>Tag <input type="text" id="tag" value="usb" maxlength="31"></label>
+      <label>Level <select id="level"><option value="0">None</option><option value="1">Error</option><option value="2">Warn</option><option value="3">Info</option><option value="4" selected>Debug</option><option value="5">Verbose</option></select></label>
+      <button onclick="setLevel()">Apply</button><a href="/api/debuglog" download>Download SD log</a>
+    </div></details>
+  </div></section>
+</div>
+<div>
+  <section><h2>Tab5 battery</h2><div class="body"><div class="metrics" id="battery_metrics"></div><div class="rows" id="power_rows"></div>
+    <details><summary>Raw power readings</summary><div class="rows" id="power_raw"></div></details></div></section>
+  <section><h2>System</h2><div class="body rows" id="system_rows"></div></section>
+  <section><h2>Connections</h2><div class="body rows" id="connection_rows"></div></section>
+  <section><h2>iAP2 link</h2><div class="body rows" id="link_rows"></div></section>
+</div>
+</div>
+</main><div id="toast"></div><script src="/debug.js"></script>
+</body></html>

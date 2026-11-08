@@ -23,6 +23,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "ui.h"
+#include "player.h"
 #include "bsp/esp-bsp.h"
 #include "esp_io_expander.h"
 #include "driver/i2c_master.h"
@@ -73,75 +74,12 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(bmp_header_t) == 54, "BMP header must be 54 bytes");
 
 static web_config_apply_cb_t s_apply_cb;
+static bool (*s_sync_cb)(void);
 static QueueHandle_t s_sse_queue;
 static char s_net_status[64] = "WiFi off";
 static char s_net_ip[32] = "--";
 
 #include "web_index.h"
-
-static const char * DEBUG_HTML =
-"<!doctype html><html><head><meta charset='utf-8'>"
-"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>Tab5 debug log</title><style>"
-"body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:14px}"
-"h1{font-size:20px;margin:0 0 8px}a{color:#8cf}"
-"button{padding:8px 12px;margin:4px 6px 4px 0;background:#4b7bec;color:#fff;"
-"border:0;border-radius:6px}button.danger{background:#c0392b}"
-"input{background:#111;color:#eee;border:1px solid #444;padding:6px;border-radius:6px}"
-"pre{white-space:pre-wrap;word-break:break-word;background:#1d1d20;border:1px solid #333;"
-"border-radius:8px;padding:10px;height:65vh;overflow:auto;color:#9fe;font-size:12px}"
-".row{max-width:1000px}.muted{color:#999;font-size:13px}"
-"</style></head><body><div class='row'>"
-"<h1>Tab5 live debug log</h1>"
-"<p><a href='/'>back to config</a> &middot; "
-"<span class='muted'>ESP_LOG is mirrored here even when the USB-C console is gone.</span></p>"
-"<p><button onclick='clearLog()'>Clear</button>"
-"<button onclick='reboot()'>Reboot</button>"
-"<button class='danger' onclick='usb(0)'>USB-A HS</button>"
-"<button class='danger' onclick='usb(2)'>Both (A+C)</button>"
-"<label>log tag <input id='tag' value='usb' size='10'></label>"
-"<label>level <input id='level' value='4' size='2'></label>"
-"<button onclick='setLevel()'>Set level</button></p>"
-"<p><button onclick=\"key('w')\">Up</button>"
-"<button onclick=\"key('s')\">Down</button>"
-"<button onclick=\"key('\\r')\">Enter</button>"
-"<button onclick=\"key('b')\">Back</button>"
-"<button onclick=\"key('[')\">Prev</button>"
-"<button onclick=\"key(']')\">Next</button>"
-"<button onclick=\"key('c')\">Menu</button>"
-"<button onclick=\"key('7')\">Play</button>"
-"<button onclick=\"key('1')\">NP</button>"
-"<button onclick=\"key('2')\">Albums</button>"
-"<button onclick=\"key('3')\">Artists</button>"
-"<button onclick=\"key('4')\">Songs</button></p>"
-"<p><a href='/api/screenshot.bmp' target='_blank'>Screenshot (BMP)</a>"
-" &middot; <input type='file' id='fw'><button onclick='ota()'>"
-"OTA upload &amp; reboot</button> <span id='ota_msg' class='muted'></span></p>"
-"<pre id='log'></pre>"
-"<script>"
-"const el=document.getElementById('log');"
-"function add(s){el.textContent+=s;if(el.textContent.length>300000)"
-"el.textContent=el.textContent.slice(-150000);el.scrollTop=el.scrollHeight;}"
-"let es=new EventSource('/api/log/stream');"
-"es.onmessage=e=>add(e.data+'\\n');"
-"es.onerror=()=>add('[stream disconnected; retrying]\\n');"
-"function clearLog(){el.textContent='';}"
-"async function setLevel(){let t=encodeURIComponent(document.getElementById('tag').value);"
-"let l=document.getElementById('level').value;"
-"let r=await fetch('/api/loglevel?tag='+t+'&level='+l,{method:'POST'});"
-"add(await r.text()+'\\n');}"
-"function key(k){fetch('/api/key?k='+encodeURIComponent(k),{method:'POST'});}"
-"async function usb(m){if(!confirm('Reboot with USB mode '+m+'?'))return;"
-"add(await (await fetch('/api/usbmode?mode='+m,{method:'POST'})).text()+'\\n');}"
-"async function reboot(){if(confirm('Reboot?')){"
-"await fetch('/api/reboot',{method:'POST'});}}"
-"async function ota(){let f=document.getElementById('fw').files[0];"
-"if(!f){alert('choose a .bin');return;}"
-"document.getElementById('ota_msg').textContent="
-"'uploading '+f.size+' bytes...';"
-"let r=await fetch('/api/ota',{method:'POST',body:f});"
-"document.getElementById('ota_msg').textContent=await r.text();}"
-"</script></div></body></html>";
 
 static bool query_value(httpd_req_t * req, const char * key,
                         char * out, size_t out_len)
@@ -178,14 +116,24 @@ static void url_decode_inplace(char * value)
 
 static esp_err_t root_get(httpd_req_t * req)
 {
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t debug_get(httpd_req_t * req)
 {
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, DEBUG_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t asset_get(httpd_req_t * req)
+{
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_type(req, strstr(req->uri, ".css") ? "text/css; charset=utf-8" :
+                        "application/javascript; charset=utf-8");
+    return httpd_resp_sendstr(req, (const char *)req->user_ctx);
 }
 
 static esp_err_t debuglog_get(httpd_req_t * req)
@@ -280,9 +228,65 @@ static esp_err_t usbmode_post(httpd_req_t * req)
     return ESP_OK;
 }
 
+static bool web_key_parse(const char *name, ui_key_t *key)
+{
+    static const struct { const char *name; ui_key_t key; } keys[] = {
+        {"up", UI_KEY_UP},
+        {"down", UI_KEY_DOWN},
+        {"enter", UI_KEY_ENTER},
+        {"back", UI_KEY_BACK},
+        {"context", UI_KEY_CONTEXT},
+        {"queue", UI_KEY_PAGE_UP},
+        {"pageup", UI_KEY_PAGE_UP},
+        {"pagedown", UI_KEY_PAGE_DOWN},
+        {"tabprev", UI_KEY_SCREEN_PREV},
+        {"tabnext", UI_KEY_SCREEN_NEXT},
+        {"prev", UI_KEY_PREV_TRACK},
+        {"next", UI_KEY_NEXT_TRACK},
+        {"play", UI_KEY_7},
+        {"star", UI_KEY_STAR},
+        {"shuffle", UI_KEY_SHUFFLE},
+        {"repeat", UI_KEY_REPEAT},
+        {"volup", UI_KEY_VOLUME_UP},
+        {"voldown", UI_KEY_VOLUME_DOWN},
+        {"mute", UI_KEY_MUTE},
+        {"nowplaying", UI_KEY_1},
+        {"albums", UI_KEY_2},
+        {"artists", UI_KEY_3},
+        {"songs", UI_KEY_4},
+        {"playlists", UI_KEY_5},
+        {"w", UI_KEY_UP},
+        {"W", UI_KEY_UP},
+        {"s", UI_KEY_DOWN},
+        {"S", UI_KEY_DOWN},
+        {"b", UI_KEY_BACK},
+        {"B", UI_KEY_BACK},
+        {"p", UI_KEY_PAGE_UP},
+        {"P", UI_KEY_PAGE_UP},
+        {"n", UI_KEY_PAGE_DOWN},
+        {"N", UI_KEY_PAGE_DOWN},
+        {"[", UI_KEY_SCREEN_PREV},
+        {"]", UI_KEY_SCREEN_NEXT},
+        {"c", UI_KEY_CONTEXT},
+        {"C", UI_KEY_CONTEXT},
+        {"1", UI_KEY_1},
+        {"2", UI_KEY_2},
+        {"3", UI_KEY_3},
+        {"4", UI_KEY_4},
+        {"5", UI_KEY_5},
+        {"6", UI_KEY_6},
+        {"7", UI_KEY_7},
+        {"\r", UI_KEY_ENTER}, {"\n", UI_KEY_ENTER},
+    };
+    for(size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if(strcmp(name, keys[i].name) == 0) { *key = keys[i].key; return true; }
+    }
+    return false;
+}
+
 static esp_err_t key_post(httpd_req_t * req)
 {
-    char value[8] = {0};
+    char value[32] = {0};
     if(!query_value(req, "k", value, sizeof(value)) || value[0] == '\0') {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                    "missing k");
@@ -307,23 +311,21 @@ static esp_err_t key_post(httpd_req_t * req)
         return httpd_resp_sendstr(req, "ok");
     }
 
-    if(strcmp(value, "prev") == 0 || strcmp(value, "next") == 0 ||
-       strcmp(value, "play") == 0 || strcmp(value, "star") == 0) {
-        ui_key_t key = UI_KEY_PREV_TRACK;
-        if(strcmp(value, "next") == 0) key = UI_KEY_NEXT_TRACK;
-        else if(strcmp(value, "play") == 0) key = UI_KEY_7;
-        else if(strcmp(value, "star") == 0) key = UI_KEY_STAR;
-        if(bsp_display_lock(1000)) {
-            ui_handle_key(key);
-            bsp_display_unlock();
-        }
-        httpd_resp_set_type(req, "text/plain");
-        return httpd_resp_sendstr(req, "ok");
+    if(!bsp_display_lock(1000)) return httpd_resp_send_500(req);
+    bool ok = true;
+    if(strcmp(value, "screenoff") == 0) ui_screen_off();
+    else if(strcmp(value, "wake") == 0) ui_user_activity();
+    else if(strcmp(value, "settings") == 0) {
+        if(!ui_user_activity()) ui_select_screen(6);
     }
-
-    bool ok = serial_input_inject_key(value[0]);
-    httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_sendstr(req, ok ? "ok" : "unknown key");
+    else {
+        ui_key_t key;
+        ok = web_key_parse(value, &key);
+        if(ok) ui_handle_key(key);
+    }
+    bsp_display_unlock();
+    if(!ok) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unknown key");
+    return httpd_resp_sendstr(req, "ok");
 }
 
 static esp_err_t power_get(httpd_req_t * req)
@@ -434,6 +436,10 @@ static esp_err_t keystate_post(httpd_req_t * req)
     query_value(req, "down", down, sizeof(down));
     url_decode_inplace(value);
 
+    if(strcmp(value, "cancel") == 0) {
+        usb_hid_input_cancel_gestures(D100H_INPUT_WEB);
+        return httpd_resp_sendstr(req, "ok");
+    }
     if(strcmp(value, "topright") == 0) {
         usb_hid_input_post_top_right(D100H_INPUT_WEB, atoi(down) != 0);
         httpd_resp_set_type(req, "text/plain");
@@ -574,6 +580,12 @@ static esp_err_t screenshot_get(httpd_req_t * req)
 
 static void sse_stream(httpd_req_t * req)
 {
+    /* Request headers are released when the first response chunk is sent. */
+    uint32_t seq = 0;
+    char cursor[24] = {0};
+    if(query_value(req, "since", cursor, sizeof(cursor))) seq = (uint32_t)strtoul(cursor, NULL, 10);
+    if(httpd_req_get_hdr_value_str(req, "Last-Event-ID", cursor, sizeof(cursor)) == ESP_OK)
+        seq = (uint32_t)strtoul(cursor, NULL, 10);
     httpd_resp_set_type(req, "text/event-stream");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     httpd_resp_set_hdr(req, "Connection", "keep-alive");
@@ -588,7 +600,6 @@ static void sse_stream(httpd_req_t * req)
         return;
     }
 
-    uint32_t seq = 0;   /* start with the whole ring */
     TickType_t last_send = xTaskGetTickCount();
 
     for(;;) {
@@ -658,6 +669,7 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "theme", g_app_config.theme);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
+    cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
     cJSON_AddStringToObject(root, "ap_ssid", g_app_config.ap_ssid);
     cJSON_AddBoolToObject(root, "sd_ready", app_config_sd_ready());
@@ -702,7 +714,14 @@ static esp_err_t config_post(httpd_req_t * req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
     }
 
-    const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "theme");
+    const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "screen_off_minutes");
+    if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
+       (item->valueint != 0 && item->valueint != 30 && item->valueint != 60))) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid Screen Off value");
+    }
+    if(item != NULL) g_app_config.screen_off_minutes = (uint8_t)item->valueint;
+    item = cJSON_GetObjectItemCaseSensitive(root, "theme");
     if(item != NULL) {
         if(!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
            item->valueint < 0 || item->valueint > 2) {
@@ -875,6 +894,9 @@ static esp_err_t status_get(httpd_req_t * req)
     if(iap2_host_get_state(&iap2)) {
         cJSON_AddNumberToObject(root, "play_status", iap2.play_status);
         cJSON_AddStringToObject(root, "title", iap2.title);
+        cJSON_AddStringToObject(root, "artist", iap2.artist);
+        cJSON_AddStringToObject(root, "album", iap2.album);
+        cJSON_AddStringToObject(root, "device_name", iap2.device_name);
         cJSON_AddNumberToObject(root, "elapsed_ms", iap2.elapsed_ms);
         cJSON_AddNumberToObject(root, "duration_ms", iap2.duration_ms);
         cJSON_AddBoolToObject(root, "shuffle", iap2.shuffle);
@@ -888,6 +910,14 @@ static esp_err_t status_get(httpd_req_t * req)
         cJSON_AddNumberToObject(root, "device_max_current_ma",
                                 iap2.max_current_ma);
     }
+    if(bsp_display_lock(100)) {
+        player_snapshot_t snap;
+        player_get_snapshot(&snap);
+        cJSON_AddBoolToObject(root, "starred", snap.starred);
+        cJSON_AddBoolToObject(root, "screen_on", ui_screen_is_on());
+        bsp_display_unlock();
+    }
+    cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     const esp_partition_t * ota = esp_ota_get_next_update_partition(NULL);
@@ -1040,20 +1070,16 @@ static esp_err_t library_post(httpd_req_t * req)
     return ESP_OK;
 }
 
-static void sync_task(void * arg)
-{
-    (void)arg;
-    lockdown_client_sync_media();
-    vTaskDelete(NULL);
-}
-
 static esp_err_t sync_post(httpd_req_t * req)
 {
-    if(xTaskCreate(sync_task, "afc_sync", 8192, NULL, 3, NULL) != pdPASS) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "task failed");
+    if(!bsp_display_lock(1000)) return httpd_resp_send_500(req);
+    bool started = s_sync_cb && s_sync_cb();
+    bsp_display_unlock();
+    if(!started) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Sync unavailable: use AFC mode, pair the device and insert an SD card; wait for any active job.");
     }
-    return httpd_resp_sendstr(req, "copy started; watch the serial log");
+    return httpd_resp_sendstr(req, "Sync started");
 }
 
 static esp_err_t cache_reset_post(httpd_req_t * req)
@@ -1229,6 +1255,8 @@ void web_server_self_test(void)
     }
 }
 
+void web_server_set_sync_cb(bool (*cb)(void)) { s_sync_cb = cb; }
+
 void web_server_set_apply_cb(web_config_apply_cb_t cb)
 {
     s_apply_cb = cb;
@@ -1243,7 +1271,7 @@ void web_server_set_network_info(const char * status, const char * ip)
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 32;
     config.stack_size = 12288;
     config.lru_purge_enable = true;
 
@@ -1338,6 +1366,14 @@ esp_err_t web_server_start(void)
         .uri = "/api/charge", .method = HTTP_POST, .handler = charge_post,
     };
 
+    const httpd_uri_t assets[] = {
+        {.uri="/style.css", .method=HTTP_GET, .handler=asset_get, .user_ctx=(void *)WEB_STYLE_CSS},
+        {.uri="/common.js", .method=HTTP_GET, .handler=asset_get, .user_ctx=(void *)WEB_COMMON_JS},
+        {.uri="/dashboard.js", .method=HTTP_GET, .handler=asset_get, .user_ctx=(void *)WEB_DASHBOARD_JS},
+        {.uri="/debug.js", .method=HTTP_GET, .handler=asset_get, .user_ctx=(void *)WEB_DEBUG_JS},
+    };
+    for(size_t i=0; i < sizeof(assets)/sizeof(assets[0]); i++)
+        ESP_ERROR_CHECK(httpd_register_uri_handler(server, &assets[i]));
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &cfg_get);
     httpd_register_uri_handler(server, &cfg_post);

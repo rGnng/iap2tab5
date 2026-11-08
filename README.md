@@ -135,6 +135,12 @@ releasing after a held turn does not activate the selected item. This works
 over USB and BLE.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
+**Settings → Screen Off** offers **30 min**, **1 hour**, and **Off** (the default).
+The idle timer runs only while playback is paused or stopped; touch, keyboard,
+or keypad input restarts it. Hold the clock area for two seconds to turn off
+the screen immediately, including during playback. The first touch or key
+wakes the screen without activating a control. USB, playback and Wi-Fi keep running.
+
 ## Build and set up the Tab5
 
 The Tab5 has two processors with separate firmware and programming connections:
@@ -498,8 +504,11 @@ With no usable credentials, the default configuration starts an open
 are retried. AP mode can also be selected explicitly in `config.json`.
 
 Open the Tab5's address in a browser to configure settings, upload a library or
-pair record, copy the iPod database, sync the clock, or install a firmware `.bin`
-over the air. The `/debug` page adds live logs, key injection, and BMP screenshots.
+pair record, sync the library, sync the clock, or install a firmware `.bin`
+over the air. The dashboard shows Tab5 charging current separately from the
+iPod battery, and offers Screen Off settings and iPod volume buttons.
+The `/debug` page adds resumable live logs with filtering, display capture,
+named navigation/media controls, keypad gesture tests, and power/link diagnostics.
 Enable **Debug log to SD** to retain logs in `/sdcard/debug.log` across resets.
 The web server has no authentication, so use it on a trusted network.
 
@@ -628,13 +637,19 @@ changes; hardware timing, USB behavior, and BLE still need a Tab5.
 
 The optional LVGL integration tests feed pointer input through the production
 Albums UI. They check dragging over artwork, titles, artists, and row padding
-in both directions, plus tapping to open an album, across all three themes:
+in both directions, plus tapping to open an album, across all three themes.
+They also check the screen timer, two-second clock hold and wake-only input:
 
 ```bash
 cmake -S . -B build -DIAP2TAB5_BUILD_UI_TESTS=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+Optional browser tests in `tests/test_web_ui.py` use Playwright and Chromium.
+They serve the web assets locally and mock every device API, covering battery
+readings, unsaved settings, named controls, mobile layout and log resumption.
+They are skipped when Playwright is unavailable.
 
 ### Regenerate assets
 

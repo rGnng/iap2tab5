@@ -470,6 +470,7 @@ static void set_defaults(void)
     g_app_config.touch_enabled = true;
     g_app_config.np_bg_mode = 2;
     g_app_config.brightness = 70;
+    g_app_config.screen_off_minutes = 0;
     g_app_config.usb_mode = 0;
     g_app_config.theme = 0;
     g_app_config.boot_screen = 0;
@@ -542,6 +543,11 @@ static void load_from_json(const char * text)
     if(cJSON_IsNumber(item)) g_app_config.np_bg_mode = (uint8_t)item->valueint;
     item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
     if(cJSON_IsNumber(item)) g_app_config.brightness = (uint8_t)item->valueint;
+    item = cJSON_GetObjectItemCaseSensitive(root, "screen_off_minutes");
+    if(cJSON_IsNumber(item) && item->valuedouble == item->valueint &&
+       (item->valueint == 0 || item->valueint == 30 || item->valueint == 60)) {
+        g_app_config.screen_off_minutes = (uint8_t)item->valueint;
+    }
     item = cJSON_GetObjectItemCaseSensitive(root, "usb_mode");
     if(cJSON_IsNumber(item)) {
         g_app_config.usb_mode = (item->valueint == 2) ? 2 : 0;
@@ -647,6 +653,7 @@ esp_err_t app_config_save(void)
     cJSON_AddBoolToObject(root, "touch_enabled", g_app_config.touch_enabled);
     cJSON_AddNumberToObject(root, "np_bg_mode", g_app_config.np_bg_mode);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
+    cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddNumberToObject(root, "usb_mode", g_app_config.usb_mode);
     cJSON_AddNumberToObject(root, "theme", g_app_config.theme);
     cJSON_AddNumberToObject(root, "boot_screen", g_app_config.boot_screen);

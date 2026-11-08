@@ -316,12 +316,11 @@ static uint32_t read_locked(uint32_t since, char * out, size_t cap,
     uint32_t seq = since;
     while(seq != latest) {
         debug_log_entry_t * entry = &s_entries[seq % DEBUG_LOG_LINES];
-        size_t need = sse ? (6 + entry->len + 2) : (entry->len + 1);
+        size_t need = sse ? (32 + entry->len + 2) : (entry->len + 1);
         if(n + need > cap) break;
 
         if(sse) {
-            memcpy(out + n, "data: ", 6);
-            n += 6;
+            n += (size_t)snprintf(out + n, cap - n, "id: %u\ndata: ", (unsigned)(seq + 1));
         }
         memcpy(out + n, entry->text, entry->len);
         n += entry->len;

@@ -41,6 +41,7 @@ typedef enum {
     KEY_EVENT_TOP_RIGHT,
     KEY_EVENT_KNOB,
     KEY_EVENT_GESTURE_CANCEL,
+    KEY_EVENT_ACTIVITY,
 } key_event_kind_t;
 
 typedef struct {
@@ -68,6 +69,9 @@ static int64_t s_hold_start_us;
 static int64_t s_hold_sent_us;
 
 static uint8_t s_prev_keys[HID_KEYBOARD_KEY_MAX];
+static uint8_t s_prev_modifiers;
+static void post_gesture_event(d100h_input_source_t source, key_event_kind_t kind,
+                                uint8_t id, bool down);
 
 #define ULANZI_VID 0xFFF1
 #define ULANZI_TOP_RIGHT_ID 0x03
@@ -184,6 +188,8 @@ static void keyboard_report(const uint8_t * data, int length)
     if(length < (int)sizeof(hid_keyboard_input_report_boot_t)) return;
     const hid_keyboard_input_report_boot_t * report =
         (const hid_keyboard_input_report_boot_t *)data;
+    bool new_input = (report->modifier.val & ~s_prev_modifiers) != 0;
+    bool mapped = false;
 
     for(int i = 0; i < HID_KEYBOARD_KEY_MAX; i++) {
         uint8_t code = report->key[i];
@@ -197,14 +203,22 @@ static void keyboard_report(const uint8_t * data, int length)
             }
         }
         if(was_down) continue;
+        new_input = true;
 
         ui_key_t key;
         if(hid_key_to_ui(code, &key)) {
+            mapped = true;
             usb_hid_input_post_key(key);
         }
     }
 
+    /* Unmapped keys and modifier-only presses still count as user activity.
+     * Do not add a separate wake event before an already mapped key. */
+    if(new_input && !mapped)
+        post_gesture_event(D100H_INPUT_USB, KEY_EVENT_ACTIVITY, 0, true);
+
     memcpy(s_prev_keys, report->key, sizeof(s_prev_keys));
+    s_prev_modifiers = report->modifier.val;
 }
 
 static void hid_interface_cb(hid_host_device_handle_t handle,
@@ -304,6 +318,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                 ESP_LOGI(TAG, "HID device disconnected");
             }
             memset(s_prev_keys, 0, sizeof(s_prev_keys));
+            s_prev_modifiers = 0;
             hid_host_device_close(handle);
             break;
         case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
@@ -372,6 +387,7 @@ static void hid_event_task(void * arg)
             }
         }
         memset(s_prev_keys, 0, sizeof(s_prev_keys));
+        s_prev_modifiers = 0;
         if(hid_host_device_start(evt.handle) != ESP_OK) {
             ESP_LOGE(TAG, "hid_host_device_start failed");
             continue;
@@ -414,6 +430,18 @@ static void dispatch_top_right(d100h_input_source_t source,
 
 static void dispatch_key_event(const key_event_t * evt)
 {
+    /* Record physical presses before gestures defer their logical action.
+     * Consuming a wake press also cancels its later click/long-press action. */
+    if(evt->kind != KEY_EVENT_GESTURE_CANCEL && evt->down && bsp_display_lock(1000)) {
+        bool woke = ui_user_activity();
+        bsp_display_unlock();
+        if(woke) {
+            ulanzi_knob_cancel(&s_knob[evt->source]);
+            dispatch_top_right(evt->source, ULANZI_TOP_RIGHT_CANCEL, evt->time_us);
+            return;
+        }
+    }
+    if(evt->kind == KEY_EVENT_ACTIVITY) return;
     if(evt->kind == KEY_EVENT_KNOB) {
         ui_key_t key;
         if(ulanzi_knob_update(&s_knob[evt->source], evt->id, evt->down, &key) &&

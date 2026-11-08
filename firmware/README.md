@@ -173,6 +173,7 @@ live in `../docs/sd/`. Two files are used:
   "touch_enabled": true,
   "np_bg_mode": 2,
   "brightness": 70,
+  "screen_off_minutes": 0,
   "usb_mode": 0,
   "charge_enabled": true,
   "qc_high": false
@@ -182,6 +183,10 @@ live in `../docs/sd/`. Two files are used:
 - `screen_flip`: `0` or `180` (landscape upside down)
 - `wifi_mode`: `0` station, `1` open AP
 - `np_bg_mode`: `0` theme, `1` blurred cover, `2` cover gradient
+- `screen_off_minutes`: `0` disabled (default), `30` or `60`. Only paused/stopped
+  playback with no input counts as idle. Hold the menubar clock for two seconds
+  to blank immediately; the first touch/key wakes without performing its action.
+  This switches off the backlight while USB, playback, sync and Wi-Fi continue.
 - `sort_field`: `0` add date, `1` name, `2` year
 - `usb_mode`: `0` USB-A HS host (default), `2` USB-A HS + USB-C FS
   dual host (Both A+C, verified). The old USB-C-FS-only value `1` is
@@ -231,9 +236,12 @@ Useful endpoints:
 | `GET /api/status` | JSON status (build time, USB mode, iAP2, heap, SD) |
 | `GET /api/config` / `POST /api/config` | read/write `/sdcard/config.json` |
 | `GET /api/log?since=N` | log text after sequence N (`X-Log-Seq`) |
-| `GET /api/log/stream` | live SSE log stream |
+| `GET /api/log/stream?since=N` | live SSE log stream; resumes with `Last-Event-ID` |
 | `POST /api/loglevel?tag=usb&level=4` | change a log tag level at runtime |
-| `POST /api/key?k=w` | inject a serial-console key into the UI |
+| `POST /api/key?k=enter` | named navigation/media action; legacy serial aliases also work |
+| `POST /api/key?k=screenoff` / `k=wake` | blank/wake the display without changing saved brightness |
+| `POST /api/keystate?k=cancel` | cancel web keypad holds without emitting a click |
+| `POST /api/sync` | same incremental library/artwork sync worker as the AFC screen |
 | `GET /api/screenshot.bmp` | 1280x720 24-bit BMP snapshot |
 | `POST /api/usbmode?mode=0\|1\|2` | select USB-A / USB-C / both and reboot |
 | `GET /api/power` | INA226 voltage/current + `usb5v_en` / `chg_en` / `chg_stat` |

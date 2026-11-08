@@ -5,6 +5,7 @@
 #include "fonts/inter_fonts.h"
 #include "plug_art.h"
 #include "player.h"
+#include "screen_idle.h"
 #include "ble_remote.h"
 #include "thumb_cache_format.h"
 
@@ -274,6 +275,68 @@ static bool g_key_feedback_sent;
 static void (*g_afc_status_cb)(ui_afc_status_t * out);
 static void (*g_afc_action_cb)(int action);
 static void (*g_time_changed_cb)(time_t now);
+static lv_indev_t * g_touch_indev;
+static screen_idle_t g_screen_idle;
+static lv_obj_t * g_screen_mask;
+static lv_timer_t * g_clock_hold_timer;
+static void (*g_screen_power_cb)(bool on);
+
+static void ui_screen_apply(bool was_on)
+{
+    bool on = !g_screen_idle.off;
+    if(on == was_on) return;
+    if(g_screen_mask) {
+        if(!on) lv_obj_move_foreground(g_screen_mask);
+        lv_obj_set_hidden(g_screen_mask, on);
+    }
+    if(g_screen_power_cb) g_screen_power_cb(on);
+}
+
+bool ui_screen_is_on(void) { return !g_screen_idle.off; }
+
+bool ui_user_activity(void)
+{
+    bool was_on = ui_screen_is_on();
+    bool woke = screen_idle_activity(&g_screen_idle, lv_tick_get());
+    ui_screen_apply(was_on);
+    return woke;
+}
+
+void ui_screen_off(void)
+{
+    bool was_on = ui_screen_is_on();
+    screen_idle_off(&g_screen_idle);
+    ui_screen_apply(was_on);
+}
+
+void ui_set_screen_power_cb(void (*cb)(bool on)) { g_screen_power_cb = cb; }
+
+static void clock_hold_cb(lv_timer_t * timer)
+{
+    lv_timer_pause(timer);
+    lv_obj_t * area = lv_timer_get_user_data(timer);
+    lv_point_t point;
+    if(!g_touch_indev || !area || !lv_obj_is_valid(area) ||
+       lv_indev_get_state(g_touch_indev) != LV_INDEV_STATE_PRESSED) return;
+    lv_indev_get_point(g_touch_indev, &point);
+    lv_area_t bounds;
+    lv_obj_get_coords(area, &bounds);
+    if(point.x >= bounds.x1 && point.x <= bounds.x2 &&
+       point.y >= bounds.y1 && point.y <= bounds.y2) ui_screen_off();
+}
+
+static void clock_touch_cb(lv_event_t * event)
+{
+    if(lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        if(!g_clock_hold_timer) g_clock_hold_timer = lv_timer_create(clock_hold_cb, 2000, NULL);
+        if(g_clock_hold_timer) {
+            lv_timer_set_user_data(g_clock_hold_timer, lv_event_get_current_target(event));
+            lv_timer_reset(g_clock_hold_timer);
+            lv_timer_resume(g_clock_hold_timer);
+        }
+    }
+    else if(g_clock_hold_timer) lv_timer_pause(g_clock_hold_timer);
+}
 
 /* Key Feedback: 0 = none, 1 = touch only, 2 = touch + key. */
 static void ui_feedback_emit(ui_feedback_t type, bool from_key)
@@ -298,6 +361,8 @@ void ui_play_key_feedback(ui_key_t key)
         case UI_KEY_ENTER:
         case UI_KEY_7:
         case UI_KEY_STAR:
+        case UI_KEY_SHUFFLE:
+        case UI_KEY_REPEAT:
             ui_feedback_emit(UI_FEEDBACK_ACTIVATE, true);
             break;
         case UI_KEY_1:
@@ -1704,7 +1769,6 @@ static lv_obj_t * g_menubar;
 static lv_obj_t * g_menu_items[SCR_COUNT];
 static lv_obj_t * g_menu_icons[SCR_COUNT];
 static bool g_menubar_left = true;
-static lv_indev_t * g_touch_indev;
 static bool g_touch_enabled = true;
 static screen_id_t g_current_screen = SCR_NOW_PLAYING;
 static screen_id_t g_ble_return_screen = SCR_COUNT;
@@ -2078,6 +2142,7 @@ static void ui_layout_page_area(void)
 
 static void build_menubar(lv_obj_t * parent)
 {
+    if(g_clock_hold_timer) lv_timer_pause(g_clock_hold_timer);
     g_menubar = lv_obj_create(parent);
     lv_obj_set_size(g_menubar, MENUBAR_W, SCREEN_H);
     lv_obj_set_pos(g_menubar, 0, 0);
@@ -2105,9 +2170,14 @@ static void build_menubar(lv_obj_t * parent)
     lv_obj_set_flex_align(time_area, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(time_area, false);
+    lv_obj_set_clickable(time_area, true);
+    lv_obj_add_event_cb(time_area, clock_touch_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(time_area, clock_touch_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(time_area, clock_touch_cb, LV_EVENT_PRESS_LOST, NULL);
     theme_chrome(time_area, 0x163F70);
     g_status_time = make_label(time_area, "--:--", FONT_CLOCK,
                                COL_MENU_TOP_FG);
+    lv_obj_set_clickable(g_status_time, false);
     lv_obj_set_width(g_status_time, LV_PCT(100));
     lv_obj_set_style_text_align(g_status_time, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -2189,6 +2259,9 @@ bool ui_menubar_left(void)
 void ui_set_system_config(const ui_system_config_t * cfg)
 {
     if(cfg == NULL) return;
+    if(cfg->screen_off_minutes != g_system_config.screen_off_minutes) {
+        screen_idle_configure(&g_screen_idle, cfg->screen_off_minutes, lv_tick_get());
+    }
 
     char status[sizeof(g_system_config.wifi_status)];
     char ip[sizeof(g_system_config.wifi_ip)];
@@ -2584,10 +2657,40 @@ static void ui_back(void)
     }
 }
 
+static void screen_touch_cb(lv_event_t * event)
+{
+    /* Input-device events run before widget callbacks, even in scroll lists. */
+    lv_indev_t * indev = lv_event_get_target(event);
+    if(ui_user_activity()) {
+        lv_indev_wait_release(indev);
+        lv_indev_stop_processing(indev);
+    }
+}
+
+static void screen_idle_tick(lv_timer_t * timer)
+{
+    LV_UNUSED(timer);
+    bool was_on = ui_screen_is_on();
+    /* A finger held down or dragging is activity, even without a new press. */
+    if(was_on && g_touch_indev &&
+       lv_indev_get_state(g_touch_indev) == LV_INDEV_STATE_PRESSED) {
+        screen_idle_activity(&g_screen_idle, lv_tick_get());
+    }
+    player_snapshot_t snap;
+    player_get_snapshot(&snap);
+    screen_idle_update(&g_screen_idle, !g_afc_sync_mode &&
+                       snap.status == PLAYER_PLAYING, lv_tick_get());
+    ui_screen_apply(was_on);
+}
+
 void ui_attach_touch(lv_indev_t * indev)
 {
+    if(g_touch_indev) lv_indev_remove_event_cb_with_user_data(g_touch_indev, screen_touch_cb, NULL);
     g_touch_indev = indev;
-    if(g_touch_indev) lv_indev_enable(g_touch_indev, g_touch_enabled);
+    if(g_touch_indev) {
+        lv_indev_add_event_cb(g_touch_indev, screen_touch_cb, LV_EVENT_PRESSED, NULL);
+        lv_indev_enable(g_touch_indev, g_touch_enabled);
+    }
 }
 
 void ui_set_touch_enabled(bool enabled)
@@ -2622,6 +2725,15 @@ static void ui_handle_media_key(ui_key_t key)
             break;
         case UI_KEY_STAR:
             player_toggle_star();
+            break;
+        case UI_KEY_SHUFFLE: {
+            player_snapshot_t snap;
+            player_get_snapshot(&snap);
+            player_set_shuffle(!snap.shuffle);
+            break;
+        }
+        case UI_KEY_REPEAT:
+            player_cycle_repeat();
             break;
         default:
             return;
@@ -2664,7 +2776,7 @@ static void ui_dispatch_key(ui_key_t key)
         if(key == UI_KEY_7 || key == UI_KEY_PREV_TRACK ||
            key == UI_KEY_NEXT_TRACK || key == UI_KEY_VOLUME_UP ||
            key == UI_KEY_VOLUME_DOWN || key == UI_KEY_MUTE ||
-           key == UI_KEY_STAR) {
+           key == UI_KEY_STAR || key == UI_KEY_SHUFFLE || key == UI_KEY_REPEAT) {
             ui_handle_media_key(key);
         }
         else {
@@ -2714,6 +2826,8 @@ static void ui_dispatch_key(ui_key_t key)
         case UI_KEY_VOLUME_DOWN:
         case UI_KEY_MUTE:
         case UI_KEY_STAR:
+        case UI_KEY_SHUFFLE:
+        case UI_KEY_REPEAT:
             ui_handle_media_key(key);
             break;
         case UI_KEY_BACK:
@@ -2755,6 +2869,7 @@ static void ui_dispatch_key(ui_key_t key)
 
 void ui_handle_key(ui_key_t key)
 {
+    if(ui_user_activity()) return;
     /* Page and modal handlers can consume Enter/Back before the generic
      * focus code. Emit here, then suppress duplicate action/preview sounds
      * during this dispatch. Keep previews when enabling a previously silent
@@ -7211,6 +7326,7 @@ enum {
     SETTING_KEY_FEEDBACK,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
+    SETTING_SCREEN_OFF,
     SETTING_USB,
     SETTING_BOOT,
     SETTING_ABOUT,
@@ -7232,6 +7348,7 @@ static lv_obj_t * settings_detail_boot_anim1_check;
 static lv_obj_t * settings_detail_theme_gray_check;
 static lv_obj_t * settings_detail_theme_aqua_check;
 static lv_obj_t * settings_detail_theme_win95_check;
+static lv_obj_t * settings_screen_off_checks[3];
 static lv_obj_t * settings_time_ampm_value;
 static lv_obj_t * settings_time_ampm_column;
 static lv_obj_t * settings_time_ampm_spacer;
@@ -7289,6 +7406,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(cfg == NULL) return;
 
     g_system_config = *cfg;
+    screen_idle_configure(&g_screen_idle, cfg->screen_off_minutes, lv_tick_get());
     if(g_system_config.sound_mode < 0) g_system_config.sound_mode = 0;
     if(g_system_config.sound_mode > 2) g_system_config.sound_mode = 2;
     g_system_config.sound_enabled = g_system_config.sound_mode != 0;
@@ -7322,6 +7440,7 @@ static const char * const settings_names[SETTING_COUNT] = {
     "Key Feedback",
     "Theme",
     "Now Playing Background",
+    "Screen Off",
     "USB Options",
     "Boot Screen",
     "About",
@@ -7330,6 +7449,10 @@ static const char * const settings_names[SETTING_COUNT] = {
 
 static int settings_initial_focus(int index)
 {
+    if(index == SETTING_SCREEN_OFF) {
+        return g_system_config.screen_off_minutes == 30 ? 0 :
+               g_system_config.screen_off_minutes == 60 ? 1 : 2;
+    }
     if(index == SETTING_NOW_PLAYING_BG) {
         return g_np_bg_mode == NP_BG_BLURRED_COVER
                    ? NP_BG_COVER_GRADIENT : (int)g_np_bg_mode;
@@ -8041,6 +8164,25 @@ static void settings_theme_touch_cb(lv_event_t * event)
     settings_theme_action(lv_event_get_user_data(event));
 }
 
+static void settings_screen_off_action(void * user)
+{
+    static const int minutes[] = {30, 60, 0};
+    int index = (int)(intptr_t)user;
+    if(index < 0 || index > 2) return;
+    g_system_config.screen_off_minutes = minutes[index];
+    screen_idle_configure(&g_screen_idle, minutes[index], lv_tick_get());
+    for(int i = 0; i < 3; i++) {
+        if(settings_screen_off_checks[i])
+            lv_label_set_text(settings_screen_off_checks[i], i == index ? ICON_CHECK : "");
+    }
+    settings_system_changed();
+}
+
+static void settings_screen_off_touch_cb(lv_event_t * event)
+{
+    settings_screen_off_action(lv_event_get_user_data(event));
+}
+
 static void settings_ble_toggle_action(void * user)
 {
     LV_UNUSED(user);
@@ -8404,6 +8546,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_theme_gray_check = NULL;
     settings_detail_theme_aqua_check = NULL;
     settings_detail_theme_win95_check = NULL;
+    memset(settings_screen_off_checks, 0, sizeof(settings_screen_off_checks));
     settings_detail_screen_value = NULL;
     settings_detail_wifi_mode_value = NULL;
     settings_detail_wifi_status_value = NULL;
@@ -8683,6 +8826,19 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             else {
                 touch_add_clickable(mesh_row, settings_np_bg_touch_cb,
                                     (void *)(intptr_t)NP_BG_COVER_GRADIENT);
+            }
+            break;
+        }
+        case SETTING_SCREEN_OFF: {
+            static const char * const labels[] = {"30 min", "1 hour", "Off"};
+            int selected = settings_initial_focus(SETTING_SCREEN_OFF);
+            for(int i = 0; i < 3; i++) {
+                lv_obj_t * row = settings_make_choice_row(parent, labels[i],
+                    i == selected, &settings_screen_off_checks[i]);
+                if(interactive) focus_add_clickable(row, settings_screen_off_action,
+                    NULL, (void *)(intptr_t)i, true);
+                else touch_add_clickable(row, settings_screen_off_touch_cb,
+                    (void *)(intptr_t)i);
             }
             break;
         }
@@ -9300,6 +9456,7 @@ static void ui_afc_sync_build(lv_obj_t * screen)
 void ui_handle_key_repeat(ui_key_t key, int count)
 {
     if(count <= 0) return;
+    if(ui_user_activity()) return;
     if(count == 1) {
         ui_handle_key(key);
         return;
@@ -9481,6 +9638,18 @@ void ui_init(void)
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     lv_obj_set_style_text_font(screen, FONT_CAPTION, 0);
     lv_obj_set_style_text_color(screen, lv_color_hex(COL_TEXT), 0);
+
+    screen_idle_configure(&g_screen_idle, g_system_config.screen_off_minutes, lv_tick_get());
+    g_screen_mask = lv_obj_create(lv_layer_top());
+    lv_obj_set_pos(g_screen_mask, 0, 0);
+    lv_obj_set_size(g_screen_mask, SCREEN_W, SCREEN_H);
+    lv_obj_set_style_bg_color(g_screen_mask, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_screen_mask, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g_screen_mask, 0, 0);
+    lv_obj_set_style_radius(g_screen_mask, 0, 0);
+    lv_obj_set_scrollable(g_screen_mask, false);
+    lv_obj_set_hidden(g_screen_mask, true);
+    lv_timer_create(screen_idle_tick, 1000, NULL);
 
     if(g_afc_sync_mode) {
         ui_afc_sync_build(screen);

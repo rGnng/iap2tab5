@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ esp_err_t web_server_start(void);
 
 /* Registered by main.c: applies g_app_config to the display/audio/Wi-Fi. */
 void web_server_set_apply_cb(web_config_apply_cb_t cb);
+void web_server_set_sync_cb(bool (*cb)(void));
 
 /* Updated by the Wi-Fi manager so /api/status and the UI show live state. */
 void web_server_set_network_info(const char * status, const char * ip);

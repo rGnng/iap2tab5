@@ -26,6 +26,7 @@ idf_component_register(
         "iap2_host.c"
         "lvgl_ppa_idf_compat.c"
         "../../app/backend/mock_player.c"
+        "../../app/backend/screen_idle.c"
         "../../app/backend/ble_remote.c"
         "../../app/ui/ui.c"
         "../../app/ui/theme.c"

@@ -385,6 +385,15 @@ static void ui_afc_action_handler(int action)
     web_server_reboot();
 }
 
+static bool web_start_sync(void)
+{
+    lockdown_pair_status_t pairing;
+    lockdown_client_pair_status(&pairing);
+    if(app_config_iap2_mode() || s_afc_job_active || pairing.busy ||
+       !afc_client_is_ready() || !app_config_sd_ready()) return false;
+    return afc_start_job_task(2);
+}
+
 static void apply_runtime_config(void)
 {
     if((int)g_app_config.screen_flip != s_applied_flip) {
@@ -406,10 +415,19 @@ static void apply_runtime_config(void)
     }
     if((int)g_app_config.brightness != s_applied_brightness &&
        g_app_config.brightness <= 100) {
-        bsp_display_brightness_set(g_app_config.brightness);
+        bsp_display_brightness_set(ui_screen_is_on() ? g_app_config.brightness : 0);
         s_applied_brightness = g_app_config.brightness;
     }
     publish_system_config();
+}
+
+static void web_apply_runtime_config(void)
+{
+    /* The web task shares idle state and display settings with LVGL. */
+    if(bsp_display_lock(0)) {
+        apply_runtime_config();
+        bsp_display_unlock();
+    }
 }
 
 static void ui_system_config_changed(const ui_system_config_t * cfg)
@@ -429,6 +447,7 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.touch_enabled = cfg->touch_enabled != 0;
     g_app_config.np_bg_mode = (uint8_t)cfg->np_bg_mode;
     g_app_config.brightness = (uint8_t)cfg->brightness;
+    g_app_config.screen_off_minutes = (uint8_t)cfg->screen_off_minutes;
     g_app_config.usb_mode = (uint8_t)cfg->usb_mode;
     g_app_config.theme = (uint8_t)cfg->theme;
     g_app_config.boot_screen = (uint8_t)cfg->boot_screen;
@@ -438,7 +457,7 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     s_save_pending = true;
     if(cfg->brightness != s_applied_brightness &&
        cfg->brightness >= 0 && cfg->brightness <= 100) {
-        bsp_display_brightness_set(cfg->brightness);
+        bsp_display_brightness_set(ui_screen_is_on() ? cfg->brightness : 0);
         s_applied_brightness = cfg->brightness;
     }
     apply_runtime_config();
@@ -447,6 +466,12 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
 static void ui_feedback_handler(int type)
 {
     feedback_play((feedback_t)type);
+}
+
+static void ui_screen_power_handler(bool on)
+{
+    bsp_display_brightness_set(on ? g_app_config.brightness : 0);
+    ESP_LOGI(TAG, "Screen %s", on ? "on" : "off");
 }
 
 /* Settings → Clock commits the edited wall clock here.  Keeping this in
@@ -477,6 +502,7 @@ static void fill_ui_config(ui_system_config_t * cfg)
     cfg->touch_enabled = g_app_config.touch_enabled ? 1 : 0;
     cfg->np_bg_mode = g_app_config.np_bg_mode;
     cfg->brightness = g_app_config.brightness;
+    cfg->screen_off_minutes = g_app_config.screen_off_minutes;
     cfg->usb_mode = g_app_config.usb_mode;
     cfg->theme = g_app_config.theme;
     cfg->boot_screen = g_app_config.boot_screen;
@@ -722,6 +748,7 @@ void app_main(void)
     ui_set_network_status("WiFi off", "--");
     ui_set_system_config_changed_cb(ui_system_config_changed);
     ui_set_feedback_cb(ui_feedback_handler);
+    ui_set_screen_power_cb(ui_screen_power_handler);
     ui_set_time_changed_cb(ui_time_changed_handler);
     ui_set_afc_status_cb(ui_afc_status_handler);
     ui_set_afc_action_cb(ui_afc_action_handler);
@@ -784,7 +811,8 @@ void app_main(void)
         esp_event_loop_create_default();
     }
 
-    web_server_set_apply_cb(apply_runtime_config);
+    web_server_set_apply_cb(web_apply_runtime_config);
+    web_server_set_sync_cb(web_start_sync);
     web_server_start();
 
     esp_err_t wifi_err = wifi_manager_start();

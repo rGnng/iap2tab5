@@ -30,6 +30,7 @@ typedef struct {
     bool touch_enabled;
     uint8_t np_bg_mode;
     uint8_t brightness;
+    uint8_t screen_off_minutes; /* 0 = disabled (default), 30, 60 */
     uint8_t usb_mode;
     uint8_t theme;              /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */
     uint8_t boot_screen;        /* 0 = off, 1 = KCN4M1 boot animation */

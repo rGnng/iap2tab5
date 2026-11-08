@@ -34,6 +34,8 @@ typedef enum {
     UI_KEY_VOLUME_DOWN,
     UI_KEY_MUTE,
     UI_KEY_STAR,
+    UI_KEY_SHUFFLE,
+    UI_KEY_REPEAT,
 } ui_key_t;
 
 /**
@@ -55,6 +57,12 @@ void ui_select_screen(int index);
 
 /** Attach the pointer/touch input device created by the platform layer. */
 void ui_attach_touch(lv_indev_t *indev);
+
+/* Call on the UI thread (under the platform display lock). */
+bool ui_user_activity(void);
+bool ui_screen_is_on(void);
+void ui_screen_off(void);
+void ui_set_screen_power_cb(void (*cb)(bool on));
 
 /** Enable/disable touch input (persisted by the platform layer later). */
 void ui_set_touch_enabled(bool enabled);
@@ -82,6 +90,7 @@ typedef struct {
     int menubar_left;
     int touch_enabled;
     int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
+    int screen_off_minutes; /* 0 = Off (disabled), 30, 60 */
     int brightness;        /* 0..100 */
     int usb_mode;          /* 0 = USB-A HS, 2 = USB-A HS + USB-C FS */
     int theme;             /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */
