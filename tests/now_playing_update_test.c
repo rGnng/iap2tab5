@@ -5,6 +5,7 @@
 static void test_snapshot(player_snapshot_t *out);
 static uint32_t test_queue_revision(void);
 static uint32_t test_artwork_revision(void);
+static int test_queue_count(void);
 static bool test_artwork_copy(uint8_t *dst, size_t size, artwork_quality_t minimum,
                               artwork_quality_t *actual);
 static bool test_song_get(int index, player_track_t *out);
@@ -12,6 +13,7 @@ static bool test_artist_song_get(uint64_t id, int index, player_track_t *out);
 #define player_get_snapshot test_snapshot
 #define player_queue_revision test_queue_revision
 #define player_artwork_revision test_artwork_revision
+#define player_queue_count test_queue_count
 #define player_artwork_copy test_artwork_copy
 #define player_song_get test_song_get
 #define player_artist_song_get test_artist_song_get
@@ -19,6 +21,7 @@ static bool test_artist_song_get(uint64_t id, int index, player_track_t *out);
 #undef player_get_snapshot
 #undef player_queue_revision
 #undef player_artwork_revision
+#undef player_queue_count
 #undef player_artwork_copy
 #undef player_song_get
 #undef player_artist_song_get
@@ -32,6 +35,9 @@ static uint32_t queue_rev, art_rev;
 static unsigned renders, deleted, copies;
 static unsigned global_song_reads, member_song_reads;
 static uint32_t observed_background;
+static bool force_empty_queue;
+static const int shell_points[4][2]={{1,1},{4,270},{1278,1},{1276,270}};
+static uint32_t observed_shell[4];
 static uint8_t pixels[1280 * 40 * 4];
 static void test_snapshot(player_snapshot_t *out)
 { if(inject) *out=injected; else player_get_snapshot(out); }
@@ -39,6 +45,8 @@ static uint32_t test_queue_revision(void)
 { return player_queue_revision()+queue_rev; }
 static uint32_t test_artwork_revision(void)
 { return art_rev; }
+static int test_queue_count(void)
+{ return force_empty_queue?0:player_queue_count(); }
 static bool test_artwork_copy(uint8_t *dst, size_t size, artwork_quality_t minimum,
                               artwork_quality_t *actual)
 {
@@ -63,6 +71,13 @@ static void check(bool condition, const char *message)
 { if(!condition) { fprintf(stderr,"FAIL: %s\n",message); exit(1); } }
 static void flush(lv_display_t *d, const lv_area_t *a, uint8_t *p)
 {
+    for(unsigned i=0;i<4;i++) {
+        int x=shell_points[i][0],y=shell_points[i][1];
+        if(a->x1<=x && a->x2>=x && a->y1<=y && a->y2>=y) {
+            size_t offset=(size_t)(y-a->y1)*lv_area_get_width(a)+(x-a->x1);
+            memcpy(&observed_shell[i],p+offset*4,4);
+        }
+    }
     if(a->x1<=1100 && a->x2>=1100 && a->y1<=695 && a->y2>=695) {
         size_t offset=(size_t)(695-a->y1)*lv_area_get_width(a)+(1100-a->x1);
         memcpy(&observed_background,p+offset*4,4);
@@ -76,6 +91,20 @@ static void pump(int ms)
 static void text(lv_obj_t *o, const char *value)
 { check(o && !strcmp(lv_label_get_text(o),value),value); }
 
+static void check_shell_tint(unsigned index)
+{
+    const uint16_t *image=(const uint16_t *)g_np_mesh_dsc.data;
+    uint16_t pixel=image[shell_points[index][1]*COVER_GRADIENT_WIDTH+shell_points[index][0]];
+    unsigned r=pixel>>11,g=(pixel>>5)&63,b=pixel&31;
+    uint32_t background=(r*255/31)<<16|(g*255/63)<<8|(b*255/31);
+    for(unsigned shift=0;shift<24;shift+=8) {
+        unsigned expected=(((background>>shift)&255)*(255-LV_OPA_10)+
+            ((COL_MENU_BODY_BG>>shift)&255)*LV_OPA_10)/255;
+        check(abs((int)((observed_shell[index]>>shift)&255)-(int)expected)<=2,
+              "Sidebar and clock pixels must show the shared gradient with only the faint theme tint");
+    }
+}
+
 static void gradient_lifecycle(void)
 {
     settings_np_bg_action((void *)(intptr_t)NP_BG_COVER_GRADIENT);
@@ -88,10 +117,20 @@ static void gradient_lifecycle(void)
     check(np_title==title,"Late artwork must not rebuild the page");
     check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop),
           "Live RGB565 artwork must generate a visible gradient");
+    check(lv_obj_get_parent(np_gradient_backdrop)==lv_screen_active() &&
+          lv_obj_get_index(np_gradient_backdrop)==0,
+          "One gradient image must sit behind the page and menu");
+    check(np_chrome_tinted && lv_obj_get_style_bg_opa(g_page,0)==LV_OPA_TRANSP &&
+          lv_obj_get_style_bg_opa(g_menubar,0)==LV_OPA_10 &&
+          lv_obj_get_style_bg_opa(lv_obj_get_parent(g_status_time),0)==LV_OPA_TRANSP,
+          "Ready gradients must make the shell translucent without a second clock backdrop");
+    check_shell_tint(0);check_shell_tint(1);
     uint64_t original_key=np_gradient_key;
     const uint8_t *original_pixels=g_np_mesh_dsc.data;
     const uint16_t *pixels=(const uint16_t *)original_pixels;
     lv_area_t bounds; lv_obj_get_coords(np_gradient_backdrop,&bounds);
+    check(bounds.x1==0 && bounds.y1==0 && bounds.x2==1279 && bounds.y2==719,
+          "The gradient must cover the entire screen without content-pane clipping");
     uint16_t expected=pixels[(695-bounds.y1)*COVER_GRADIENT_WIDTH+1100-bounds.x1];
     unsigned r=expected>>11, g=(expected>>5)&63, b=expected&31;
     check(abs((int)((observed_background>>16)&255)-(int)((r<<3)|(r>>2)))<=1 &&
@@ -111,36 +150,42 @@ static void gradient_lifecycle(void)
     check(np_title==title && np_gradient_key!=original_key &&
           !lv_obj_is_hidden(np_gradient_backdrop),"Changed artwork must update the background in place");
     uint64_t changed_key=np_gradient_key;
+    force_empty_queue=true;
     np_toggle_queue(); pump(300);
+    text(np_queue_loading,"Queue empty");
+    check(lv_obj_get_style_bg_opa(lv_obj_get_parent(np_queue_list),0)==LV_OPA_10,
+          "The queue panel must have only a faint theme-colored tint");
     check(np_gradient_key==changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
           "Up Next must reuse the same gradient");
-    np_toggle_queue(); pump(300);
+    force_empty_queue=false;np_toggle_queue(); pump(300);
     ui_select_screen(SCR_ALBUMS); pump(400);
     check(!np_gradient_backdrop && !np_gradient_key,"Page exit must detach gradient widgets");
+    check(!np_chrome_tinted && lv_obj_get_style_bg_opa(g_page,0)==LV_OPA_COVER &&
+          lv_obj_get_style_bg_opa(g_menubar,0)==LV_OPA_COVER &&
+          lv_obj_get_style_bg_opa(lv_obj_get_parent(g_status_time),0)==LV_OPA_COVER,
+          "Leaving Now Playing must restore the normal page, menu and clock backgrounds");
     np_gradient_poll_cb(NULL);
     check(g_current_screen==SCR_ALBUMS,"A late background result must not affect another tab");
     ui_select_screen(SCR_NOW_PLAYING); pump(300);
     check(np_gradient_key==changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
           "Returning to Now Playing must use the cached artwork background");
-    settings_np_bg_action((void *)(intptr_t)NP_BG_ALBUM_WASH); ui_rebuild_page(); pump(200);
-    check(np_gradient_key && np_gradient_key!=changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
-          "Album wash must be a distinct selectable background");
-    check(settings_initial_focus(SETTING_NOW_PLAYING_BG)==2,
-          "Settings must focus the third visible choice for Album wash");
-    uint64_t wash_key=np_gradient_key;
-    title=np_title; unsigned old_copies=copies;
-    strcpy(injected.track.album,"A different album name"); np_tick(); pump(200);
-    check(np_title==title && np_gradient_key!=wash_key && copies==old_copies,
-          "Late album metadata must reseed the wash without recopying artwork or rebuilding the page");
-    wash_key=np_gradient_key;
-    injected.track.id++; np_tick(); pump(200);
-    check(np_gradient_key==wash_key,"Songs sharing an album and artwork must reuse the same wash");
-    ui_system_config_t saved=g_system_config;
-    ui_apply_saved_settings(&saved); ui_rebuild_page(); pump(200);
-    check(g_np_bg_mode==NP_BG_ALBUM_WASH && np_gradient_key==wash_key,
-          "A saved Album wash choice must survive settings reload");
+    ui_set_menubar_left(false);pump(200);
+    check_shell_tint(2);check_shell_tint(3);
+    check(np_gradient_key==changed_key,"Moving the menu must not regenerate the background");
+    ui_set_menubar_left(true);pump(200);
+    int original_theme=g_theme->id;
+    g_system_config.theme=(original_theme+1)%UI_THEME_COUNT;ui_apply_theme();pump(200);
+    check_shell_tint(0);check_shell_tint(1);
+    g_system_config.theme=original_theme;ui_apply_theme();pump(200);
+    check_shell_tint(0);check_shell_tint(1);
     settings_np_bg_action((void *)(intptr_t)NP_BG_THEME); ui_rebuild_page(); pump(200);
     check(!np_gradient_backdrop && !np_gradient_key,"Theme mode must omit the cover gradient");
+    check(!np_chrome_tinted,"Theme mode must retain the ordinary opaque shell");
+    ui_system_config_t retired=g_system_config;retired.np_bg_mode=3;
+    ui_apply_saved_settings(&retired);ui_rebuild_page();pump(200);
+    check(g_np_bg_mode==NP_BG_COVER_GRADIENT && g_system_config.np_bg_mode==2 &&
+          settings_initial_focus(SETTING_NOW_PLAYING_BG)==1,
+          "The retired album mode must migrate to the remaining Cover gradient choice");
     inject=false;
     settings_np_bg_action((void *)(intptr_t)NP_BG_COVER_GRADIENT); ui_rebuild_page(); pump(200);
     check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop),

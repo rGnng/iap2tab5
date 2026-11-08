@@ -141,8 +141,8 @@ void cover_gradient_render(const cover_gradient_color_t palette[COVER_GRADIENT_C
 {
     /* Broad color lights surround the artwork, with a smaller accent in the
      * opposite top corner. Compact cubic falloffs have no hard pool edges. */
-    static const float center[3][2] = {{0.25f,0.25f}, {0.02f,0.75f}, {0.99f,-0.12f}};
-    static const float radius[3][2] = {{0.68f,0.85f}, {0.70f,0.80f}, {0.95f,0.90f}};
+    static const float center[3][2] = {{0.20f,0.25f}, {0.42f,0.78f}, {0.90f,0.16f}};
+    static const float radius[3][2] = {{0.98f,1.12f}, {1.02f,1.08f}, {1.04f,1.10f}};
     static const float dark_strength[3] = {148,108,86};
     static const float light_strength[3] = {100,70,60};
     float colors[COVER_GRADIENT_COLORS][3], lights[3][3], base[3];
@@ -161,8 +161,8 @@ void cover_gradient_render(const cover_gradient_color_t palette[COVER_GRADIENT_C
     bool light = tint_luma >= 128;
     for(unsigned c = 0; c < 3; c++) {
         base[c] = light ? (((theme_tint>>(c*8))&255u)+255)*0.5f
-                         -(1-colors[1][c])*10-(1-colors[2][c])*4
-                       : 4+colors[1][c]*28+colors[2][c]*12;
+                         -(1-colors[0][c])*8-(1-colors[1][c])*8-(1-colors[2][c])*4
+                       : 4+colors[0][c]*12+colors[1][c]*20+colors[2][c]*12;
         for(unsigned i = 0; i < 3; i++) {
             lights[i][c] = light ? -(1-colors[i][c])*light_strength[i]
                                  : colors[i][c]*dark_strength[i];
@@ -213,124 +213,6 @@ void cover_gradient_render(const cover_gradient_color_t palette[COVER_GRADIENT_C
                     float ceiling = 96-text*52-calm*44;
                     if(ceiling < 40) ceiling = 40;
                     if(luminance > ceiling) for(unsigned c = 0; c < 3; c++) rgb[c] *= ceiling/luminance;
-                }
-                for(unsigned c = 0; c < 3; c++) {
-                    float value = rgb[c] < 0 ? 0 : rgb[c] > 255 ? 255 : rgb[c];
-                    pixels[y*stride+(start+x)*3+c] = (uint8_t)(value+0.5f);
-                }
-            }
-        }
-    }
-}
-
-uint32_t cover_gradient_album_hash(const char * album)
-{
-    uint32_t hash = UINT32_C(2166136261);
-    if(album) for(const unsigned char * p = (const unsigned char *)album; *p; p++) {
-        hash = (hash ^ *p) * UINT32_C(16777619);
-    }
-    return hash;
-}
-
-static float wash_random(uint32_t * seed)
-{
-    /* All randomness is local and deterministic; never touches global RNG or
-     * changes with elapsed time, artwork resolution, or the current song. */
-    *seed += UINT32_C(0x9e3779b9);
-    uint32_t value = *seed;
-    value = (value ^ (value >> 16)) * UINT32_C(0x85ebca6b);
-    value = (value ^ (value >> 13)) * UINT32_C(0xc2b2ae35);
-    value ^= value >> 16;
-    return (float)(value >> 8) / 16777215.0f;
-}
-
-void cover_gradient_render_wash(const cover_gradient_color_t palette[COVER_GRADIENT_COLORS],
-                                uint8_t * pixels, unsigned width, unsigned height, size_t stride,
-                                uint32_t theme_tint, uint32_t album_seed)
-{
-    float colors[3][3], center[2][2], radius[2][2];
-    for(unsigned i = 0; i < 3; i++) {
-        unsigned maximum = channel_max(palette[i].r,palette[i].g,palette[i].b);
-        float scale = maximum ? 1.0f/maximum : 0;
-        colors[i][0] = palette[i].b*scale;
-        colors[i][1] = palette[i].g*scale;
-        colors[i][2] = palette[i].r*scale;
-        float floor = channel_min(palette[i].r,palette[i].g,palette[i].b)*scale*0.35f;
-        for(unsigned c = 0; c < 3; c++) colors[i][c] = (colors[i][c]-floor)/(1-floor);
-    }
-    center[0][0] = 0.18f+0.16f*wash_random(&album_seed);
-    center[0][1] = 0.18f+0.64f*wash_random(&album_seed);
-    if(wash_random(&album_seed) > 0.5f) center[0][0] = 1-center[0][0];
-    center[1][0] = 1-center[0][0];
-    center[1][1] = 1-center[0][1];
-    for(unsigned i = 0; i < 2; i++) {
-        radius[i][0] = 0.60f+0.18f*wash_random(&album_seed);
-        radius[i][1] = 0.65f+0.18f*wash_random(&album_seed);
-    }
-    unsigned tint_luma = (77*((theme_tint>>16)&255u)+150*((theme_tint>>8)&255u)+29*(theme_tint&255u)) >> 8;
-    bool light = tint_luma >= 128;
-    float color_luma[3];
-    for(unsigned i = 0; i < 3; i++) color_luma[i] = (29*colors[i][0]+150*colors[i][1]+77*colors[i][2])/256;
-    /* Estimate the former lighting's average, then lower it slightly. A
-     * single luminance target prevents hue overlap from creating hotspots. */
-    float dark_level = (4+19*color_luma[0]+39*color_luma[1]+16*color_luma[2])*0.85f;
-    if(dark_level > 40) dark_level = 40;
-    if(dark_level < 3) dark_level = 3;
-    float x_step = width > 1 ? 1.0f/(width-1) : 0;
-    float y_step = height > 1 ? 1.0f/(height-1) : 0;
-    float horizontal[2][320];
-    for(unsigned start = 0; start < width; start += 320) {
-        unsigned columns = width-start < 320 ? width-start : 320;
-        for(unsigned x = 0; x < columns; x++) {
-            float tx = (start+x)*x_step;
-            for(unsigned i = 0; i < 2; i++) {
-                float dx = (tx-center[i][0])/radius[i][0];
-                horizontal[i][x] = dx*dx;
-            }
-        }
-        for(unsigned y = 0; y < height; y++) {
-            float ty = y*y_step, vertical[2];
-            for(unsigned i = 0; i < 2; i++) {
-                float dy = (ty-center[i][1])/radius[i][1];
-                vertical[i] = dy*dy;
-            }
-            float calm = smooth(0.60f,0.95f,ty);
-            for(unsigned x = 0; x < columns; x++) {
-                float field[2];
-                for(unsigned i = 0; i < 2; i++) {
-                    float value = 1-0.65f*(horizontal[i][x]+vertical[i]);
-                    if(value < 0) value = 0;
-                    field[i] = value*value;
-                }
-                /* Give secondary hues room to show. Normalize luminance
-                 * below rather than suppressing color to avoid hotspots. */
-                float accent_a = 0.04f+0.90f*field[0];
-                float accent_b = 0.04f+0.85f*field[1];
-                float dominant = 0.55f;
-                float total = dominant+accent_a+accent_b;
-                float rgb[3], hue[3];
-                for(unsigned c = 0; c < 3; c++) {
-                    hue[c] = (dominant*colors[0][c]+accent_a*colors[1][c]+accent_b*colors[2][c])/total;
-                }
-                /* RGB hue blending adds gray when warm/cool colors meet.
-                 * Reduce that shared gray before normalizing brightness. */
-                float floor = hue[0] < hue[1] ? hue[0] : hue[1];
-                if(hue[2] < floor) floor = hue[2];
-                floor *= 0.65f;
-                for(unsigned c = 0; c < 3; c++) {
-                    float color = (hue[c]-floor)/(1-floor);
-                    rgb[c] = light ? 175+80*color : 0.06f+0.94f*color;
-                }
-                float luminance = (29*rgb[0]+150*rgb[1]+77*rgb[2])/256;
-                float target = light ? 222-2*calm+(field[0]-field[1])
-                                     : dark_level*(1-0.04f*calm+0.025f*(field[0]-field[1]));
-                if(light && luminance < target) {
-                    float lift = (target-luminance)/(255-luminance);
-                    for(unsigned c = 0; c < 3; c++) rgb[c] += (255-rgb[c])*lift;
-                }
-                else {
-                    float scale = luminance > 0 ? target/luminance : 0;
-                    for(unsigned c = 0; c < 3; c++) rgb[c] *= scale;
                 }
                 for(unsigned c = 0; c < 3; c++) {
                     float value = rgb[c] < 0 ? 0 : rgb[c] > 255 ? 255 : rgb[c];

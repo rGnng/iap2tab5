@@ -154,13 +154,10 @@ wakes the screen without activating a control. USB, playback and Wi-Fi keep runn
 **Settings → Now Playing Background**. It uses colors from the
 current iPod artwork, including artwork that arrives after the page opens.
 It selects a dominant hue and two distinct accents, then builds soft ambient
-color lights around the artwork. Gray uses deep colors; Aqua uses matching
-pastels. The text and control regions stay calm for readability.
-
-**Album wash** is a separate option in the same menu. It spreads the main
-cover color more evenly at a slightly darker level, with broad accent fields
-positioned by a stable hash of the album name. Normalized brightness prevents
-bright hotspots, and songs on the same album keep the same layout.
+color lights across the whole screen. Broader overlapping fields spread the
+cover colors evenly, while preserving light and shade. Gray uses deep colors;
+Aqua uses matching pastels. The menu bar, clock area and Up Next panel show
+the gradient through a faint theme tint. Text and controls stay readable.
 
 A background worker renders at 320×180 and expands once to 1280×720 with the
 ESP32-P4 PPA. Eight-bit color channels survive scaling; the final conversion

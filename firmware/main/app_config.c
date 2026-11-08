@@ -545,7 +545,10 @@ static void load_from_json(const char * text)
     item = cJSON_GetObjectItemCaseSensitive(root, "touch_enabled");
     if(cJSON_IsBool(item)) g_app_config.touch_enabled = cJSON_IsTrue(item);
     item = cJSON_GetObjectItemCaseSensitive(root, "np_bg_mode");
-    if(cJSON_IsNumber(item)) g_app_config.np_bg_mode = (uint8_t)item->valueint;
+    if(cJSON_IsNumber(item)) {
+        /* The removed album-seeded background now uses Cover gradient. */
+        g_app_config.np_bg_mode = item->valueint == 3 ? 2 : (uint8_t)item->valueint;
+    }
     item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
     if(cJSON_IsNumber(item))
         g_app_config.brightness = (uint8_t)screen_brightness_normalize(item->valueint);

@@ -32,8 +32,6 @@ typedef struct {
     uint64_t key;
     uint32_t tint_rgb;
     uint8_t tint_opacity;
-    cover_gradient_style_t style;
-    uint32_t album_seed;
     cover_gradient_sample_t samples[COVER_GRADIENT_SAMPLES];
 } gradient_job_t;
 
@@ -164,12 +162,8 @@ static void process(gradient_job_t * job)
     if(!cover_gradient_palette(job->samples, palette)) goto done;
     palette_end = now_us();
     if(!wanted(job->key)) goto done;
-    if(job->style == COVER_GRADIENT_STYLE_WASH) {
-        cover_gradient_render_wash(palette, small_image, COVER_GRADIENT_SMALL_WIDTH,
-            COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE, job->tint_rgb, job->album_seed);
-    }
-    else cover_gradient_render(palette, small_image, COVER_GRADIENT_SMALL_WIDTH,
-                               COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE, job->tint_rgb);
+    cover_gradient_render(palette, small_image, COVER_GRADIENT_SMALL_WIDTH,
+                           COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE, job->tint_rgb);
     mesh_end = now_us();
     if(!wanted(job->key)) goto done;
     accelerated = scale_hardware(output[slot]);
@@ -239,32 +233,25 @@ static bool initialize(void)
 
 uint64_t cover_gradient_request(const void * pixels, size_t bytes, unsigned width,
                                 unsigned height, size_t stride, cover_gradient_format_t format,
-                                uint32_t tint_rgb, uint8_t tint_opacity,
-                                cover_gradient_style_t style, uint32_t album_seed)
+                                uint32_t tint_rgb, uint8_t tint_opacity)
 {
-    if(style != COVER_GRADIENT_STYLE_LIGHTS && style != COVER_GRADIENT_STYLE_WASH) return 0;
-    if(style == COVER_GRADIENT_STYLE_LIGHTS) album_seed = 0;
     if(!initialize()) return 0;
     gradient_job_t * job = allocate(sizeof(*job));
     if(!job) return 0;
     if(!cover_gradient_sample(pixels, bytes, width, height, stride, format, job->samples)) {
         free(job); return 0;
     }
-    /* Include the album seed only for Album wash. Cover gradient remains
-     * independent of metadata, while wash placement follows the album name. */
+    /* Sample content and tint identify the finished image. Repeated iAP2
+     * revisions need no repeated work; a theme change invalidates the tint. */
     uint64_t key = UINT64_C(14695981039346656037);
     const uint8_t * data = (const uint8_t *)job->samples;
     for(size_t i = 0; i < sizeof(job->samples); i++) key = (key ^ data[i]) * UINT64_C(1099511628211);
     for(unsigned shift = 0; shift < 24; shift += 8) key = (key ^ ((tint_rgb >> shift) & 255u)) * UINT64_C(1099511628211);
     key = (key ^ tint_opacity) * UINT64_C(1099511628211);
-    key = (key ^ (unsigned)style) * UINT64_C(1099511628211);
-    for(unsigned shift = 0; shift < 32; shift += 8) key = (key ^ ((album_seed >> shift) & 255u)) * UINT64_C(1099511628211);
     if(!key) key = 1;
     job->key = key;
     job->tint_rgb = tint_rgb;
     job->tint_opacity = tint_opacity;
-    job->style = style;
-    job->album_seed = album_seed;
     lock();
     desired_key = key;
     bool reused = front_key == key || ready_key == key || work_key == key;
