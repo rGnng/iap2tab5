@@ -24,7 +24,9 @@
 
 #define SMALL_STRIDE (COVER_GRADIENT_SMALL_WIDTH * 3u)
 #define SMALL_BYTES (SMALL_STRIDE * COVER_GRADIENT_SMALL_HEIGHT)
-#define OUTPUT_BYTES ((size_t)COVER_GRADIENT_WIDTH * COVER_GRADIENT_HEIGHT * 2u)
+/* Keep 8-bit channels through scaling, then pack the finished RGB565 image at
+ * the front of the same buffer. No separate full-size conversion image. */
+#define WORK_BYTES ((size_t)COVER_GRADIENT_WIDTH * COVER_GRADIENT_HEIGHT * 3u)
 
 typedef struct {
     uint64_t key;
@@ -35,6 +37,7 @@ typedef struct {
 
 static uint8_t * small_image;
 static uint16_t * output[2];
+static uint16_t * finish_lut;
 static int front = -1, ready = -1;
 static uint64_t desired_key, front_key, ready_key, work_key, failed_key;
 #ifdef ESP_PLATFORM
@@ -119,9 +122,9 @@ static bool scale_hardware(uint16_t * pixels)
                 .block_w = COVER_GRADIENT_SMALL_WIDTH,
                 .block_h = COVER_GRADIENT_SMALL_HEIGHT,
                 .srm_cm = PPA_SRM_COLOR_MODE_RGB888},
-            .out = {.buffer = pixels, .buffer_size = OUTPUT_BYTES,
+            .out = {.buffer = pixels, .buffer_size = WORK_BYTES,
                 .pic_w = COVER_GRADIENT_WIDTH, .pic_h = COVER_GRADIENT_HEIGHT,
-                .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+                .srm_cm = PPA_SRM_COLOR_MODE_RGB888},
             .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
             .scale_x = 4.0f, .scale_y = 4.0f,
             .alpha_update_mode = PPA_ALPHA_NO_CHANGE,
@@ -152,26 +155,29 @@ static void process(gradient_job_t * job)
     bool success = false, accelerated = false;
     uint64_t palette_end = start, mesh_end = start, scale_end = start, finish_end = start;
     if(!small_image) small_image = allocate(SMALL_BYTES);
-    if(!output[slot]) output[slot] = allocate(OUTPUT_BYTES);
-    if(!small_image || !output[slot]) goto done;
+    if(!output[slot]) output[slot] = allocate(WORK_BYTES);
+    if(!finish_lut) finish_lut = allocate(COVER_GRADIENT_FINISH_LUT_ENTRIES * sizeof(*finish_lut));
+    if(!small_image || !output[slot] || !finish_lut) goto done;
     cover_gradient_color_t palette[COVER_GRADIENT_COLORS];
     if(!cover_gradient_palette(job->samples, palette)) goto done;
     palette_end = now_us();
     if(!wanted(job->key)) goto done;
     cover_gradient_render(palette, small_image, COVER_GRADIENT_SMALL_WIDTH,
-                           COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE);
+                           COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE, job->tint_rgb);
     mesh_end = now_us();
     if(!wanted(job->key)) goto done;
     accelerated = scale_hardware(output[slot]);
     if(!accelerated) {
         cover_gradient_scale_cpu(small_image, COVER_GRADIENT_SMALL_WIDTH,
-            COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE, output[slot],
+            COVER_GRADIENT_SMALL_HEIGHT, SMALL_STRIDE, (uint8_t *)output[slot],
             COVER_GRADIENT_WIDTH, COVER_GRADIENT_HEIGHT);
     }
     scale_end = now_us();
     if(!wanted(job->key)) goto done;
-    cover_gradient_finish(output[slot], COVER_GRADIENT_WIDTH, COVER_GRADIENT_HEIGHT,
-                           job->tint_rgb, job->tint_opacity);
+    /* Spatial contrast is already built into the light field; the final
+     * theme veil is lighter than the legacy full-screen scrim. */
+    cover_gradient_finish((uint8_t *)output[slot], COVER_GRADIENT_WIDTH, COVER_GRADIENT_HEIGHT,
+                           job->tint_rgb, job->tint_opacity / 2u, finish_lut);
     finish_end = now_us();
     success = true;
 done:

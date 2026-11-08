@@ -152,11 +152,16 @@ wakes the screen without activating a control. USB, playback and Wi-Fi keep runn
 
 **Settings → Now Playing Background → Cover gradient** uses colors from the
 current iPod artwork, including artwork that arrives after the page opens.
-It builds a 320×180 mesh in a background worker, expands it once to 1280×720
-with the ESP32-P4 PPA, and caches the RGB565 result. Matching artwork reuses
-the background; page changes cancel obsolete work. A strong, stationary 4×4
-Bayer finish combines the theme tint and halftone texture in the cached image.
-The simulator and devices without an available PPA use a CPU scaling fallback.
+It selects a dominant hue and two distinct accents, then builds soft ambient
+color lights around the artwork. Gray uses deep colors; Aqua uses matching
+pastels. The text and control regions stay calm for readability.
+A background worker renders at 320×180 and expands once to 1280×720 with the
+ESP32-P4 PPA. Eight-bit color channels survive scaling; the final conversion
+adds fine, stationary blue-noise dithering and packs RGB565 in place. This
+avoids the visible Bayer grid and premature color banding. Matching artwork
+reuses the cached result; page changes cancel obsolete work. The simulator and
+devices without an available PPA use a CPU scaling fallback. The two working
+images use about 1.8 MB more PSRAM in total than the former RGB565-only path.
 
 Now Playing displays the first received cover immediately and upgrades it when
 a larger source arrives. If a track settles for two seconds with no cover or
