@@ -3758,6 +3758,11 @@ static void np_placeholder(lv_obj_t * parent)
     else {
         lv_obj_t * img = lv_image_create(box);
         lv_image_set_src(img, &plug_in_dsc);
+        /* Preserve the artwork's alpha while adapting its white silhouette
+         * to the theme: muted gray on dark, black on light backgrounds. */
+        lv_obj_set_style_image_recolor(img, lv_color_hex(
+            g_theme->id == UI_THEME_GRAY ? COL_DIM : 0x000000), 0);
+        lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
         lv_obj_align(img, LV_ALIGN_BOTTOM_MID, 0, -24);
     }
 }
