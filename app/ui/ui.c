@@ -1692,14 +1692,11 @@ static lv_obj_t * g_mini_artist;
 static lv_obj_t * g_mini_shuffle;
 static lv_obj_t * g_mini_repeat;
 static lv_obj_t * g_mini_star;
-static lv_obj_t * g_mini_queue;
 static lv_obj_t * g_mini_time;
 static uint64_t g_mini_track_id;
 static uint32_t g_mini_art_rev;
 static uint32_t g_mini_rev = 0xffffffffu;
 static uint32_t g_mini_elapsed = 0xffffffffu;
-static int g_mini_queue_index = -999;
-static int g_mini_queue_count = -999;
 static lv_obj_t * g_status_time;
 static bool g_clock_12h;
 static int g_clock_offset_min;
@@ -1921,10 +1918,6 @@ static void ui_mini_update(void)
     g_mini_elapsed = snapshot.elapsed_sec;
     bool art_changed = (art_rev != g_mini_art_rev);
     g_mini_art_rev = art_rev;
-    int queue_index = player_queue_index();
-    int queue_count = player_queue_count();
-    g_mini_queue_index = queue_index;
-    g_mini_queue_count = queue_count;
 
     if(snapshot.track.id != g_mini_track_id || art_changed) {
         g_mini_track_id = snapshot.track.id;
@@ -1983,16 +1976,6 @@ static void ui_mini_update(void)
     lv_label_set_text(g_mini_repeat,
                       snapshot.repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE
                                                            : ICON_REPEAT);
-
-    if(g_mini_queue) {
-        if(queue_count > 0 && queue_index >= 0) {
-            lv_label_set_text_fmt(g_mini_queue, "%d / %d",
-                                  queue_index + 1, queue_count);
-        }
-        else {
-            lv_label_set_text(g_mini_queue, "— / —");
-        }
-    }
 
     if(g_mini_time) {
         char current[16];
@@ -2056,30 +2039,10 @@ static void build_mini_now(lv_obj_t * parent)
     lv_obj_set_height(g_mini_artist, 24);
     ui_text_fade(g_mini_artist);
 
-    /* Queue position and elapsed/duration: 2 x 80 px time block. */
-    lv_obj_t * meta = lv_obj_create(g_mini);
-    lv_obj_set_size(meta, 160, 60);
-    lv_obj_set_style_bg_opa(meta, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(meta, 0, 0);
-    lv_obj_set_style_radius(meta, 0, 0);
-    lv_obj_set_style_pad_all(meta, 0, 0);
-    lv_obj_set_style_pad_top(meta, 2, 0);
-    lv_obj_set_style_pad_row(meta, 1, 0);
-    lv_obj_set_flex_flow(meta, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(meta, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
-                          LV_FLEX_ALIGN_END);
-    lv_obj_set_scrollable(meta, false);
-
-    g_mini_queue = make_label(meta, "— / —", FONT_NUM,
-                              COL_MINI_MUTED);
-    lv_obj_set_width(g_mini_queue, LV_PCT(100));
-    lv_obj_set_height(g_mini_queue, 24);
-    lv_obj_set_style_text_align(g_mini_queue, LV_TEXT_ALIGN_RIGHT, 0);
-    ui_text_fade(g_mini_queue);
-
-    g_mini_time = make_label(meta, "0:00 / 0:00", FONT_NUM,
+    /* Elapsed/duration only, centred vertically beside the status icons. */
+    g_mini_time = make_label(g_mini, "0:00 / 0:00", FONT_NUM,
                              COL_MINI_MUTED);
-    lv_obj_set_width(g_mini_time, LV_PCT(100));
+    lv_obj_set_width(g_mini_time, 160);
     lv_obj_set_height(g_mini_time, 24);
     lv_obj_set_style_text_align(g_mini_time, LV_TEXT_ALIGN_RIGHT, 0);
     ui_text_fade(g_mini_time);
