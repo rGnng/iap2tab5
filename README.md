@@ -134,6 +134,9 @@ Settings remains accessible. Reconnect the iPod to resume browsing. After
 removing and reinserting the SD card, reboot to reload the cached library.
 
 The D100H supports tap-to-skip and hold-to-seek on its previous/next controls.
+Its top-left Back key acts on release; holding it for two seconds turns off
+the screen. The top-middle Play/Pause key also acts on release. A press that
+wakes the screen is consumed through release, without navigating or playing.
 Its top-right key opens the context menu on a tap and toggles Star on a hold.
 Hold the knob down and turn it to adjust iPod volume: clockwise raises it,
 counter-clockwise lowers it. A plain knob click activates on release;

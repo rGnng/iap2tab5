@@ -706,6 +706,14 @@ static int gap_event(struct ble_gap_event * event, void * arg)
                 return 0;
             }
             ESP_LOGD(TAG, "D100H event id=0x%02x down=%d", id, (int)down);
+            if(id == 0x01) {
+                usb_hid_input_post_back(D100H_INPUT_BLE, down);
+                return 0;
+            }
+            if(id == 0x02) {
+                usb_hid_input_post_play(D100H_INPUT_BLE, down);
+                return 0;
+            }
             if(id == 0x03) {
                 usb_hid_input_post_top_right(D100H_INPUT_BLE, down);
                 return 0;

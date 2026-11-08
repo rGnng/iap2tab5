@@ -42,6 +42,8 @@ typedef enum {
     KEY_EVENT_KNOB,
     KEY_EVENT_GESTURE_CANCEL,
     KEY_EVENT_ACTIVITY,
+    KEY_EVENT_BACK,
+    KEY_EVENT_PLAY,
 } key_event_kind_t;
 
 typedef struct {
@@ -57,6 +59,10 @@ static QueueHandle_t s_device_events;
 static QueueHandle_t s_key_events;
 static ulanzi_top_right_t s_top_right[D100H_INPUT_COUNT];
 static ulanzi_knob_t s_knob[D100H_INPUT_COUNT];
+static ulanzi_back_t s_back[D100H_INPUT_COUNT];
+static ulanzi_play_t s_play[D100H_INPUT_COUNT];
+static uint16_t s_button_down[D100H_INPUT_COUNT];
+static uint16_t s_wake_consumed[D100H_INPUT_COUNT];
 
 /* Previous/next behave as tap-to-skip and hold-to-rewind/fast-forward. */
 #define HOLD_MS         500
@@ -278,7 +284,13 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                 uint8_t id = 0;
                 bool down = false;
                 if(ulanzi_d100h_decode(data, length, &id, &down)) {
-                    if(id == ULANZI_TOP_RIGHT_ID) {
+                    if(id == 0x01) {
+                        usb_hid_input_post_back(D100H_INPUT_USB, down);
+                    }
+                    else if(id == 0x02) {
+                        usb_hid_input_post_play(D100H_INPUT_USB, down);
+                    }
+                    else if(id == ULANZI_TOP_RIGHT_ID) {
                         usb_hid_input_post_top_right(D100H_INPUT_USB, down);
                     }
                     else if(id == 0x07 || id == 0x0B || id == 0x0C) {
@@ -302,6 +314,9 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                 }
                 break;
             }
+            /* The D100H vendor stream owns press/release timing. Its
+             * auxiliary keyboard interface must not also act on key-down. */
+            if(s_ulanzi_addr != 0 && params.addr == s_ulanzi_addr) break;
             if(params.proto == HID_PROTOCOL_KEYBOARD &&
                params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
                 keyboard_report(data, (int)length);
@@ -311,6 +326,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
             if(handle_is_ulanzi(handle)) {
                 set_ulanzi_handle(NULL);
+                s_ulanzi_addr = 0;
                 usb_hid_input_cancel_gestures(D100H_INPUT_USB);
                 ESP_LOGI(TAG, "Ulanzi D100H disconnected");
             }
@@ -411,6 +427,31 @@ static uint8_t hold_bit_for_key(ui_key_t key)
     return key == UI_KEY_PREV_TRACK ? 11 : 10;
 }
 
+static uint16_t gesture_button_bit(const key_event_t * evt)
+{
+    if(evt->kind == KEY_EVENT_BACK || evt->kind == KEY_EVENT_PLAY ||
+       evt->kind == KEY_EVENT_TOP_RIGHT || (evt->kind == KEY_EVENT_KNOB && evt->id == 0x07))
+        return (uint16_t)(1u << evt->id);
+    return 0;
+}
+
+static void dispatch_back(d100h_input_source_t source,
+                          ulanzi_back_event_t event, int64_t now_us)
+{
+    ulanzi_back_action_t action = ulanzi_back_update(&s_back[source], event, now_us);
+    if(action == ULANZI_BACK_NONE) return;
+    ESP_LOGI(TAG, "D100H back source=%d action=%s", (int)source,
+             action == ULANZI_BACK_SCREEN_OFF ? "screen_off" : "back");
+    if(bsp_display_lock(1000)) {
+        if(action == ULANZI_BACK_SCREEN_OFF) {
+            ui_play_key_feedback(UI_KEY_BACK);
+            ui_screen_off();
+        }
+        else if(ui_screen_is_on()) ui_handle_key(UI_KEY_BACK);
+        bsp_display_unlock();
+    }
+}
+
 static void dispatch_top_right(d100h_input_source_t source,
                                ulanzi_top_right_event_t event, int64_t now_us)
 {
@@ -430,18 +471,55 @@ static void dispatch_top_right(d100h_input_source_t source,
 
 static void dispatch_key_event(const key_event_t * evt)
 {
+    uint16_t bit = gesture_button_bit(evt);
+    if(bit) {
+        if(evt->down) {
+            /* Repeated down reports from the held Back key must not wake
+             * the screen immediately after its long-press switched it off. */
+            if(s_button_down[evt->source] & bit) return;
+            s_button_down[evt->source] |= bit;
+        }
+        else {
+            s_button_down[evt->source] &= ~bit;
+            if(s_wake_consumed[evt->source] & bit) {
+                s_wake_consumed[evt->source] &= ~bit;
+                return;
+            }
+        }
+    }
     /* Record physical presses before gestures defer their logical action.
      * Consuming a wake press also cancels its later click/long-press action. */
     if(evt->kind != KEY_EVENT_GESTURE_CANCEL && evt->down && bsp_display_lock(1000)) {
         bool woke = ui_user_activity();
         bsp_display_unlock();
         if(woke) {
-            ulanzi_knob_cancel(&s_knob[evt->source]);
-            dispatch_top_right(evt->source, ULANZI_TOP_RIGHT_CANCEL, evt->time_us);
+            /* Wake is global: another keyboard or transport can wake while
+             * a vendor button is still held. Consume those releases too. */
+            for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+                s_wake_consumed[i] |= s_button_down[i];
+                ulanzi_knob_cancel(&s_knob[i]);
+                ulanzi_play_cancel(&s_play[i]);
+                dispatch_back((d100h_input_source_t)i, ULANZI_BACK_CANCEL, evt->time_us);
+                dispatch_top_right((d100h_input_source_t)i, ULANZI_TOP_RIGHT_CANCEL, evt->time_us);
+            }
             return;
         }
     }
     if(evt->kind == KEY_EVENT_ACTIVITY) return;
+    if(evt->kind == KEY_EVENT_BACK) {
+        dispatch_back(evt->source, evt->down ? ULANZI_BACK_DOWN : ULANZI_BACK_UP, evt->time_us);
+        return;
+    }
+    if(evt->kind == KEY_EVENT_PLAY) {
+        if(ulanzi_play_update(&s_play[evt->source], evt->down) && bsp_display_lock(1000)) {
+            if(ui_screen_is_on()) {
+                ESP_LOGI(TAG, "D100H play source=%d action=play_pause", (int)evt->source);
+                ui_handle_key(UI_KEY_7);
+            }
+            bsp_display_unlock();
+        }
+        return;
+    }
     if(evt->kind == KEY_EVENT_KNOB) {
         ui_key_t key;
         if(ulanzi_knob_update(&s_knob[evt->source], evt->id, evt->down, &key) &&
@@ -456,7 +534,10 @@ static void dispatch_key_event(const key_event_t * evt)
     }
     if(evt->kind != KEY_EVENT_KEY) {
         if(evt->kind == KEY_EVENT_GESTURE_CANCEL) {
+            s_button_down[evt->source] = s_wake_consumed[evt->source] = 0;
             ulanzi_knob_cancel(&s_knob[evt->source]);
+            ulanzi_play_cancel(&s_play[evt->source]);
+            dispatch_back(evt->source, ULANZI_BACK_CANCEL, evt->time_us);
         }
         dispatch_top_right(evt->source,
             evt->kind == KEY_EVENT_GESTURE_CANCEL ? ULANZI_TOP_RIGHT_CANCEL
@@ -535,6 +616,8 @@ static void key_dispatch_task(void * arg)
                 : s_hold_start_us + (int64_t)HOLD_MS * 1000;
         }
         for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+            int64_t back_deadline = ulanzi_back_deadline(&s_back[i]);
+            if(back_deadline && (!deadline || back_deadline < deadline)) deadline = back_deadline;
             int64_t top_right_deadline = ulanzi_top_right_deadline(&s_top_right[i]);
             if(top_right_deadline && (!deadline || top_right_deadline < deadline)) {
                 deadline = top_right_deadline;
@@ -558,11 +641,12 @@ static void key_dispatch_task(void * arg)
          * a timeout if the UI was busy when that event arrived. */
         int64_t now_us = esp_timer_get_time();
         key_event_t next;
-        int64_t top_right_now = xQueuePeek(s_key_events, &next, 0) == pdTRUE
+        int64_t gesture_now = xQueuePeek(s_key_events, &next, 0) == pdTRUE
             ? next.time_us : now_us;
         for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+            dispatch_back((d100h_input_source_t)i, ULANZI_BACK_POLL, gesture_now);
             dispatch_top_right((d100h_input_source_t)i,
-                               ULANZI_TOP_RIGHT_POLL, top_right_now);
+                               ULANZI_TOP_RIGHT_POLL, gesture_now);
         }
 
         if(!s_hold_pending) continue;
@@ -616,6 +700,16 @@ static void post_gesture_event(d100h_input_source_t source, key_event_kind_t kin
     if(xQueueSend(s_key_events, &evt, 0) != pdTRUE) {
         ESP_LOGW(TAG, "D100H gesture input queue full");
     }
+}
+
+void usb_hid_input_post_back(d100h_input_source_t source, bool down)
+{
+    post_gesture_event(source, KEY_EVENT_BACK, 0x01, down);
+}
+
+void usb_hid_input_post_play(d100h_input_source_t source, bool down)
+{
+    post_gesture_event(source, KEY_EVENT_PLAY, 0x02, down);
 }
 
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down)

@@ -20,6 +20,10 @@ typedef enum {
     D100H_INPUT_COUNT,
 } d100h_input_source_t;
 
+/** Top-left: Back on release, or Screen Off after holding two seconds. */
+void usb_hid_input_post_back(d100h_input_source_t source, bool down);
+/** Top-middle: Play/Pause on release. */
+void usb_hid_input_post_play(d100h_input_source_t source, bool down);
 /** Top-right: tap for Context, hold 600 ms for Star while still pressed. */
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down);
 /** Knob click / held rotation: vendor IDs 0x07, 0x0B and 0x0C. */

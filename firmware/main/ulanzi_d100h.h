@@ -53,6 +53,34 @@ int64_t ulanzi_top_right_deadline(const ulanzi_top_right_t * state);
 ulanzi_top_right_action_t ulanzi_top_right_update(ulanzi_top_right_t * state,
     ulanzi_top_right_event_t event, int64_t now_us);
 
+/* Top-left: tap Back on release; hold two seconds to blank the screen.
+ * A fired hold remains latched until release, which emits no Back action. */
+#define ULANZI_BACK_HOLD_MS 2000
+typedef struct {
+    bool down;
+    bool fired;
+    int64_t pressed_us;
+} ulanzi_back_t;
+typedef enum {
+    ULANZI_BACK_DOWN,
+    ULANZI_BACK_UP,
+    ULANZI_BACK_POLL,
+    ULANZI_BACK_CANCEL,
+} ulanzi_back_event_t;
+typedef enum {
+    ULANZI_BACK_NONE,
+    ULANZI_BACK_TAP,
+    ULANZI_BACK_SCREEN_OFF,
+} ulanzi_back_action_t;
+int64_t ulanzi_back_deadline(const ulanzi_back_t * state);
+ulanzi_back_action_t ulanzi_back_update(ulanzi_back_t * state,
+    ulanzi_back_event_t event, int64_t now_us);
+
+/* Top-middle Play/Pause acts on release. A press alone has no action. */
+typedef struct { bool down; } ulanzi_play_t;
+bool ulanzi_play_update(ulanzi_play_t * state, bool down);
+void ulanzi_play_cancel(ulanzi_play_t * state);
+
 /* Knob press/held-turn gesture (IDs 0x07, 0x0B, 0x0C). A plain click emits
  * Enter on release; any held turn cancels that click and changes volume.
  * Normal turns (0x09/0x0A) remain stateless, coalescible navigation events. */
@@ -65,8 +93,8 @@ bool ulanzi_knob_update(ulanzi_knob_t * state, uint8_t id, bool down,
                         ui_key_t * key);
 void ulanzi_knob_cancel(ulanzi_knob_t * state);
 
-/* Returns true when this event should be forwarded to the UI. Only press /
- * rotation-step events are emitted; knob clicks use the stateful helper. */
+/* Stateless press/rotation events only. Top-row buttons and knob clicks use
+ * the stateful helpers above, including their release reports. */
 bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key);
 
 #ifdef __cplusplus

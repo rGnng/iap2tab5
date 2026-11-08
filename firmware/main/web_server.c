@@ -462,6 +462,13 @@ static esp_err_t keystate_post(httpd_req_t * req)
         httpd_resp_set_type(req, "text/plain");
         return httpd_resp_sendstr(req, "ok");
     }
+    if(strcmp(value, "back") == 0 || strcmp(value, "play") == 0) {
+        if(strcmp(value, "back") == 0)
+            usb_hid_input_post_back(D100H_INPUT_WEB, atoi(down) != 0);
+        else usb_hid_input_post_play(D100H_INPUT_WEB, atoi(down) != 0);
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "ok");
+    }
     if(strcmp(value, "knob") == 0 || strcmp(value, "knobcw") == 0 ||
        strcmp(value, "knobccw") == 0) {
         uint8_t id = strcmp(value, "knob") == 0 ? 0x07 :
@@ -480,7 +487,7 @@ static esp_err_t keystate_post(httpd_req_t * req)
     }
     else {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                   "k must be prev, next, topright, knob, knobcw, or knobccw");
+                                   "k must be back, play, prev, next, topright, knob, knobcw, or knobccw");
     }
 
     usb_hid_input_post_key_state(key, atoi(down) != 0);
