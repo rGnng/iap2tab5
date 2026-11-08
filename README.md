@@ -158,6 +158,16 @@ the background; page changes cancel obsolete work. A strong, stationary 4×4
 Bayer finish combines the theme tint and halftone texture in the cached image.
 The simulator and devices without an available PPA use a CPU scaling fallback.
 
+Now Playing displays the first received cover immediately and upgrades it when
+a larger source arrives. If a track settles for two seconds with no cover or
+only a small source, it refreshes the Now Playing subscription once. This
+recovers stale artwork responses without restarting playback. It waits for
+active artwork transfers and decoding, and rapid track changes restart the
+settling timer. Its track cache records the original dimensions, so
+a later thumbnail cannot replace a sharper saved cover, including after a
+reboot. Older caches remain readable with unknown source dimensions until a
+new image is received.
+
 ## Build and set up the Tab5
 
 The Tab5 has two processors with separate firmware and programming connections:

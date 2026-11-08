@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "artwork_quality.h"
 
 #include "esp_err.h"
 
@@ -58,6 +59,8 @@ bool iap2_host_is_connected(void);
 bool iap2_host_is_identified(void);
 bool iap2_host_is_playing(void);
 const char * iap2_host_status(void);
+/* Diagnostic resubscription; preserves track, queue and playback position. */
+esp_err_t iap2_host_refresh_now_playing(void);
 
 /* Re-send the iAP2 500 mA USB budget with battery charging enabled.
  * Requires a connected, identified device; sends no USB vendor request. */
@@ -97,10 +100,12 @@ esp_err_t iap2_host_play_current_key(void);
 
 /* Latest Now Playing artwork as 360x360 RGB565. The revision changes when a
  * new image is decoded or the current track changes (invalidating the old
- * image). Copy returns false when no artwork is available. */
+ * image). Copy leaves dst untouched when unavailable or below minimum quality.
+ * actual receives the source dimensions of the available image, or zeros. */
 #define IAP2_ARTWORK_SIZE 360
 uint32_t iap2_host_artwork_revision(void);
-bool iap2_host_artwork_copy(uint8_t * dst, size_t len);
+bool iap2_host_artwork_copy(uint8_t * dst, size_t len, artwork_quality_t minimum,
+                            artwork_quality_t * actual);
 
 #ifdef __cplusplus
 }

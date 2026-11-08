@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "artwork_quality.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,7 +106,10 @@ int player_library_track_count(void);
 /* Latest iAP2 Now Playing artwork as 360x360 RGB565. revision changes when a
  * new image arrives or the track change invalidates the previous image. */
 uint32_t player_artwork_revision(void);
-bool player_artwork_copy(uint8_t * dst, size_t len);
+/* Copy only if the original image meets minimum quality. Report the received
+ * quality even when rejecting a smaller image; leave dst untouched on failure. */
+bool player_artwork_copy(uint8_t * dst, size_t len, artwork_quality_t minimum,
+                         artwork_quality_t * actual);
 
 /* Remote AFC artwork path for an album ID (real imported library only). */
 bool player_artwork_remote(uint64_t album_id, char * out, size_t out_len);

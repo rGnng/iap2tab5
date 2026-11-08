@@ -223,7 +223,7 @@ class IAP2LinkTests(unittest.TestCase):
         (work/'link.c').write_text(harness)
         subprocess.run([cc, '-std=c11', '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
                         '-fsanitize=undefined', '-fno-sanitize-recover=all',
-                        '-I'+str(work), '-I'+str(ROOT/'firmware/main'),
+                        '-I'+str(work), '-I'+str(ROOT/'firmware/main'), '-I'+str(ROOT/'app/backend'),
                         str(work/'link.c'), '-o', str(work/'link.so')], check=True)
         cls.lib = ctypes.CDLL(str(work/'link.so'))
         cls.lib.value.argtypes = [ctypes.c_int]; cls.lib.value.restype = ctypes.c_uint64
@@ -414,6 +414,7 @@ int main(void){
         exe=work/'asan'
         subprocess.run([shutil.which('cc'),'-std=c11','-O1','-g','-fsanitize=address,undefined',
                         '-fno-sanitize-recover=all','-I'+str(work),'-I'+str(ROOT/'firmware/main'),
+                        '-I'+str(ROOT/'app/backend'),
                         str(work/'asan.c'),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True,timeout=15)
 

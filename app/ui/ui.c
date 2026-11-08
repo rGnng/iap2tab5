@@ -1510,7 +1510,7 @@ static lv_obj_t * make_cover(lv_obj_t * parent, const void * src,
  *
  * This is a Now Playing cache keyed by the iAP2 song ID (track_key), stored
  * separately from the album-artwork cache used by the library pages:
- *   <library>/np/<8-hex-hash>.cov  (8-byte ID header + RGB565 image)
+ *   <library>/np/<8-hex-hash>.cov  (8-byte ID + RGB565 + source dimensions)
  * A hash is used for the file name because the SD card is mounted with FAT
  * 8.3 names; the full track ID is verified from the file header. */
 #define NP_ART_SIZE 360
@@ -1522,6 +1522,7 @@ static lv_image_dsc_t g_iap2_cover_dsc;
 static uint32_t g_iap2_cover_rev;
 static uint64_t g_iap2_cover_track_id;
 static bool g_iap2_cover_ready;
+static artwork_quality_t g_iap2_cover_quality;
 
 static char s_np_cache_dir[160] = "/sdcard/np";
 
@@ -1554,9 +1555,23 @@ static void np_cover_dsc_init(void)
     g_iap2_cover_dsc.data = g_iap2_cover_buf;
 }
 
-static bool np_cache_load(uint64_t track_id, uint8_t * dst)
+/* Append source dimensions after the legacy ID + pixels. Old firmware can
+ * still read the picture; old cache entries remain valid with unknown quality. */
+static inline bool np_cache_write(FILE * f, uint64_t track_id, const uint8_t * pixels,
+                            artwork_quality_t quality)
 {
-#if defined(ESP_PLATFORM)
+    uint8_t trailer[8] = {'N', 'P', 'Q', '1',
+        (uint8_t)quality.width, (uint8_t)(quality.width >> 8),
+        (uint8_t)quality.height, (uint8_t)(quality.height >> 8)};
+    return fwrite(&track_id, 1, sizeof(track_id), f) == sizeof(track_id) &&
+           fwrite(pixels, 1, NP_ART_BYTES, f) == NP_ART_BYTES &&
+           fwrite(trailer, 1, sizeof(trailer), f) == sizeof(trailer);
+}
+
+static bool np_cache_load(uint64_t track_id, uint8_t * dst,
+                           artwork_quality_t * quality)
+{
+    *quality = (artwork_quality_t){0};
     if(track_id == 0 || dst == NULL) return false;
     char path[192];
     np_cache_path(track_id, path, sizeof(path), false);
@@ -1566,19 +1581,21 @@ static bool np_cache_load(uint64_t track_id, uint8_t * dst)
     bool ok = fread(&stored, 1, sizeof(stored), f) == sizeof(stored) &&
               stored == track_id &&
               fread(dst, 1, NP_ART_BYTES, f) == NP_ART_BYTES;
+    uint8_t trailer[8];
+    if(ok && fread(trailer, 1, sizeof(trailer), f) == sizeof(trailer) &&
+       memcmp(trailer, "NPQ1", 4) == 0) {
+        quality->width = (uint16_t)(trailer[4] | (trailer[5] << 8));
+        quality->height = (uint16_t)(trailer[6] | (trailer[7] << 8));
+    }
     fclose(f);
     return ok;
-#else
-    (void)track_id;
-    (void)dst;
-    return false;
-#endif
 }
 
 #if defined(ESP_PLATFORM)
 typedef struct {
     uint64_t id;
     uint8_t * data;
+    artwork_quality_t quality;
 } np_cache_job_t;
 
 static QueueHandle_t s_np_cache_queue;
@@ -1654,8 +1671,7 @@ static void np_cache_task(void * arg)
         np_cache_path(job.id, tmp, sizeof(tmp), true);
         FILE * f = fopen(tmp, "wb");
         if(f != NULL) {
-            bool ok = fwrite(&job.id, 1, sizeof(job.id), f) == sizeof(job.id) &&
-                      fwrite(job.data, 1, NP_ART_BYTES, f) == NP_ART_BYTES;
+            bool ok = np_cache_write(f, job.id, job.data, job.quality);
             fclose(f);
             if(ok) {
                 rename(tmp, path);
@@ -1687,20 +1703,26 @@ void ui_set_np_cache_dir(const char * dir)
 #endif
 }
 
-static void np_cache_save_async(uint64_t track_id, const uint8_t * src)
+static void np_cache_save_async(uint64_t track_id, const uint8_t * src,
+                                artwork_quality_t quality)
 {
 #if defined(ESP_PLATFORM)
     if(track_id == 0 || src == NULL || s_np_cache_queue == NULL) return;
     uint8_t * copy = ui_alloc_aligned(NP_ART_BYTES);
     if(copy == NULL) return;
     memcpy(copy, src, NP_ART_BYTES);
-    np_cache_job_t job = { .id = track_id, .data = copy };
+    np_cache_job_t job = { .id = track_id, .data = copy, .quality = quality };
     if(xQueueSend(s_np_cache_queue, &job, 0) != pdTRUE) {
-        free(copy);
+        /* Prioritize the latest artwork upgrade if slow SD writes fill the
+         * bounded queue. There is only one producer: the UI thread. */
+        np_cache_job_t obsolete;
+        if(xQueueReceive(s_np_cache_queue, &obsolete, 0) == pdTRUE) free(obsolete.data);
+        if(xQueueSend(s_np_cache_queue, &job, 0) != pdTRUE) free(copy);
     }
 #else
     (void)track_id;
     (void)src;
+    (void)quality;
 #endif
 }
 
@@ -1714,27 +1736,40 @@ static const lv_image_dsc_t * iap2_cover_src(uint64_t track_id)
         g_iap2_cover_track_id = track_id;
         g_iap2_cover_rev = 0xffffffffu;
         g_iap2_cover_ready = false;
+        g_iap2_cover_quality = (artwork_quality_t){0};
         if(track_id != 0 && g_iap2_cover_buf != NULL &&
-           np_cache_load(track_id, g_iap2_cover_buf)) {
+           np_cache_load(track_id, g_iap2_cover_buf, &g_iap2_cover_quality)) {
             g_iap2_cover_ready = true;
+            lv_image_cache_drop(&g_iap2_cover_dsc);
             np_cover_dsc_init();
-            UI_PERF_LOG("np_art track=%016llx source=cache",
-                        (unsigned long long)track_id);
+            UI_PERF_LOG("np_art track=%016llx source=cache original=%ux%u",
+                        (unsigned long long)track_id,
+                        g_iap2_cover_quality.width, g_iap2_cover_quality.height);
         }
     }
 
     uint32_t rev = player_artwork_revision();
     if(rev != g_iap2_cover_rev) {
         g_iap2_cover_rev = rev;
+        artwork_quality_t received = {0};
         if(g_iap2_cover_buf != NULL &&
-           player_artwork_copy(g_iap2_cover_buf, NP_ART_BYTES)) {
+           player_artwork_copy(g_iap2_cover_buf, NP_ART_BYTES,
+                                g_iap2_cover_quality, &received)) {
             g_iap2_cover_ready = true;
+            g_iap2_cover_quality = received;
+            lv_image_cache_drop(&g_iap2_cover_dsc);
             np_cover_dsc_init();
-            UI_PERF_LOG("np_art track=%016llx source=iap2",
-                        (unsigned long long)track_id);
+            UI_PERF_LOG("np_art track=%016llx source=iap2 original=%ux%u",
+                        (unsigned long long)track_id, received.width, received.height);
             if(track_id != 0) {
-                np_cache_save_async(track_id, g_iap2_cover_buf);
+                np_cache_save_async(track_id, g_iap2_cover_buf, received);
             }
+        }
+        else if(g_iap2_cover_ready && artwork_quality_rank(received) != 0) {
+            UI_PERF_LOG("np_art track=%016llx retained=%ux%u rejected=%ux%u",
+                        (unsigned long long)track_id,
+                        g_iap2_cover_quality.width, g_iap2_cover_quality.height,
+                        received.width, received.height);
         }
     }
     return g_iap2_cover_ready ? &g_iap2_cover_dsc : NULL;

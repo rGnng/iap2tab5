@@ -14,12 +14,14 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "esp_timer.h"
+#include "driver/jpeg_decode.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "app_config.h"
 #include "iap2_auth.h"
 #include "lockdown_client.h"
 #include "player.h"
+#include "artwork_refresh.h"
 #include "usb/usb_helpers.h"
 #include "usb/usb_host.h"
 
@@ -223,6 +225,11 @@ static char s_art_pending_artist[128];
 static uint64_t s_art_pending_key;
 static uint8_t * s_art_cover;
 static bool s_art_valid;
+static artwork_quality_t s_art_quality;
+static artwork_refresh_t s_art_refresh;
+static artwork_refresh_snapshot_t s_art_refresh_snapshot;
+static bool s_art_decoding;
+static atomic_bool s_art_transferring;
 static uint32_t s_art_rev;
 static char s_art_cached_album[128];
 static char s_art_cached_artist[128];
@@ -1113,6 +1120,22 @@ static void send_now_playing_request(void)
     csm_send(0x5000, &b);
 }
 
+esp_err_t iap2_host_refresh_now_playing(void)
+{
+    if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    artwork_refresh_snapshot_begin(&s_art_refresh_snapshot, (uint32_t)(esp_timer_get_time() / 1000));
+    xSemaphoreGive(s_state_lock);
+    /* Stop before resubscribing, rather than duplicating an active request.
+     * Both messages use the normal ordered control-session queue. */
+    uint8_t dummy = 0;
+    pb_t empty = { &dummy, 0, 1 };
+    csm_send(0x5002, &empty);
+    send_now_playing_request();
+    ESP_LOGI(TAG, "Now Playing refresh requested (playback unchanged)");
+    return ESP_OK;
+}
+
 static void send_library_request(void)
 {
     uint8_t dummy = 0;
@@ -1270,6 +1293,7 @@ static void parse_now_playing(const uint8_t * body, size_t len)
     size_t value_len = 0;
 
     uint64_t track_key = s_track_key;
+    bool identity_received = false;
     while(next_param(&p, end, &pid, &value, &value_len)) {
         if(pid == 0) {
             const uint8_t * q = value;
@@ -1283,10 +1307,12 @@ static void parse_now_playing(const uint8_t * body, size_t len)
                     for(size_t i = 0; i < 8; i++) {
                         track_key = (track_key << 8) | cv[i];
                     }
+                    if(track_key) identity_received = true;
                 }
                 else if(cid == 1) {
                     snprintf(title, sizeof(title), "%.*s", (int)cvlen,
                              (const char *)cv);
+                    if(title[0]) identity_received = true;
                 }
                 else if(cid == 6) {
                     snprintf(album, sizeof(album), "%.*s", (int)cvlen,
@@ -1329,6 +1355,12 @@ static void parse_now_playing(const uint8_t * body, size_t len)
             }
         }
     }
+
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    bool hold_empty = artwork_refresh_snapshot_hold(&s_art_refresh_snapshot,
+        (uint32_t)(esp_timer_get_time() / 1000), !track_key && !title[0], identity_received);
+    xSemaphoreGive(s_state_lock);
+    if(hold_empty) return;
 
     if(album[0] != '\0' && !artwork_album_matches(album)) {
         /* The cached cover belongs to another album. Show the placeholder
@@ -1682,6 +1714,7 @@ static ft_transfer_t * ft_find(uint8_t id)
 static void ft_release(ft_transfer_t * t)
 {
     if(t == NULL) return;
+    if(t->type == 2) atomic_store(&s_art_transferring, false);
     free(t->data);
     memset(t, 0, sizeof(*t));
 }
@@ -1834,7 +1867,8 @@ static void ft_feed(const uint8_t * payload, size_t len)
         uint16_t type = dlen >= 10
                             ? (uint16_t)((data[8] << 8) | data[9]) : 0;
         if(type == 2) {
-            ESP_LOGI(TAG, "artwork setup: %u bytes", (unsigned)expected);
+            ESP_LOGI(TAG, "artwork setup: %u bytes id=%u", (unsigned)expected, id);
+            atomic_store(&s_art_transferring, expected != 0 && expected <= FT_MAX_ARTWORK);
         }
         if(expected > FT_MAX_ARTWORK) {
             ft_release(t);
@@ -2021,6 +2055,7 @@ static void artwork_clear_cover(void)
     if(s_art_lock == NULL) return;
     xSemaphoreTake(s_art_lock, portMAX_DELAY);
     s_art_valid = false;
+    s_art_quality = (artwork_quality_t){0};
     s_art_rev++;
     s_art_cached_album[0] = '\0';
     s_art_cached_artist[0] = '\0';
@@ -2034,6 +2069,13 @@ static void artwork_invalidate(void)
      * It is shown again when the same album reconnects; parse_now_playing()
      * clears it if the device reports a different album. */
     ft_clear_all();
+    atomic_store(&s_art_transferring, false);
+    if(s_state_lock) {
+        xSemaphoreTake(s_state_lock, portMAX_DELAY);
+        s_art_refresh = (artwork_refresh_t){0};
+        s_art_refresh_snapshot = (artwork_refresh_snapshot_t){0};
+        xSemaphoreGive(s_state_lock);
+    }
 }
 
 static void artwork_decode_task(void * arg)
@@ -2059,9 +2101,16 @@ static void artwork_decode_task(void * arg)
         s_art_pending_album[0] = '\0';
         s_art_pending_artist[0] = '\0';
         s_art_pending_key = 0;
+        s_art_decoding = data != NULL;
         xSemaphoreGive(s_art_lock);
 
         if(data == NULL) continue;
+        jpeg_decode_picture_info_t info = {0};
+        artwork_quality_t quality = {0};
+        if(jpeg_decoder_get_info(data, (uint32_t)len, &info) == ESP_OK) {
+            quality.width = info.width;
+            quality.height = info.height;
+        }
         cover = heap_caps_malloc(ART_BYTES, MALLOC_CAP_SPIRAM);
         bool ok = cover != NULL &&
                   lockdown_client_decode_cover_mem(data, len, cover);
@@ -2072,6 +2121,8 @@ static void artwork_decode_task(void * arg)
             free(s_art_cover);
             s_art_cover = cover;
             s_art_valid = true;
+            s_art_quality = quality;
+            s_art_decoding = false;
             s_art_rev++;
             snprintf(s_art_cached_album, sizeof(s_art_cached_album), "%s",
                      album);
@@ -2079,10 +2130,15 @@ static void artwork_decode_task(void * arg)
                      artist);
             s_art_cached_key = key;
             xSemaphoreGive(s_art_lock);
-            ESP_LOGI(TAG, "artwork decoded (%u bytes)", (unsigned)len);
+            ESP_LOGI(TAG, "artwork decoded (%u bytes, source=%ux%u, key=%016llx)",
+                     (unsigned)len, quality.width, quality.height,
+                     (unsigned long long)key);
         }
         else {
             free(cover);
+            xSemaphoreTake(s_art_lock, portMAX_DELAY);
+            s_art_decoding = false;
+            xSemaphoreGive(s_art_lock);
             ESP_LOGW(TAG, "artwork decode failed (%u bytes)", (unsigned)len);
         }
     }
@@ -2097,11 +2153,17 @@ uint32_t iap2_host_artwork_revision(void)
     return rev;
 }
 
-bool iap2_host_artwork_copy(uint8_t * dst, size_t len)
+bool iap2_host_artwork_copy(uint8_t * dst, size_t len, artwork_quality_t minimum,
+                            artwork_quality_t * actual)
 {
+    if(actual) *actual = (artwork_quality_t){0};
     if(dst == NULL || len < ART_BYTES || s_art_lock == NULL) return false;
     xSemaphoreTake(s_art_lock, portMAX_DELAY);
     bool ok = s_art_valid && s_art_cover != NULL;
+    if(ok && actual) *actual = s_art_quality;
+    /* Decide and copy under the same lock: an arriving thumbnail must never
+     * overwrite the UI's sharper pixels between a quality check and a copy. */
+    ok = ok && artwork_quality_at_least(s_art_quality, minimum);
     if(ok) memcpy(dst, s_art_cover, ART_BYTES);
     xSemaphoreGive(s_art_lock);
     return ok;
@@ -2382,6 +2444,44 @@ static void client_task(void * arg)
     }
 }
 
+static void artwork_refresh_poll(void)
+{
+    if(!s_identified || !s_state_lock || !s_art_lock) return;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    static uint32_t last_poll_ms;
+    if((uint32_t)(now_ms - last_poll_ms) < 100u) return;
+    last_poll_ms = now_ms;
+    /* This runs beside USB packet handling. Never wait for the UI's large
+     * artwork copy or metadata readers; try again on the next poll instead. */
+    if(xSemaphoreTake(s_state_lock, 0) != pdTRUE) return;
+    if(artwork_refresh_snapshot_expire(&s_art_refresh_snapshot, now_ms)) {
+        /* If no real identity followed the empty response, let the genuine
+         * stopped/no-track state through after the bounded grace period. */
+        s_title[0] = s_artist[0] = s_album[0] = '\0';
+        s_track_key = 0;
+        s_play_status = 0;
+        s_playing = false;
+        s_elapsed_ms = s_duration_ms = 0;
+        s_revision++;
+    }
+    uint64_t key = s_track_key;
+    if(!key || (s_art_refresh.track == key && s_art_refresh.checked) ||
+       xSemaphoreTake(s_art_lock, 0) != pdTRUE) {
+        xSemaphoreGive(s_state_lock);
+        return;
+    }
+    unsigned quality = s_art_valid ? artwork_quality_rank(s_art_quality) : 0;
+    bool busy = s_art_decoding || s_art_pending != NULL || atomic_load(&s_art_transferring);
+    bool refresh = artwork_refresh_needed(&s_art_refresh, key, now_ms, busy, quality);
+    xSemaphoreGive(s_art_lock);
+    xSemaphoreGive(s_state_lock);
+    if(refresh) {
+        ESP_LOGI(TAG, "artwork recovery: key=%016llx source_edge=%u; refreshing once",
+                 (unsigned long long)key, quality);
+        iap2_host_refresh_now_playing();
+    }
+}
+
 static void iap2_task(void * arg)
 {
     (void)arg;
@@ -2446,6 +2546,7 @@ static void iap2_task(void * arg)
 
         process_rx();
         tx_pump();
+        artwork_refresh_poll();
         /* USB completion / outgoing work wakes us immediately. Yield at
          * least once per eight turns even during a continuous sync burst. */
         if(++work_turns >= 8) { work_turns = 0; vTaskDelay(1); }

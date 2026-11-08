@@ -295,6 +295,16 @@ static esp_err_t key_post(httpd_req_t * req)
     }
     url_decode_inplace(value);
 
+    if(strcmp(value, "nprefresh") == 0) {
+        esp_err_t err = iap2_host_refresh_now_playing();
+        if(err != ESP_OK) {
+            httpd_resp_set_status(req, "409 Conflict");
+            return httpd_resp_sendstr(req, "iPod not identified");
+        }
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, "Now Playing refresh requested");
+    }
+
     /* Expose the existing UI diagnostics for remote scrolling/perf checks. */
     if(strcmp(value, "scroll") == 0 || strcmp(value, "trace") == 0) {
         char argument[16] = "0";

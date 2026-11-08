@@ -5,7 +5,8 @@
 static void test_snapshot(player_snapshot_t *out);
 static uint32_t test_queue_revision(void);
 static uint32_t test_artwork_revision(void);
-static bool test_artwork_copy(uint8_t *dst, size_t size);
+static bool test_artwork_copy(uint8_t *dst, size_t size, artwork_quality_t minimum,
+                              artwork_quality_t *actual);
 static bool test_song_get(int index, player_track_t *out);
 static bool test_artist_song_get(uint64_t id, int index, player_track_t *out);
 #define player_get_snapshot test_snapshot
@@ -21,10 +22,12 @@ static bool test_artist_song_get(uint64_t id, int index, player_track_t *out);
 #undef player_artwork_copy
 #undef player_song_get
 #undef player_artist_song_get
+#include <unistd.h>
 
 static player_snapshot_t injected;
 static bool inject, art_ready;
 static unsigned art_variant;
+static artwork_quality_t art_quality={360,360};
 static uint32_t queue_rev, art_rev;
 static unsigned renders, deleted, copies;
 static unsigned global_song_reads, member_song_reads;
@@ -36,9 +39,12 @@ static uint32_t test_queue_revision(void)
 { return player_queue_revision()+queue_rev; }
 static uint32_t test_artwork_revision(void)
 { return art_rev; }
-static bool test_artwork_copy(uint8_t *dst, size_t size)
+static bool test_artwork_copy(uint8_t *dst, size_t size, artwork_quality_t minimum,
+                              artwork_quality_t *actual)
 {
     copies++;
+    *actual=art_ready?art_quality:(artwork_quality_t){0};
+    if(!artwork_quality_at_least(*actual,minimum)) return false;
     if(art_ready) {
         uint16_t *pixels=(uint16_t *)dst;
         const uint16_t colors[]={0xf800,0x001f,0x07e0,0xf81f};
@@ -123,6 +129,54 @@ static void gradient_lifecycle(void)
     check(np_gradient_key && !lv_obj_is_hidden(np_gradient_backdrop),
           "PNG/demo covers must still support gradients through the shared pipeline");
     settings_np_bg_action((void *)(intptr_t)NP_BG_THEME); ui_rebuild_page(); pump(100);
+}
+
+static void artwork_upgrades(void)
+{
+    injected.track.id+=200000; art_ready=true; art_quality=(artwork_quality_t){120,120};
+    art_rev++; np_tick(); pump(200);
+    check(g_iap2_cover_quality.width==120,"A thumbnail must display immediately when it is all we have");
+    uint16_t before=((uint16_t *)g_iap2_cover_buf)[0];
+    art_quality=(artwork_quality_t){600,600}; art_variant++; art_rev++; np_tick(); pump(200);
+    check(g_iap2_cover_quality.width==600 && ((uint16_t *)g_iap2_cover_buf)[0]!=before,
+          "A later larger source must upgrade the foreground cover without a track change");
+    before=((uint16_t *)g_iap2_cover_buf)[0];
+    art_quality=(artwork_quality_t){120,120}; art_variant++; art_rev++; np_tick(); pump(200);
+    check(g_iap2_cover_quality.width==600 && ((uint16_t *)g_iap2_cover_buf)[0]==before,
+          "A later thumbnail must not overwrite a sharper cover");
+
+    char directory[]="/tmp/iap2tab5-artwork-XXXXXX";
+    check(mkdtemp(directory)!=NULL,"Create isolated artwork cache");
+    ui_set_np_cache_dir(directory);
+    uint64_t id=injected.track.id+1;
+    char path[192]; np_cache_path(id,path,sizeof(path),false);
+    FILE *f=fopen(path,"wb"); check(f!=NULL,"Open cache file");
+    check(np_cache_write(f,id,g_iap2_cover_buf,g_iap2_cover_quality),"Persist pixels and source quality");
+    fclose(f);
+    uint8_t *loaded=malloc(NP_ART_BYTES); check(loaded!=NULL,"Allocate cache test buffer");
+    artwork_quality_t quality;
+    check(np_cache_load(id,loaded,&quality) && quality.width==600 && quality.height==600 &&
+          !memcmp(loaded,g_iap2_cover_buf,NP_ART_BYTES),"Source resolution must survive cache roundtrip");
+    injected.track.id=id; art_rev++; np_tick(); pump(200);
+    check(g_iap2_cover_quality.width==600 && !memcmp(loaded,g_iap2_cover_buf,NP_ART_BYTES),
+          "Revisiting a cached track must retain its sharper cover over a live thumbnail");
+    g_iap2_cover_track_id=0; g_iap2_cover_ready=false;
+    g_iap2_cover_quality=(artwork_quality_t){0};
+    check(iap2_cover_src(id)!=NULL && g_iap2_cover_quality.width==600,
+          "A cache restored after memory reset must still reject smaller artwork");
+
+    f=fopen(path,"wb"); check(f!=NULL,"Open legacy cache file");
+    fwrite(&id,1,sizeof(id),f); fwrite(loaded,1,NP_ART_BYTES,f); fclose(f);
+    check(np_cache_load(id,loaded,&quality) && quality.width==0 && quality.height==0,
+          "Legacy caches without source dimensions must remain readable");
+    f=fopen(path,"wb"); check(f!=NULL,"Open truncated cache file");
+    fwrite(&id,1,sizeof(id),f); fwrite(loaded,1,NP_ART_BYTES-1,f); fclose(f);
+    check(!np_cache_load(id,loaded,&quality),"Incomplete image caches must not be displayed");
+    f=fopen(path,"wb"); check(f!=NULL,"Open mismatched cache file");
+    check(np_cache_write(f,id+1,loaded,(artwork_quality_t){600,600}),"Write mismatched ID"); fclose(f);
+    check(!np_cache_load(id,loaded,&quality),"A different track's cache must not pass the ID check");
+    free(loaded); unlink(path); rmdir(directory); ui_set_np_cache_dir("/sdcard/np");
+    art_quality=(artwork_quality_t){360,360};
 }
 
 static void artist_membership(void)
@@ -245,6 +299,7 @@ int main(int argc, char **argv)
     check(deleted==old_deleted+1,"Visible queue changes must refresh queue rows");
     np_toggle_queue(); pump(600);
     text(np_album,"Queue album"); text(np_star_icon,ICON_STAR_FILL);
+    artwork_upgrades();
     gradient_lifecycle();
     artist_membership();
     puts("PASS: selective updates, delayed metadata/artwork, progress and queue visibility");

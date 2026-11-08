@@ -298,11 +298,27 @@ separate approach and has not been implemented or tested here.
 Now Playing artwork comes from the iAP2 File Transfer session (type 2). The
 receiver keeps one buffer per transfer ID, so the queue file (type 3) and the
 artwork (type 2) can be interleaved; it sends Start on Setup and Success on
-LastData. The artwork is decoded to a 360x360 RGB565 buffer and the UI keeps
-the previous cover across track changes until a new image or a zero-length
-type 2 Setup arrives. The decoded 360x360 cover is cached per library
-(`np.raw` + `np.txt`) and reloaded at boot; an album change or a zero-length
-type 2 Setup drops it.
+LastData. Artwork is decoded to 360x360 RGB565. The UI caches each track under
+`<library>/np/<track-hash>.cov`, verifies its 64-bit track ID, and records the
+original JPEG dimensions in a backward-compatible trailer. A smaller source
+cannot replace a sharper cached cover; older entries without dimensions remain
+readable and acquire quality metadata when a new image arrives.
+
+The 2026-11-08 hardware test reproduced an empty artwork response that remained
+empty after library sync completed. Stopping and restarting Now Playing updates
+returned the same 157,468-byte, 600x600 JPEG in all three trials, with the same
+song paused at 3,474 ms and the USB budget fixed at 500 mA. Earlier captures also
+showed the same track changing from 120x120 to 600x600 and back to 120x120.
+These results isolate the varying source images from the gradient renderer;
+the device's internal reason for its initial response is not known.
+
+The firmware now makes one recovery request after a track settles for two
+seconds with no image or an original shorter edge below 360 pixels. It defers
+while a transfer or decode is active, and never repeats the attempt for the
+same stable track. Polling uses nonblocking locks so USB packet handling does
+not wait for UI artwork copies. The iPod's brief empty metadata response during
+resubscription is held for at most one second to avoid a blank title/cover flash.
+Debug `POST /api/key?k=nprefresh` requests the same recovery manually.
 
 Observed UI snapshot after the integration:
 

@@ -1407,10 +1407,14 @@ uint32_t player_artwork_revision(void)
     return 0;
 }
 
-bool player_artwork_copy(uint8_t * dst, size_t len)
+bool player_artwork_copy(uint8_t * dst, size_t len, artwork_quality_t minimum,
+                         artwork_quality_t * actual)
 {
+    if(actual) *actual = (artwork_quality_t){0};
 #if defined(ESP_PLATFORM)
-    if(iap2_host_is_enabled()) return iap2_host_artwork_copy(dst, len);
+    if(iap2_host_is_enabled()) return iap2_host_artwork_copy(dst, len, minimum, actual);
+#else
+    (void)dst; (void)len; (void)minimum;
 #endif
     return false;
 }
