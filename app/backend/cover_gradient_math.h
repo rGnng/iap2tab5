@@ -25,6 +25,12 @@ bool cover_gradient_palette(const cover_gradient_sample_t samples[COVER_GRADIENT
 void cover_gradient_render(const cover_gradient_color_t palette[COVER_GRADIENT_COLORS],
                            uint8_t * pixels, unsigned width, unsigned height, size_t stride,
                            uint32_t theme_tint);
+/* Stable UTF-8 album identity, independent of playback position or track ID. */
+uint32_t cover_gradient_album_hash(const char * album);
+/* Broad, normalized color wash with album-seeded hue placement. */
+void cover_gradient_render_wash(const cover_gradient_color_t palette[COVER_GRADIENT_COLORS],
+                                uint8_t * pixels, unsigned width, unsigned height, size_t stride,
+                                uint32_t theme_tint, uint32_t album_seed);
 void cover_gradient_scale_cpu(const uint8_t * input, unsigned width, unsigned height,
                               size_t stride, uint8_t * output,
                               unsigned out_width, unsigned out_height);

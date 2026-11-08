@@ -98,12 +98,12 @@ static esp_err_t apply_mode(int mode)
         return err;
     }
 
-    char ssid[64] = {0};
-    char password[64] = {0};
+    char ssid[33] = {0};
+    char password[65] = {0};
     err = app_config_read_wifi_credentials(ssid, sizeof(ssid),
                                            password, sizeof(password));
     if(err != ESP_OK || ssid[0] == '\0') {
-        ESP_LOGW(TAG, "no usable /sdcard/wifi.txt; starting open AP fallback");
+        ESP_LOGW(TAG, "no usable SD or NVS Wi-Fi credentials; starting open AP fallback");
         return apply_mode(1);
     }
 

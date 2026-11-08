@@ -917,17 +917,52 @@ bool app_config_sd_ensure(void)
     return false;
 }
 
-esp_err_t app_config_read_wifi_credentials(char * ssid, size_t ssid_len,
-                                           char * password, size_t password_len)
+typedef struct {
+    char ssid[33];
+    char password[65];
+} wifi_credentials_t;
+
+static esp_err_t wifi_credentials_load_nvs(wifi_credentials_t * credentials)
 {
-    if(ssid == NULL || ssid_len == 0) return ESP_ERR_INVALID_ARG;
-    ssid[0] = '\0';
-    if(password != NULL && password_len > 0) password[0] = '\0';
-    if(!s_sd_ready) return ESP_ERR_INVALID_STATE;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("wifi_backup", NVS_READONLY, &handle);
+    if(err != ESP_OK) return err;
+    size_t size = sizeof(*credentials);
+    err = nvs_get_blob(handle, "station", credentials, &size);
+    nvs_close(handle);
+    if(err == ESP_OK && (size != sizeof(*credentials) || !credentials->ssid[0] ||
+       !memchr(credentials->ssid, '\0', sizeof(credentials->ssid)) ||
+       !memchr(credentials->password, '\0', sizeof(credentials->password)))) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return err;
+}
+
+static void wifi_credentials_save_nvs(const wifi_credentials_t * credentials)
+{
+    wifi_credentials_t saved;
+    if(wifi_credentials_load_nvs(&saved) == ESP_OK &&
+       memcmp(&saved, credentials, sizeof(saved)) == 0) return;
+
+    /* One blob keeps the SSID/password pair together. Skip unchanged values
+     * above to avoid a flash write on every boot or Wi-Fi mode switch. */
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("wifi_backup", NVS_READWRITE, &handle);
+    if(err == ESP_OK) {
+        err = nvs_set_blob(handle, "station", credentials, sizeof(*credentials));
+        if(err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if(err == ESP_OK) ESP_LOGI(TAG, "Wi-Fi credentials backed up to NVS");
+    else ESP_LOGW(TAG, "Wi-Fi NVS backup failed: %s", esp_err_to_name(err));
+}
+
+static esp_err_t wifi_credentials_read_sd(wifi_credentials_t * credentials)
+{
+    if(!app_config_sd_ready()) return ESP_ERR_INVALID_STATE;
 
     FILE * f = fopen(APP_WIFI_CRED_PATH, "rb");
     if(f == NULL) {
-        ESP_LOGW(TAG, "%s not found", APP_WIFI_CRED_PATH);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -940,16 +975,44 @@ esp_err_t app_config_read_wifi_credentials(char * ssid, size_t ssid_len,
             line[--n] = '\0';
         }
         if(n == 0) continue;
-        if(field == 0) {
-            snprintf(ssid, ssid_len, "%s", line);
+        char * dest = field == 0 ? credentials->ssid : credentials->password;
+        size_t capacity = field == 0 ? sizeof(credentials->ssid) : sizeof(credentials->password);
+        if(n >= capacity) {
+            fclose(f);
+            return ESP_ERR_INVALID_SIZE;
         }
-        else if(password != NULL && password_len > 0) {
-            snprintf(password, password_len, "%s", line);
-        }
+        memcpy(dest, line, n + 1);
         field++;
     }
-    fclose(f);
+    bool failed = ferror(f) != 0;
+    if(fclose(f) != 0) failed = true;
+    if(failed) return ESP_FAIL;
 
     if(field == 0) return ESP_ERR_INVALID_STATE;
+    return ESP_OK;
+}
+
+esp_err_t app_config_read_wifi_credentials(char * ssid, size_t ssid_len,
+                                           char * password, size_t password_len)
+{
+    if(ssid == NULL || ssid_len == 0) return ESP_ERR_INVALID_ARG;
+    ssid[0] = '\0';
+    if(password != NULL && password_len > 0) password[0] = '\0';
+    wifi_credentials_t credentials = {0};
+    esp_err_t err = wifi_credentials_read_sd(&credentials);
+    if(err == ESP_OK) {
+        /* wifi.txt is authoritative: a valid SD file replaces the NVS copy,
+         * even if the caller requests only a shortened SSID or no password. */
+        wifi_credentials_save_nvs(&credentials);
+    }
+    else {
+        err = wifi_credentials_load_nvs(&credentials);
+        if(err != ESP_OK) return err;
+        ESP_LOGW(TAG, "SD Wi-Fi credentials unavailable; using NVS backup");
+    }
+    snprintf(ssid, ssid_len, "%s", credentials.ssid);
+    if(password != NULL && password_len > 0) {
+        snprintf(password, password_len, "%s", credentials.password);
+    }
     return ESP_OK;
 }

@@ -211,8 +211,10 @@ my-password
 ```
 
 First non-empty line is the SSID, second is the password (empty/absent for an
-open network). If the file is missing while `wifi_mode` is station, firmware
-starts the open AP fallback so the web UI remains reachable.
+open network). Valid SD credentials replace the NVS backup; unchanged values
+do not write flash. If the file cannot be read, including when the SD card
+fails to mount, station mode uses the NVS backup. With no usable credentials
+in either location, firmware starts the open AP fallback.
 
 ## Web UI and OTA
 

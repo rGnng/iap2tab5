@@ -2,6 +2,7 @@
 import ctypes as C
 from pathlib import Path
 import random
+import statistics
 import shutil
 import subprocess
 import tempfile
@@ -45,10 +46,13 @@ class CoverGradientTests(unittest.TestCase):
         cls.lib.cover_gradient_palette.argtypes = [C.POINTER(Sample), C.POINTER(Color)]
         cls.lib.cover_gradient_palette.restype = C.c_bool
         cls.lib.cover_gradient_render.argtypes = [C.POINTER(Color), C.c_void_p, C.c_uint, C.c_uint, C.c_size_t, C.c_uint32]
+        cls.lib.cover_gradient_render_wash.argtypes = cls.lib.cover_gradient_render.argtypes + [C.c_uint32]
+        cls.lib.cover_gradient_album_hash.argtypes = [C.c_char_p]
+        cls.lib.cover_gradient_album_hash.restype = C.c_uint32
         cls.lib.cover_gradient_scale_cpu.argtypes = [C.c_void_p, C.c_uint, C.c_uint, C.c_size_t,
                                                     C.c_void_p, C.c_uint, C.c_uint]
         cls.lib.cover_gradient_request.argtypes = [C.c_void_p, C.c_size_t, C.c_uint, C.c_uint,
-                                                  C.c_size_t, C.c_int, C.c_uint32, C.c_uint8]
+                                                  C.c_size_t, C.c_int, C.c_uint32, C.c_uint8, C.c_int, C.c_uint32]
         cls.lib.cover_gradient_request.restype = C.c_uint64
         cls.lib.cover_gradient_poll.argtypes = [C.c_uint64, C.POINTER(C.POINTER(C.c_uint16))]
         cls.lib.cover_gradient_finish.argtypes = [C.c_void_p, C.c_uint, C.c_uint,
@@ -124,6 +128,70 @@ class CoverGradientTests(unittest.TestCase):
         self.lib.cover_gradient_render(palette,pixels,width,height,width*3,tint)
         return pixels
 
+    def wash(self, colors, album, width=320, height=180, tint=0):
+        palette = (Color*3)(*(Color(*p) for p in colors))
+        pixels = (C.c_uint8*(width*height*3))()
+        seed = self.lib.cover_gradient_album_hash(album.encode('utf8'))
+        self.lib.cover_gradient_render_wash(palette,pixels,width,height,width*3,tint,seed)
+        return pixels
+
+    def test_album_hash_is_stable_for_utf8_names_and_empty_metadata(self):
+        for album in ('','Album','Another album','深海より愛を込めて'):
+            expected = 2166136261
+            for byte in album.encode('utf8'):expected = ((expected^byte)*16777619)&0xffffffff
+            self.assertEqual(self.lib.cover_gradient_album_hash(album.encode('utf8')),expected)
+        self.assertEqual(self.lib.cover_gradient_album_hash(None),2166136261)
+
+    def test_album_wash_spreads_the_main_color_without_brightness_hotspots(self):
+        colors = [(230,80,25),(200,35,160),(20,120,220)]
+        old = self.render(colors)
+        old_luma = [(29*old[i]+150*old[i+1]+77*old[i+2])/256 for i in range(0,len(old),3)]
+        for album in ('Album','Another album','深海より愛を込めて'):
+            pixels = self.wash(colors,album)
+            luma = [(29*pixels[i]+150*pixels[i+1]+77*pixels[i+2])/256 for i in range(0,len(pixels),3)]
+            self.assertLess(statistics.mean(luma),statistics.mean(old_luma))
+            self.assertLess(statistics.pstdev(luma),1.5)
+            self.assertLess(max(luma)-min(luma),4)
+            rgb = list(zip(pixels[0::3],pixels[1::3],pixels[2::3]))
+            warm = sum(r>g and r>b for b,g,r in rgb)/len(rgb)
+            cool = sum(b>g and b>r for b,g,r in rgb)/len(rgb)
+            self.assertGreater(warm,0.5)  # Main hue remains the broad base.
+            self.assertGreater(cool,0.15)  # Accents must remain visibly distinct.
+            self.assertGreater(max(pixels[0::3])-min(pixels[0::3]),30)
+            self.assertGreater(max(pixels[2::3])-min(pixels[2::3]),30)
+            light = self.wash(colors,album,tint=0xf4f7fb)
+            light_luma = [(29*light[i]+150*light[i+1]+77*light[i+2])/256 for i in range(0,len(light),3)]
+            self.assertGreater(min(light_luma),218)
+            self.assertLess(max(light_luma),224)
+
+    def test_album_wash_placement_is_deterministic_and_neutral_art_stays_neutral(self):
+        colors = [(210,85,20),(180,30,190),(20,140,220)]
+        a = bytes(self.wash(colors,'Album'))
+        self.assertEqual(a,bytes(self.wash(colors,'Album')))
+        self.assertNotEqual(a,bytes(self.wash(colors,'Another album')))
+        neutral = self.wash([(100,100,100)]*3,'Album')
+        self.assertTrue(all(neutral[i]==neutral[i+1]==neutral[i+2] for i in range(0,len(neutral),3)))
+
+    def test_style_and_album_seed_are_part_of_wash_cache_identity(self):
+        image = (C.c_uint16*SAMPLES)(*([0xf800]*600+[0x001f]*300+[0x07e0]*124))
+        def request(style,album):
+            seed = self.lib.cover_gradient_album_hash(album.encode('utf8'))
+            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,0,153,style,seed)
+        def poll(key):
+            pixels = C.POINTER(C.c_uint16)()
+            self.assertEqual(self.lib.cover_gradient_poll(key,C.byref(pixels)),1)
+            return C.string_at(pixels,1280*720*2)
+        lights = request(0,'Album');original = poll(lights)
+        self.assertEqual(request(0,'Another album'),lights)
+        self.assertEqual(poll(lights),original)
+        wash = request(1,'Album');washed = poll(wash)
+        self.assertNotEqual(wash,lights)
+        self.assertEqual(request(1,'Album'),wash)
+        self.assertEqual(poll(wash),washed)
+        other = request(1,'Another album')
+        self.assertNotEqual(other,wash)
+        self.assertNotEqual(poll(other),washed)
+
     def test_color_lights_keep_text_regions_readable_in_dark_and_light_themes(self):
         colors = [(230,80,25), (200,35,160), (20,120,220)]
         for tint,light in ((0,False),(0xf4f7fb,True),(0xc0c0c0,True)):
@@ -160,7 +228,7 @@ class CoverGradientTests(unittest.TestCase):
     def test_result_cache_supersession_and_displayed_buffer_ownership(self):
         def request(pixel):
             image = (C.c_uint16*SAMPLES)(*([pixel]*SAMPLES))
-            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,0,0)
+            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,0,0,0,0)
         def poll(key):
             pixels = C.POINTER(C.c_uint16)()
             state = self.lib.cover_gradient_poll(key,C.byref(pixels))
@@ -238,7 +306,7 @@ class CoverGradientTests(unittest.TestCase):
     def test_theme_tint_is_in_cache_identity_and_not_reapplied(self):
         image = (C.c_uint16*SAMPLES)(*([0xf800]*SAMPLES))
         def request(tint,alpha):
-            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,tint,alpha)
+            return self.lib.cover_gradient_request(image,C.sizeof(image),32,32,64,0,tint,alpha,0,0)
         def poll(key):
             pixels = C.POINTER(C.c_uint16)()
             self.assertEqual(self.lib.cover_gradient_poll(key,C.byref(pixels)),1)

@@ -89,7 +89,7 @@ typedef struct {
     int sort_desc;
     int menubar_left;
     int touch_enabled;
-    int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
+    int np_bg_mode;        /* 0 = theme, 1 = legacy blur, 2 = cover gradient, 3 = album wash */
     int screen_off_minutes; /* 0 = Off (disabled), 30, 60 */
     int brightness;        /* 1..100; a requested 0 falls back to 5 */
     int usb_mode;          /* 0 = USB-A HS, 2 = USB-A HS + USB-C FS */

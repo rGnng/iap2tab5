@@ -3055,15 +3055,21 @@ static uint32_t np_last_queue_rev;
 static player_snapshot_t np_rendered_snapshot;
 static bool np_rendered_valid;
 static lv_obj_t * np_gradient_backdrop;
-static void np_gradient_source(const void * source);
+static void np_gradient_source(const void * source, const char * album);
 
 typedef enum {
     NP_BG_THEME = 0,
     NP_BG_BLURRED_COVER,
     NP_BG_COVER_GRADIENT,
+    NP_BG_ALBUM_WASH,
 } np_bg_mode_t;
 
 static np_bg_mode_t g_np_bg_mode = NP_BG_COVER_GRADIENT;
+
+static bool np_uses_gradient(void)
+{
+    return g_np_bg_mode == NP_BG_COVER_GRADIENT || g_np_bg_mode == NP_BG_ALBUM_WASH;
+}
 
 static void np_prev_action(void * user)
 {
@@ -3221,7 +3227,9 @@ static void np_refresh_snapshot(const player_snapshot_t * snapshot)
     if(snapshot->real_device && np_cover_widget != NULL) {
         uint32_t art_rev = player_artwork_revision();
         bool track_changed = (snapshot->track.id != g_np_cover_track_id);
-        if(art_rev != g_np_cover_rev || track_changed) {
+        bool album_changed = np_rendered_valid &&
+            strcmp(snapshot->track.album, np_rendered_snapshot.track.album) != 0;
+        if(art_rev != g_np_cover_rev || track_changed || (g_np_bg_mode == NP_BG_ALBUM_WASH && album_changed)) {
             g_np_cover_rev = art_rev;
             g_np_cover_track_id = snapshot->track.id;
             const void * src = iap2_cover_src(snapshot->track.id);
@@ -3230,7 +3238,7 @@ static void np_refresh_snapshot(const player_snapshot_t * snapshot)
                 lv_color_hex(src ? COL_PANEL : COL_PANEL_ALT), 0);
             lv_obj_set_style_bg_opa(np_cover_widget,
                                     src ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
-            np_gradient_source(src);
+            np_gradient_source(src, snapshot->track.album);
         }
     }
 
@@ -3416,7 +3424,7 @@ static void np_gradient_poll_cb(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
     if(g_current_screen != SCR_NOW_PLAYING || !np_gradient_backdrop ||
-       !np_gradient_key || g_np_bg_mode != NP_BG_COVER_GRADIENT) {
+       !np_gradient_key || !np_uses_gradient()) {
         if(np_gradient_timer) lv_timer_pause(np_gradient_timer);
         return;
     }
@@ -3440,8 +3448,11 @@ static void np_gradient_poll_cb(lv_timer_t * timer)
     np_gradient_visibility(true);
 }
 
-static uint64_t np_gradient_request_source(const void * source)
+static uint64_t np_gradient_request_source(const void * source, const char * album)
 {
+    cover_gradient_style_t style = g_np_bg_mode == NP_BG_ALBUM_WASH
+        ? COVER_GRADIENT_STYLE_WASH : COVER_GRADIENT_STYLE_LIGHTS;
+    uint32_t seed = style == COVER_GRADIENT_STYLE_WASH ? cover_gradient_album_hash(album) : 0;
     lv_image_header_t header;
     if(lv_image_decoder_get_info(source, &header) != LV_RESULT_OK || !header.w || !header.h) return 0;
     if(lv_image_src_get_type(source) == LV_IMAGE_SRC_VARIABLE) {
@@ -3451,7 +3462,7 @@ static uint64_t np_gradient_request_source(const void * source)
             return cover_gradient_request(image->data, image->data_size,
                 header.w, header.h, stride, header.cf == LV_COLOR_FORMAT_RGB565
                     ? COVER_GRADIENT_RGB565 : COVER_GRADIENT_ARGB8888,
-                g_theme->scrim, g_theme->scrim_opa);
+                g_theme->scrim, g_theme->scrim_opa, style, seed);
         }
     }
 
@@ -3483,17 +3494,17 @@ static uint64_t np_gradient_request_source(const void * source)
     const lv_image_dsc_t * image = lv_canvas_get_image(canvas);
     uint64_t key = cover_gradient_request(image->data, image->data_size,
         image->header.w, image->header.h, image->header.stride, COVER_GRADIENT_ARGB8888,
-        g_theme->scrim, g_theme->scrim_opa);
+        g_theme->scrim, g_theme->scrim_opa, style, seed);
     lv_obj_delete(canvas);
     free(buffer);
     return key;
 }
 
-static void np_gradient_source(const void * source)
+static void np_gradient_source(const void * source, const char * album)
 {
-    if(g_np_bg_mode != NP_BG_COVER_GRADIENT || !np_gradient_backdrop) return;
+    if(!np_uses_gradient() || !np_gradient_backdrop) return;
     uint32_t start = g_ui_trace ? perf_now() : 0;
-    np_gradient_key = source ? np_gradient_request_source(source) : 0;
+    np_gradient_key = source ? np_gradient_request_source(source, album) : 0;
     if(np_gradient_key != np_gradient_shown_key) np_gradient_visibility(false);
     if(!np_gradient_key) {
         cover_gradient_cancel();
@@ -3762,7 +3773,7 @@ static void np_create(lv_obj_t * parent)
 
     /* Reserve a background even before live artwork arrives. RGB565 covers
      * feed the asynchronous CPU/PPA pipeline; theme remains visible meanwhile. */
-    bool mesh_bg = g_np_bg_mode == NP_BG_COVER_GRADIENT;
+    bool mesh_bg = np_uses_gradient();
 
     bool blurred_bg = !snapshot.real_device && !mesh_bg && !real_cover &&
                       has_cover &&
@@ -4047,7 +4058,7 @@ static void np_create(lv_obj_t * parent)
     if(np_queue_visible && g_focus_count > 0) focus_select(np_queue_focus_start);
     g_np_cover_rev = player_artwork_revision();
     g_np_cover_track_id = snapshot.track.id;
-    np_gradient_source(now_cover);
+    np_gradient_source(now_cover, snapshot.track.album);
     np_refresh_snapshot(&snapshot);
     ui_set_hint("UP/DOWN Select   ENTER Play/Jump   7 Play/Pause");
     if(g_ui_trace) UI_PERF_LOG("np_build: open=%d left=%u lookup=%u widgets=%u total=%u us rows=%d",
@@ -7349,6 +7360,7 @@ static lv_obj_t * settings_detail_sort_value;
 static lv_obj_t * settings_detail_order_value;
 static lv_obj_t * settings_detail_np_bg_theme_check;
 static lv_obj_t * settings_detail_np_bg_mesh_check;
+static lv_obj_t * settings_detail_np_bg_wash_check;
 static lv_obj_t * settings_detail_screen_value;
 static lv_obj_t * settings_detail_wifi_mode_value;
 static lv_obj_t * settings_detail_wifi_status_value;
@@ -7379,7 +7391,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
         g_sort_field = cfg->sort_field;
     }
     g_sort_desc = cfg->sort_desc != 0;
-    if(cfg->np_bg_mode >= NP_BG_THEME && cfg->np_bg_mode <= NP_BG_COVER_GRADIENT) {
+    if(cfg->np_bg_mode >= NP_BG_THEME && cfg->np_bg_mode <= NP_BG_ALBUM_WASH) {
         g_np_bg_mode = (np_bg_mode_t)cfg->np_bg_mode;
     }
     g_system_config.brightness = screen_brightness_normalize(cfg->brightness);
@@ -7419,8 +7431,8 @@ static int settings_initial_focus(int index)
         return nearest;
     }
     if(index == SETTING_NOW_PLAYING_BG) {
-        return g_np_bg_mode == NP_BG_BLURRED_COVER
-                   ? NP_BG_COVER_GRADIENT : (int)g_np_bg_mode;
+        if(g_np_bg_mode == NP_BG_ALBUM_WASH) return 2;
+        return g_np_bg_mode == NP_BG_THEME ? 0 : 1;
     }
     if(index == SETTING_USB) {
         return g_usb_mode == USB_MODE_BOTH ? 1 : 0;
@@ -7701,12 +7713,16 @@ static void settings_update_np_bg_checks(void)
         lv_label_set_text(settings_detail_np_bg_mesh_check,
                           g_np_bg_mode == NP_BG_COVER_GRADIENT ? ICON_CHECK : "");
     }
+    if(settings_detail_np_bg_wash_check) {
+        lv_label_set_text(settings_detail_np_bg_wash_check,
+                          g_np_bg_mode == NP_BG_ALBUM_WASH ? ICON_CHECK : "");
+    }
 }
 
 static void settings_np_bg_action(void * user)
 {
     int mode = (int)(intptr_t)user;
-    if(mode < NP_BG_THEME || mode > NP_BG_COVER_GRADIENT) return;
+    if(mode < NP_BG_THEME || mode > NP_BG_ALBUM_WASH) return;
     g_np_bg_mode = (np_bg_mode_t)mode;
     settings_update_np_bg_checks();
     settings_system_changed();
@@ -8562,6 +8578,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
+    settings_detail_np_bg_wash_check = NULL;
 
     int index = settings_selected;
     if(index < 0 || index >= SETTING_COUNT) index = 0;
@@ -8822,6 +8839,18 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             else {
                 touch_add_clickable(mesh_row, settings_np_bg_touch_cb,
                                     (void *)(intptr_t)NP_BG_COVER_GRADIENT);
+            }
+
+            lv_obj_t * wash_row = settings_make_choice_row(
+                parent, "Album wash", g_np_bg_mode == NP_BG_ALBUM_WASH,
+                &settings_detail_np_bg_wash_check);
+            if(interactive) {
+                focus_add_clickable(wash_row, settings_np_bg_action, NULL,
+                                    (void *)(intptr_t)NP_BG_ALBUM_WASH, true);
+            }
+            else {
+                touch_add_clickable(wash_row, settings_np_bg_touch_cb,
+                                    (void *)(intptr_t)NP_BG_ALBUM_WASH);
             }
             break;
         }
@@ -9101,6 +9130,7 @@ static void settings_create(lv_obj_t * parent)
     settings_detail_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
+    settings_detail_np_bg_wash_check = NULL;
     settings_detail_ble_value = NULL;
     settings_detail_usb_a_check = NULL;
     settings_detail_usb_both_check = NULL;

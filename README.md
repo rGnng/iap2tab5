@@ -156,6 +156,12 @@ current iPod artwork, including artwork that arrives after the page opens.
 It selects a dominant hue and two distinct accents, then builds soft ambient
 color lights around the artwork. Gray uses deep colors; Aqua uses matching
 pastels. The text and control regions stay calm for readability.
+
+**Album wash** is a separate option in the same menu. It spreads the main
+cover color more evenly at a slightly darker level, with broad accent fields
+positioned by a stable hash of the album name. Normalized brightness prevents
+bright hotspots, and songs on the same album keep the same layout.
+
 A background worker renders at 320×180 and expands once to 1280×720 with the
 ESP32-P4 PPA. Eight-bit color channels survive scaling; the final conversion
 adds fine, stationary blue-noise dithering and packs RGB565 in place. This
@@ -532,7 +538,11 @@ MyHomeWiFi
 my-password
 ```
 
-With no usable credentials, the default configuration starts an open
+Valid SD credentials take priority and update a backup in NVS. If the card
+cannot mount, or `wifi.txt` is missing or unusable, station mode uses that backup
+so the web debugger remains reachable. Unchanged credentials cause no NVS writes.
+
+With no usable SD or NVS credentials, the default configuration starts an open
 **Tab5-Debug** access point at **http://192.168.4.1**. Failed station connections
 are retried. AP mode can also be selected explicitly in `config.json`.
 

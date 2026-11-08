@@ -15,12 +15,18 @@ typedef enum {
     COVER_GRADIENT_SUPERSEDED,
 } cover_gradient_state_t;
 
+typedef enum {
+    COVER_GRADIENT_STYLE_LIGHTS,
+    COVER_GRADIENT_STYLE_WASH,
+} cover_gradient_style_t;
+
 /* UI-thread submission copies just 32x32 samples, never retains artwork.
  * Zero indicates an invalid source or unavailable worker. Equal artwork and
- * theme tint reuse the cache even across songs sharing the same album cover. */
+ * theme/style/album seed reuse the cache across songs sharing the album. */
 uint64_t cover_gradient_request(const void * pixels, size_t bytes, unsigned width,
                                 unsigned height, size_t stride, cover_gradient_format_t format,
-                                uint32_t tint_rgb, uint8_t tint_opacity);
+                                uint32_t tint_rgb, uint8_t tint_opacity,
+                                cover_gradient_style_t style, uint32_t album_seed);
 /* Poll/install between LVGL frames. The returned pixels stay immutable until
  * the UI polls a different ready result; two buffers keep worker writes away
  * from the currently displayed image. No LVGL calls occur in the worker. */

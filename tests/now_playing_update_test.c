@@ -97,7 +97,7 @@ static void gradient_lifecycle(void)
     check(abs((int)((observed_background>>16)&255)-(int)((r<<3)|(r>>2)))<=1 &&
           abs((int)((observed_background>>8)&255)-(int)((g<<2)|(g>>4)))<=1 &&
           abs((int)(observed_background&255)-(int)((b<<3)|(b>>2)))<=1,
-          "Cached tint and Bayer texture must reach the screen without a second overlay");
+          "Cached tint and grain must reach the screen without a second overlay");
     check(pixels[0]!=pixels[(COVER_GRADIENT_HEIGHT/2)*COVER_GRADIENT_WIDTH+COVER_GRADIENT_WIDTH/2],
           "Colored artwork must produce a varying background");
     unsigned before=renders;
@@ -122,6 +122,23 @@ static void gradient_lifecycle(void)
     ui_select_screen(SCR_NOW_PLAYING); pump(300);
     check(np_gradient_key==changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
           "Returning to Now Playing must use the cached artwork background");
+    settings_np_bg_action((void *)(intptr_t)NP_BG_ALBUM_WASH); ui_rebuild_page(); pump(200);
+    check(np_gradient_key && np_gradient_key!=changed_key && !lv_obj_is_hidden(np_gradient_backdrop),
+          "Album wash must be a distinct selectable background");
+    check(settings_initial_focus(SETTING_NOW_PLAYING_BG)==2,
+          "Settings must focus the third visible choice for Album wash");
+    uint64_t wash_key=np_gradient_key;
+    title=np_title; unsigned old_copies=copies;
+    strcpy(injected.track.album,"A different album name"); np_tick(); pump(200);
+    check(np_title==title && np_gradient_key!=wash_key && copies==old_copies,
+          "Late album metadata must reseed the wash without recopying artwork or rebuilding the page");
+    wash_key=np_gradient_key;
+    injected.track.id++; np_tick(); pump(200);
+    check(np_gradient_key==wash_key,"Songs sharing an album and artwork must reuse the same wash");
+    ui_system_config_t saved=g_system_config;
+    ui_apply_saved_settings(&saved); ui_rebuild_page(); pump(200);
+    check(g_np_bg_mode==NP_BG_ALBUM_WASH && np_gradient_key==wash_key,
+          "A saved Album wash choice must survive settings reload");
     settings_np_bg_action((void *)(intptr_t)NP_BG_THEME); ui_rebuild_page(); pump(200);
     check(!np_gradient_backdrop && !np_gradient_key,"Theme mode must omit the cover gradient");
     inject=false;

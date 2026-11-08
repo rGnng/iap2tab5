@@ -103,8 +103,9 @@ bool app_config_sd_format(void);
 esp_err_t app_config_hash_file(const char * path, uint64_t * size,
                                char * hex, size_t hex_len);
 
-/* Reads /sdcard/wifi.txt. Format: first non-empty line = SSID,
- * second non-empty line = password (may be empty for an open network). */
+/* SD wifi.txt takes priority and refreshes a paired SSID/password NVS backup.
+ * If SD credentials are unavailable, use that backup. First non-empty line =
+ * SSID, second = password (may be omitted for an open network). */
 esp_err_t app_config_read_wifi_credentials(char * ssid, size_t ssid_len,
                                            char * password, size_t password_len);
 
