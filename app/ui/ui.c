@@ -2815,7 +2815,9 @@ static uint64_t g_np_cover_track_id;
  * progress bar and the five transport/mode buttons span the full column
  * width below the cover. */
 #define NP_COVER_SIZE         360
-#define NP_INFO_W             582
+#define NP_QUEUE_LEFT_W       620
+#define NP_QUEUE_PADDING       36
+#define NP_INFO_W             (NP_QUEUE_LEFT_W - 2 * NP_QUEUE_PADDING)
 #define NP_COVER_GAP           24
 /* Default view uses symmetric margins inside the content area. NP_INFO_W
  * above remains the compact queue-open layout's metadata/control width. */
@@ -3472,8 +3474,6 @@ static lv_obj_t * np_vertical_gap(lv_obj_t * parent, int height)
 static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
                                    uint32_t cover_color)
 {
-    np_vertical_gap(left, 28);
-
     np_cover_widget = make_cover(left, cover_src, cover_color, NP_COVER_SIZE);
 
     np_vertical_gap(left, 16);
@@ -3546,7 +3546,10 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     lv_obj_set_width(np_time_dur, 72);
     lv_obj_set_style_text_align(np_time_dur, LV_TEXT_ALIGN_RIGHT, 0);
 
-    np_vertical_gap(left, 16);
+    /* Keep transport against the bottom inset; give spare height to the
+     * gap after progress rather than changing the artwork or text gaps. */
+    lv_obj_t * controls_gap = np_vertical_gap(left, 16);
+    lv_obj_set_flex_grow(controls_gap, 1);
 
     lv_obj_t * controls = lv_obj_create(left);
     lv_obj_set_size(controls, NP_INFO_W, 84);
@@ -3580,8 +3583,6 @@ static void np_build_vertical_left(lv_obj_t * left, const void * cover_src,
     np_repeat_btn = repeat;
     np_repeat_icon = lv_obj_get_child(repeat, 0);
     lv_obj_add_event_cb(repeat, np_repeat_click_cb, LV_EVENT_CLICKED, NULL);
-
-    np_vertical_gap(left, 32);
 }
 
 static void np_placeholder(lv_obj_t * parent)
@@ -3735,12 +3736,12 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_style_bg_opa(left, LV_OPA_TRANSP, 0);
     }
     if(np_queue_visible) {
-        lv_obj_set_size(left, 620, LV_PCT(100));
+        lv_obj_set_size(left, NP_QUEUE_LEFT_W, LV_PCT(100));
     }
     else {
         lv_obj_set_size(left, LV_PCT(100), LV_PCT(100));
     }
-    lv_obj_set_style_pad_all(left, np_queue_visible ? 20 : 0, 0);
+    lv_obj_set_style_pad_all(left, np_queue_visible ? NP_QUEUE_PADDING : 0, 0);
     lv_obj_set_style_pad_row(left, 0, 0);
     if(np_queue_visible) {
         lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
