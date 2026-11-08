@@ -99,6 +99,21 @@ if(NOT MSVC)
     target_compile_options(tab5_sim PRIVATE -Wall -Wextra)
 endif()
 
+option(IAP2TAB5_BUILD_UI_TESTS "Build headless LVGL pointer integration tests" OFF)
+if(IAP2TAB5_BUILD_UI_TESTS)
+    enable_testing()
+    add_executable(album_touch_test tests/album_touch_test.c
+        third_party/cjson/cJSON.c ${UI_SOURCES})
+    target_include_directories(album_touch_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(album_touch_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
+    target_link_libraries(album_touch_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
+    foreach(theme RANGE 0 2)
+        add_test(NAME album_touch_theme_${theme} COMMAND album_touch_test ${theme})
+    endforeach()
+endif()
+
 # Convenience: `cmake --build build --target run`
 add_custom_target(run
     COMMAND $<TARGET_FILE:tab5_sim>

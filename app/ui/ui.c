@@ -4907,7 +4907,10 @@ static void albums_create(lv_obj_t * parent)
         lv_obj_set_flex_align(text, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_START);
         lv_obj_set_scrollable(text, false);
-        lv_obj_set_scroll_chain(text, false);
+        /* The row owns taps and drags. A clickable text container with
+         * scroll chaining disabled swallows swipes over the album labels. */
+        lv_obj_set_clickable(text, false);
+        lv_obj_set_scroll_chain(text, true);
         lv_obj_set_event_bubble(text, true);
 
         albums_row_titles[i] = make_label(text, "", FONT_H2, COL_TEXT);

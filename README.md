@@ -626,6 +626,16 @@ record persistence. Certificate validation additionally uses `libmbedtls-dev`
 and Python `cryptography`; those checks are skipped when unavailable. Simulator screenshots are useful for reviewing UI
 changes; hardware timing, USB behavior, and BLE still need a Tab5.
 
+The optional LVGL integration tests feed pointer input through the production
+Albums UI. They check dragging over artwork, titles, artists, and row padding
+in both directions, plus tapping to open an album, across all three themes:
+
+```bash
+cmake -S . -B build -DIAP2TAB5_BUILD_UI_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
 ### Regenerate assets
 
 Generated assets are checked in, so these tools are only needed when changing
