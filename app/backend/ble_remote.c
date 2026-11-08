@@ -660,7 +660,7 @@ static int gap_event(struct ble_gap_event * event, void * arg)
             s_vendor_cccd_handle = 0;
             s_vendor_startup_index = 0;
             s_discovery_started = false;
-            usb_hid_input_cancel_top_right(D100H_INPUT_BLE);
+            usb_hid_input_cancel_gestures(D100H_INPUT_BLE);
             lock();
             s_current[0] = '\0';
             s_current_addr[0] = '\0';
@@ -708,6 +708,10 @@ static int gap_event(struct ble_gap_event * event, void * arg)
             ESP_LOGD(TAG, "D100H event id=0x%02x down=%d", id, (int)down);
             if(id == 0x03) {
                 usb_hid_input_post_top_right(D100H_INPUT_BLE, down);
+                return 0;
+            }
+            if(id == 0x07 || id == 0x0B || id == 0x0C) {
+                usb_hid_input_post_knob(D100H_INPUT_BLE, id, down);
                 return 0;
             }
             if(id == 0x05 || id == 0x08) {

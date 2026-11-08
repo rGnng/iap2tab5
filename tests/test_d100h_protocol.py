@@ -19,6 +19,10 @@ class TopRightState(ctypes.Structure):
                 ('pressed_us', ctypes.c_int64)]
 
 
+class KnobState(ctypes.Structure):
+    _fields_ = [('down', ctypes.c_bool), ('turned', ctypes.c_bool)]
+
+
 # Public gesture event/action enums from ulanzi_d100h.h.
 DOWN, UP, POLL, CANCEL = range(4)
 NONE, CONTEXT, STAR = range(3)
@@ -34,13 +38,26 @@ class D100HProtocolTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         work = Path(cls.temp.name)
         (work / 'lvgl.h').write_text('typedef struct lv_indev_t lv_indev_t;\n')
+        keys = ['ENTER', 'UP', 'DOWN', 'VOLUME_UP', 'VOLUME_DOWN']
+        (work / 'keys.c').write_text('#include "ui.h"\n' + '\n'.join(
+            f'int key_{name}(void) {{ return UI_KEY_{name}; }}' for name in keys))
         library = work / 'd100h.so'
         subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
                         '-shared', '-fPIC', '-I' + str(work),
                         '-I' + str(ROOT / 'app/ui'),
                         str(ROOT / 'firmware/main/ulanzi_d100h.c'),
+                        str(work / 'keys.c'),
                         '-o', str(library)], check=True)
         cls.lib = ctypes.CDLL(str(library))
+        cls.keys = {name: getattr(cls.lib, 'key_' + name)() for name in keys}
+        cls.lib.ulanzi_knob_update.argtypes = [ctypes.POINTER(KnobState),
+            ctypes.c_uint8, ctypes.c_bool, ctypes.POINTER(ctypes.c_int)]
+        cls.lib.ulanzi_knob_update.restype = ctypes.c_bool
+        cls.lib.ulanzi_knob_cancel.argtypes = [ctypes.POINTER(KnobState)]
+        cls.lib.ulanzi_knob_cancel.restype = None
+        cls.lib.ulanzi_d100h_to_ui.argtypes = [ctypes.c_uint8, ctypes.c_bool,
+                                              ctypes.POINTER(ctypes.c_int)]
+        cls.lib.ulanzi_d100h_to_ui.restype = ctypes.c_bool
         for name in ('ulanzi_d100h_decode', 'ulanzi_d100h_decode_ble'):
             decoder = getattr(cls.lib, name)
             decoder.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
@@ -60,6 +77,63 @@ class D100HProtocolTests(unittest.TestCase):
 
     def gesture(self, state, event, now_us):
         return self.lib.ulanzi_top_right_update(ctypes.byref(state), event, now_us)
+
+    def knob(self, state, control, down=True):
+        key = ctypes.c_int(-1)
+        emitted = self.lib.ulanzi_knob_update(ctypes.byref(state), control, down,
+                                             ctypes.byref(key))
+        return key.value if emitted else None
+
+    def test_knob_click_only_on_release_once(self):
+        state = KnobState()
+        self.assertIsNone(self.knob(state, 7, False))
+        self.assertIsNone(self.knob(state, 7))
+        self.assertIsNone(self.knob(state, 7))
+        self.assertEqual(self.knob(state, 7, False), self.keys['ENTER'])
+        self.assertIsNone(self.knob(state, 7, False))
+
+    def test_knob_held_turns_change_volume_without_clicking(self):
+        state = KnobState()
+        self.assertIsNone(self.knob(state, 7))
+        self.assertEqual(self.knob(state, 12), self.keys['VOLUME_UP'])
+        self.assertEqual(self.knob(state, 12), self.keys['VOLUME_UP'])
+        self.assertEqual(self.knob(state, 11), self.keys['VOLUME_DOWN'])
+        self.assertIsNone(self.knob(state, 7, False))
+        self.assertFalse(state.down)
+        self.assertIsNone(self.knob(state, 7))
+        self.assertEqual(self.knob(state, 7, False), self.keys['ENTER'])
+
+    def test_knob_duplicate_press_does_not_restore_cancelled_click(self):
+        state = KnobState()
+        self.knob(state, 7)
+        self.knob(state, 12)
+        self.assertIsNone(self.knob(state, 7))
+        self.assertIsNone(self.knob(state, 7, False))
+
+    def test_knob_held_steps_without_press_report_never_click(self):
+        state = KnobState()
+        self.assertEqual(self.knob(state, 11), self.keys['VOLUME_DOWN'])
+        self.assertEqual(self.knob(state, 12), self.keys['VOLUME_UP'])
+        self.assertIsNone(self.knob(state, 7, False))
+
+    def test_knob_disconnect_cancels_only_its_input_source(self):
+        usb, ble = KnobState(), KnobState()
+        self.knob(usb, 7)
+        self.knob(ble, 7)
+        self.lib.ulanzi_knob_cancel(ctypes.byref(usb))
+        self.assertIsNone(self.knob(usb, 7, False))
+        self.assertEqual(self.knob(ble, 7, False), self.keys['ENTER'])
+        self.knob(usb, 7)
+        self.assertEqual(self.knob(usb, 7, False), self.keys['ENTER'])
+
+    def test_knob_stateless_mapping_preserves_navigation_and_ignores_click(self):
+        for control, expected in [(9, 'UP'), (10, 'DOWN'),
+                                  (11, 'VOLUME_DOWN'), (12, 'VOLUME_UP')]:
+            key = ctypes.c_int(-1)
+            self.assertTrue(self.lib.ulanzi_d100h_to_ui(control, True, ctypes.byref(key)))
+            self.assertEqual(key.value, self.keys[expected])
+            self.assertFalse(self.lib.ulanzi_d100h_to_ui(control, False, ctypes.byref(key)))
+        self.assertFalse(self.lib.ulanzi_d100h_to_ui(7, True, ctypes.byref(key)))
 
     def test_top_right_fires_at_threshold_without_release(self):
         state = TopRightState()
@@ -154,7 +228,8 @@ class D100HProtocolTests(unittest.TestCase):
             '24569ef228e145a1') + ZERO_BLOCK + bytes(4))
 
     def test_ble_encode_decode_roundtrip(self):
-        for code, down in [(1, True), (7, True), (10, True), (3, False)]:
+        for code, down in [(1, True), (7, True), (7, False), (10, True),
+                           (11, True), (12, True), (3, False)]:
             plain = bytes([0x8b, 0x10, code, 1 if down else 0]) + bytes(16)
             src = (ctypes.c_uint8 * 20).from_buffer_copy(plain)
             out = (ctypes.c_uint8 * 20)()

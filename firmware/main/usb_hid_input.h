@@ -22,7 +22,9 @@ typedef enum {
 
 /** Top-right: tap for Context, hold 600 ms for Star while still pressed. */
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down);
-/** Cancel a source's pending gesture when it disconnects. */
-void usb_hid_input_cancel_top_right(d100h_input_source_t source);
+/** Knob click / held rotation: vendor IDs 0x07, 0x0B and 0x0C. */
+void usb_hid_input_post_knob(d100h_input_source_t source, uint8_t id, bool down);
+/** Cancel a source's pending gestures when it disconnects. */
+void usb_hid_input_cancel_gestures(d100h_input_source_t source);
 
 #endif /* IAP2TAB5_USB_HID_INPUT_H */

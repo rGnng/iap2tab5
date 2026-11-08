@@ -38,6 +38,13 @@ handler, and disconnect cancels that input's pending gesture. For web debug,
 `POST /api/keystate?k=topright&down=1` and `down=0` exercise the same handler
 using a separate input state.
 
+Hold the D100H knob and turn clockwise / counter-clockwise to raise / lower
+iPod volume, one native relative step per detent. A plain click activates on
+release; any held turn cancels that activation. USB and BLE share this gesture
+handler, with separate state for each input source. Disconnect cancels a pending click.
+Web debug can exercise the same path using `POST /api/keystate?k=knob&down=1`,
+then `k=knobcw&down=1` or `k=knobccw&down=1`, followed by `k=knob&down=0`.
+
 On this machine ESP-IDF is installed at `/home/ops/esp/esp-idf-5.5.6`:
 
 ```bash

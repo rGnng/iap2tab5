@@ -1205,11 +1205,16 @@ Hardware verification:
 | `0x04` | upper-left | `UI_KEY_SCREEN_PREV` |
 | `0x05` | upper-right | `UI_KEY_PREV_TRACK` |
 | `0x06` | lower-left | `UI_KEY_SCREEN_NEXT` |
-| `0x07` | knob click | `UI_KEY_ENTER` |
+| `0x07` | knob click | `UI_KEY_ENTER` on release, unless turned while held |
 | `0x08` | lower-right | `UI_KEY_NEXT_TRACK` |
 | `0x09` | rotate counter-clockwise | `UI_KEY_UP` |
 | `0x0A` | rotate clockwise | `UI_KEY_DOWN` |
-| `0x0B` / `0x0C` | held rotation | `UI_KEY_UP` / `UI_KEY_DOWN` |
+| `0x0B` / `0x0C` | held rotation CCW / CW | `UI_KEY_VOLUME_DOWN` / `UI_KEY_VOLUME_UP` |
+
+USB and BLE share per-source knob gesture state in the input dispatcher.
+A held turn cancels the pending click, and disconnect clears pending gestures.
+Each held-turn detent sends one native iPod volume tap, independent of any
+local percentage estimate; the current iAP2 session does not report absolute volume.
 
 ### 13.5 HID-only fallback (also verified)
 

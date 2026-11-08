@@ -1697,26 +1697,18 @@ void player_seek_sec(uint32_t sec)
     bump_revision();
 }
 
-void player_set_volume(int new_volume)
+void player_step_volume(int direction)
 {
+    if(direction == 0) return;
 #if defined(ESP_PLATFORM)
     if(iap2_host_is_enabled()) {
-        if(new_volume < 0) new_volume = 0;
-        if(new_volume > 100) new_volume = 100;
-        int delta = new_volume - volume;
-        while(delta >= 5) {
-            iap2_host_hid_command("volume_up");
-            delta -= 5;
-        }
-        while(delta <= -5) {
-            iap2_host_hid_command("volume_down");
-            delta += 5;
-        }
-        volume = new_volume;
-        if(volume > 0) muted = false;
+        /* Send a relative tap for every detent. A local percentage estimate
+         * drifts from the iPod and can incorrectly prevent further turns. */
+        iap2_host_hid_command(direction > 0 ? "volume_up" : "volume_down");
         return;
     }
 #endif
+    int new_volume = volume + (direction > 0 ? 5 : -5);
     if(new_volume < 0) new_volume = 0;
     if(new_volume > 100) new_volume = 100;
     volume = new_volume;

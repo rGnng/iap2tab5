@@ -145,7 +145,9 @@ void player_play_pause(void);
 void player_next(void);
 void player_previous(void);
 void player_seek_sec(uint32_t sec);
-void player_set_volume(int volume);
+/* One native volume step: negative = down, positive = up, zero = no-op.
+ * The iPod's absolute volume is not reported by the current iAP2 session. */
+void player_step_volume(int direction);
 void player_mute_toggle(void);
 void player_toggle_star(void);
 /* Clear all local stars and remove stars.csv (debug/reset). */

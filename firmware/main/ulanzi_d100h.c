@@ -171,6 +171,32 @@ ulanzi_top_right_action_t ulanzi_top_right_update(ulanzi_top_right_t * state,
     return action;
 }
 
+void ulanzi_knob_cancel(ulanzi_knob_t * state)
+{
+    *state = (ulanzi_knob_t){0};
+}
+
+bool ulanzi_knob_update(ulanzi_knob_t * state, uint8_t id, bool down,
+                        ui_key_t * key)
+{
+    if(key == NULL) return false;
+    if(id == 0x07) {
+        if(down) {
+            if(!state->down) *state = (ulanzi_knob_t){.down = true};
+            return false;
+        }
+        bool click = state->down && !state->turned;
+        ulanzi_knob_cancel(state);
+        if(click) *key = UI_KEY_ENTER;
+        return click;
+    }
+    if(down && (id == 0x0B || id == 0x0C)) {
+        state->turned = true;
+        return ulanzi_d100h_to_ui(id, down, key);
+    }
+    return false;
+}
+
 bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key)
 {
     if(key == NULL || !down) return false;
@@ -184,12 +210,12 @@ bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key)
         case 0x04: *key = UI_KEY_SCREEN_PREV; return true; /* upper-left */
         case 0x05: *key = UI_KEY_PREV_TRACK;  return true; /* upper-right */
         case 0x06: *key = UI_KEY_SCREEN_NEXT; return true; /* lower-left */
-        case 0x07: *key = UI_KEY_ENTER;       return true; /* knob click */
+        case 0x07: return false; /* stateful click / held-turn gesture */
         case 0x08: *key = UI_KEY_NEXT_TRACK;  return true; /* lower-right */
         case 0x09: *key = UI_KEY_UP;          return true; /* rotate ccw */
         case 0x0A: *key = UI_KEY_DOWN;        return true; /* rotate cw */
-        case 0x0B: *key = UI_KEY_UP;          return true; /* held rotate ccw */
-        case 0x0C: *key = UI_KEY_DOWN;        return true; /* held rotate cw */
+        case 0x0B: *key = UI_KEY_VOLUME_DOWN; return true; /* held rotate ccw */
+        case 0x0C: *key = UI_KEY_VOLUME_UP;   return true; /* held rotate cw */
         default: return false;
     }
 }

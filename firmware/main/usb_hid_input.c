@@ -36,17 +36,26 @@ typedef struct {
     hid_host_driver_event_t event;
 } hid_device_event_t;
 
+typedef enum {
+    KEY_EVENT_KEY,
+    KEY_EVENT_TOP_RIGHT,
+    KEY_EVENT_KNOB,
+    KEY_EVENT_GESTURE_CANCEL,
+} key_event_kind_t;
+
 typedef struct {
     ui_key_t key;
     bool down;
-    enum { KEY_EVENT_KEY, KEY_EVENT_TOP_RIGHT, KEY_EVENT_TOP_RIGHT_CANCEL } kind;
+    key_event_kind_t kind;
     d100h_input_source_t source;
+    uint8_t id;
     int64_t time_us;
 } key_event_t;
 
 static QueueHandle_t s_device_events;
 static QueueHandle_t s_key_events;
 static ulanzi_top_right_t s_top_right[D100H_INPUT_COUNT];
+static ulanzi_knob_t s_knob[D100H_INPUT_COUNT];
 
 /* Previous/next behave as tap-to-skip and hold-to-rewind/fast-forward. */
 #define HOLD_MS         500
@@ -258,6 +267,9 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                     if(id == ULANZI_TOP_RIGHT_ID) {
                         usb_hid_input_post_top_right(D100H_INPUT_USB, down);
                     }
+                    else if(id == 0x07 || id == 0x0B || id == 0x0C) {
+                        usb_hid_input_post_knob(D100H_INPUT_USB, id, down);
+                    }
                     else if(id == 0x05 || id == 0x08) {
                         usb_hid_input_post_key_state(
                             id == 0x05 ? UI_KEY_PREV_TRACK
@@ -285,7 +297,7 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
             if(handle_is_ulanzi(handle)) {
                 set_ulanzi_handle(NULL);
-                usb_hid_input_cancel_top_right(D100H_INPUT_USB);
+                usb_hid_input_cancel_gestures(D100H_INPUT_USB);
                 ESP_LOGI(TAG, "Ulanzi D100H disconnected");
             }
             else {
@@ -368,7 +380,7 @@ static void hid_event_task(void * arg)
             set_ulanzi_handle(evt.handle);
             s_ulanzi_addr = params.addr;
             s_ulanzi_report_count = 0;
-            usb_hid_input_cancel_top_right(D100H_INPUT_USB);
+            usb_hid_input_cancel_gestures(D100H_INPUT_USB);
             ulanzi_send_heartbeat(evt.handle);
             ESP_LOGI(TAG, "Ulanzi D100H vendor HID iface=%u addr=%u ready",
                      params.iface_num, params.addr);
@@ -402,9 +414,24 @@ static void dispatch_top_right(d100h_input_source_t source,
 
 static void dispatch_key_event(const key_event_t * evt)
 {
+    if(evt->kind == KEY_EVENT_KNOB) {
+        ui_key_t key;
+        if(ulanzi_knob_update(&s_knob[evt->source], evt->id, evt->down, &key) &&
+           bsp_display_lock(1000)) {
+            ESP_LOGI(TAG, "D100H knob source=%d action=%s", (int)evt->source,
+                key == UI_KEY_VOLUME_UP ? "volume_up" :
+                key == UI_KEY_VOLUME_DOWN ? "volume_down" : "enter");
+            ui_handle_key(key);
+            bsp_display_unlock();
+        }
+        return;
+    }
     if(evt->kind != KEY_EVENT_KEY) {
+        if(evt->kind == KEY_EVENT_GESTURE_CANCEL) {
+            ulanzi_knob_cancel(&s_knob[evt->source]);
+        }
         dispatch_top_right(evt->source,
-            evt->kind == KEY_EVENT_TOP_RIGHT_CANCEL ? ULANZI_TOP_RIGHT_CANCEL
+            evt->kind == KEY_EVENT_GESTURE_CANCEL ? ULANZI_TOP_RIGHT_CANCEL
                 : evt->down ? ULANZI_TOP_RIGHT_DOWN : ULANZI_TOP_RIGHT_UP,
             evt->time_us);
         return;
@@ -547,28 +574,36 @@ void usb_hid_input_post_key_state(ui_key_t key, bool down)
     }
 }
 
-static void post_top_right_event(d100h_input_source_t source, bool down, bool cancel)
+static void post_gesture_event(d100h_input_source_t source, key_event_kind_t kind,
+                                uint8_t id, bool down)
 {
     if((unsigned)source >= D100H_INPUT_COUNT || s_key_events == NULL) return;
     key_event_t evt = {
-        .kind = cancel ? KEY_EVENT_TOP_RIGHT_CANCEL : KEY_EVENT_TOP_RIGHT,
+        .kind = kind,
         .source = source,
+        .id = id,
         .down = down,
         .time_us = esp_timer_get_time(),
     };
     if(xQueueSend(s_key_events, &evt, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "D100H top-right input queue full");
+        ESP_LOGW(TAG, "D100H gesture input queue full");
     }
 }
 
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down)
 {
-    post_top_right_event(source, down, false);
+    post_gesture_event(source, KEY_EVENT_TOP_RIGHT, ULANZI_TOP_RIGHT_ID, down);
 }
 
-void usb_hid_input_cancel_top_right(d100h_input_source_t source)
+void usb_hid_input_post_knob(d100h_input_source_t source, uint8_t id, bool down)
 {
-    post_top_right_event(source, false, true);
+    if(id != 0x07 && id != 0x0B && id != 0x0C) return;
+    post_gesture_event(source, KEY_EVENT_KNOB, id, down);
+}
+
+void usb_hid_input_cancel_gestures(d100h_input_source_t source)
+{
+    post_gesture_event(source, KEY_EVENT_GESTURE_CANCEL, 0, false);
 }
 
 void usb_hid_input_start(void)

@@ -53,8 +53,20 @@ int64_t ulanzi_top_right_deadline(const ulanzi_top_right_t * state);
 ulanzi_top_right_action_t ulanzi_top_right_update(ulanzi_top_right_t * state,
     ulanzi_top_right_event_t event, int64_t now_us);
 
+/* Knob press/held-turn gesture (IDs 0x07, 0x0B, 0x0C). A plain click emits
+ * Enter on release; any held turn cancels that click and changes volume.
+ * Normal turns (0x09/0x0A) remain stateless, coalescible navigation events. */
+typedef struct {
+    bool down;
+    bool turned;
+} ulanzi_knob_t;
+
+bool ulanzi_knob_update(ulanzi_knob_t * state, uint8_t id, bool down,
+                        ui_key_t * key);
+void ulanzi_knob_cancel(ulanzi_knob_t * state);
+
 /* Returns true when this event should be forwarded to the UI. Only press /
- * rotation-step events are emitted; releases are intentionally ignored. */
+ * rotation-step events are emitted; knob clicks use the stateful helper. */
 bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key);
 
 #ifdef __cplusplus

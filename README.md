@@ -129,6 +129,10 @@ see the [full serial key map](firmware/README.md#serial-debug-keys).
 
 The D100H supports tap-to-skip and hold-to-seek on its previous/next controls.
 Its top-right key opens the context menu on a tap and toggles Star on a hold.
+Hold the knob down and turn it to adjust iPod volume: clockwise raises it,
+counter-clockwise lowers it. A plain knob click activates on release;
+releasing after a held turn does not activate the selected item. This works
+over USB and BLE.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
 ## Build and set up the Tab5

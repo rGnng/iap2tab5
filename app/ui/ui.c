@@ -2614,16 +2614,9 @@ static void ui_handle_media_key(ui_key_t key)
             player_next();
             break;
         case UI_KEY_VOLUME_UP:
-        case UI_KEY_VOLUME_DOWN: {
-            player_snapshot_t snap;
-            player_get_snapshot(&snap);
-            int v = snap.volume +
-                    (key == UI_KEY_VOLUME_UP ? 5 : -5);
-            if(v < 0) v = 0;
-            if(v > 100) v = 100;
-            player_set_volume(v);
+        case UI_KEY_VOLUME_DOWN:
+            player_step_volume(key == UI_KEY_VOLUME_UP ? 1 : -1);
             break;
-        }
         case UI_KEY_MUTE:
             player_mute_toggle();
             break;
