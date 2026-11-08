@@ -91,10 +91,13 @@ static void fast_navigation(void)
     pump(50);ui_handle_key(UI_KEY_UP);
     check(g_fast_scroll.active && fast_cues==2,"A sustained reverse spin must re-enter fast mode without losing its first notch");
     ui_fast_scroll_reset();now=lv_tick_get();
-    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);pump(200);
+    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);pump(1400);
     check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
-          "A 200 ms pause must preserve fast mode and its marker");
-    pump(140);
+          "A 1.4 second pause must preserve fast mode and its marker");
+    old=albums_selected;int cues=fast_cues;ui_handle_key(UI_KEY_DOWN);
+    check(albums_selected==old+rows && fast_cues==cues,
+          "Resuming after 1.4 seconds must keep page steps without repeating the entry cue");
+    pump(1540);
     check(!g_fast_scroll.active && lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Pausing must clear fast mode and its marker");
     old=albums_selected;ui_handle_key(UI_KEY_DOWN);check(albums_selected==old+1,"First notch after a pause must be precise");
     ui_fast_scroll_reset();g_system_config.fast_scroll_pages=0;albums_select(0);
