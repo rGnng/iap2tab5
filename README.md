@@ -141,9 +141,10 @@ releasing after a held turn does not activate the selected item. This works
 over USB and BLE.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
-**Settings → Screen** groups **Brightness** presets (**Low: 5%**, **Mid: 45%**,
-**High: 100%**) and an **Idle Timer** with **30 min**, **1 hour**, and **Off**
+**Settings → Screen** groups **Brightness** presets (**Low**, **Mid**, **High**)
+and an **Idle Timer** with **30 min**, **1 hour**, and **Off**
 (the default). Both section labels are inset and non-selectable.
+A brightness setting of zero falls back to Low to keep the screen visible.
 The idle timer runs only while playback is paused or stopped; touch, keyboard,
 or keypad input restarts it. Hold the clock area for two seconds to turn off
 the screen immediately, including during playback. The first touch or key

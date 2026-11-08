@@ -6,6 +6,7 @@
  */
 
 #include "app_config.h"
+#include "screen_brightness.h"
 #include "backlight.h"
 #include "ble_remote.h"
 #include "charge.h"
@@ -448,7 +449,7 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.menubar_left = cfg->menubar_left != 0;
     g_app_config.touch_enabled = cfg->touch_enabled != 0;
     g_app_config.np_bg_mode = (uint8_t)cfg->np_bg_mode;
-    g_app_config.brightness = (uint8_t)cfg->brightness;
+    g_app_config.brightness = (uint8_t)screen_brightness_normalize(cfg->brightness);
     g_app_config.screen_off_minutes = (uint8_t)cfg->screen_off_minutes;
     g_app_config.usb_mode = (uint8_t)cfg->usb_mode;
     g_app_config.theme = (uint8_t)cfg->theme;
@@ -457,10 +458,9 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     ble_remote_set_enabled(g_app_config.ble_enabled);
 
     s_save_pending = true;
-    if(cfg->brightness != s_applied_brightness &&
-       cfg->brightness >= 0 && cfg->brightness <= 100) {
-        backlight_set(ui_screen_is_on() ? cfg->brightness : 0);
-        s_applied_brightness = cfg->brightness;
+    if((int)g_app_config.brightness != s_applied_brightness) {
+        backlight_set(ui_screen_is_on() ? g_app_config.brightness : 0);
+        s_applied_brightness = g_app_config.brightness;
     }
     apply_runtime_config();
 }

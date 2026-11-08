@@ -6,6 +6,7 @@
 #include "plug_art.h"
 #include "player.h"
 #include "screen_idle.h"
+#include "screen_brightness.h"
 #include "ble_remote.h"
 #include "thumb_cache_format.h"
 
@@ -2281,6 +2282,7 @@ void ui_set_system_config(const ui_system_config_t * cfg)
     snprintf(ip, sizeof(ip), "%s", g_system_config.wifi_ip);
 
     g_system_config = *cfg;
+    g_system_config.brightness = screen_brightness_normalize(cfg->brightness);
 
     if(cfg->wifi_status[0] == '\0') {
         snprintf(g_system_config.wifi_status, sizeof(g_system_config.wifi_status),
@@ -7476,8 +7478,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(cfg->np_bg_mode >= NP_BG_THEME && cfg->np_bg_mode <= NP_BG_COVER_GRADIENT) {
         g_np_bg_mode = (np_bg_mode_t)cfg->np_bg_mode;
     }
-    if(g_system_config.brightness < 0) g_system_config.brightness = 0;
-    if(g_system_config.brightness > 100) g_system_config.brightness = 100;
+    g_system_config.brightness = screen_brightness_normalize(cfg->brightness);
     g_usb_mode = cfg->usb_mode == 2 ? USB_MODE_BOTH : USB_MODE_HOST;
     g_theme = ui_theme_get(cfg->theme);
     g_system_config.theme = g_theme->id;
@@ -8927,10 +8928,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                 lv_obj_t * row = settings_make_choice_row(parent, brightness_labels[i],
                     g_system_config.brightness == settings_brightness_values[i],
                     &settings_brightness_checks[i]);
-                char percent[8];
-                snprintf(percent, sizeof(percent), "%d%%", settings_brightness_values[i]);
-                lv_obj_t * value = make_label(row, percent, FONT_H2, COL_MUTED);
-                lv_obj_move_to_index(value, lv_obj_get_index(settings_brightness_checks[i]));
                 if(interactive) focus_add_clickable(row, settings_brightness_action,
                     NULL, (void *)(intptr_t)i, true);
                 else touch_add_clickable(row, settings_brightness_touch_cb,

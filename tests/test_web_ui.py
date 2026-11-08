@@ -115,6 +115,20 @@ class WebUITests(unittest.TestCase):
         self.assertEqual(self.config['screen_off_minutes'], 60)
         self.assertEqual(json.loads(self.writes[-1][1]), {'screen_off_minutes': 60, 'debug_log': True, 'ap_ssid': 'Draft SSID'})
 
+    def test_zero_brightness_bounces_to_low_and_volume_can_still_mute(self):
+        self.open()
+        for event in ('input', 'change'):
+            self.page.locator('#brightness').evaluate(
+                "(el,type) => { el.value='0'; el.dispatchEvent(new Event(type,{bubbles:true})); }", event)
+            self.assertEqual(self.page.locator('#brightness').input_value(), '5')
+            self.assertEqual(self.page.locator('#bri_v').inner_text(), '5')
+        self.page.locator('#volume').evaluate(
+            "el => { el.value='0'; el.dispatchEvent(new Event('input',{bubbles:true})); }")
+        self.page.get_by_role('button', name='Save', exact=True).click()
+        self.page.wait_for_function('!dirty.brightness && !dirty.volume')
+        self.assertEqual(json.loads(self.writes[-1][1]), {'volume': 0, 'brightness': 5})
+        self.assertEqual(self.config['brightness'], 5)
+
     def test_named_controls_and_mobile_layout(self):
         self.open()
         self.page.locator('#btn_shuffle').click()

@@ -91,7 +91,7 @@ typedef struct {
     int touch_enabled;
     int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
     int screen_off_minutes; /* 0 = Off (disabled), 30, 60 */
-    int brightness;        /* 0..100 */
+    int brightness;        /* 1..100; a requested 0 falls back to 5 */
     int usb_mode;          /* 0 = USB-A HS, 2 = USB-A HS + USB-C FS */
     int theme;             /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */
     int boot_screen;       /* 0 = off, 1 = KCN4M1 boot animation */

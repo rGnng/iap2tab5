@@ -1,4 +1,5 @@
 #include "app_config.h"
+#include "screen_brightness.h"
 
 #include <stdio.h>
 #include <fcntl.h>
@@ -546,7 +547,8 @@ static void load_from_json(const char * text)
     item = cJSON_GetObjectItemCaseSensitive(root, "np_bg_mode");
     if(cJSON_IsNumber(item)) g_app_config.np_bg_mode = (uint8_t)item->valueint;
     item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
-    if(cJSON_IsNumber(item)) g_app_config.brightness = (uint8_t)item->valueint;
+    if(cJSON_IsNumber(item))
+        g_app_config.brightness = (uint8_t)screen_brightness_normalize(item->valueint);
     item = cJSON_GetObjectItemCaseSensitive(root, "screen_off_minutes");
     if(cJSON_IsNumber(item) && item->valuedouble == item->valueint &&
        (item->valueint == 0 || item->valueint == 30 || item->valueint == 60)) {

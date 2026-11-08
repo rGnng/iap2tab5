@@ -64,9 +64,8 @@ int main(int argc, char **argv)
     ui_handle_key_repeat(UI_KEY_DOWN,5); ui_handle_key(UI_KEY_ENTER); pump(300);
     check(label(lv_screen_active(),"Screen") && label(lv_screen_active(),"Brightness") &&
           label(lv_screen_active(),"Idle Timer") && !label(lv_screen_active(),"Screen Off"),"Screen must contain both inset groups");
-    check(label(lv_screen_active(),"Low") && label(lv_screen_active(),"5%") &&
-          label(lv_screen_active(),"Mid") && label(lv_screen_active(),"45%") &&
-          label(lv_screen_active(),"High") && label(lv_screen_active(),"100%"),"All brightness presets must be available");
+    check(label(lv_screen_active(),"Low") && label(lv_screen_active(),"Mid") &&
+          label(lv_screen_active(),"High"),"All brightness presets must be available");
     check(label(lv_screen_active(),"30 min") && label(lv_screen_active(),"1 hour") &&
           label(lv_screen_active(),"Off"),"All idle choices must remain available");
     check(saved_brightness==-1,"Opening Screen must not change custom brightness");
@@ -94,6 +93,10 @@ int main(int argc, char **argv)
     check(!checked("Low") && !checked("Mid") && !checked("High"),"Custom external brightness must not falsely check a preset");
     tap_label("30 min");
     check(saved_minutes==30 && saved_brightness==17,"Idle choice must preserve external brightness");
+    cfg.brightness=0; ui_set_system_config(&cfg); pump(600);
+    check(checked("Low"),"A zero brightness setting must bounce to Low");
+    tap_label("1 hour");
+    check(saved_minutes==60 && saved_brightness==5,"Zero brightness must persist as 5%, not blank the screen");
     tap_label("Off");
     ui_select_screen(0); pump(300);
 

@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "app_config.h"
+#include "screen_brightness.h"
 #include "charge.h"
 #include "cJSON.h"
 #include "rtc_time.h"
@@ -792,10 +793,7 @@ static esp_err_t config_post(httpd_req_t * req)
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
     if(cJSON_IsNumber(item)) {
-        int v = item->valueint;
-        if(v < 0) v = 0;
-        if(v > 100) v = 100;
-        g_app_config.brightness = (uint8_t)v;
+        g_app_config.brightness = (uint8_t)screen_brightness_normalize(item->valueint);
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "ap_ssid");
     if(cJSON_IsString(item) && item->valuestring[0] != '\0') {

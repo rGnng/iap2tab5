@@ -17,9 +17,13 @@ function setVal(id,v) {
   if (dirty[id] || document.activeElement === $(id)) return;
   if ($(id).type === 'checkbox') $(id).checked = !!v; else $(id).value = v;
 }
+function markConfigDirty(id) {
+  if (id==='brightness' && +value(id)<=0) { $('brightness').value=5; $('bri_v').textContent=5; }
+  dirty[id] = true;
+}
 configFields.concat(['charge_en','qc_high']).forEach(function (id) {
-  $(id).addEventListener('input', function () { dirty[id] = true; });
-  $(id).addEventListener('change', function () { dirty[id] = true; });
+  $(id).addEventListener('input', function () { markConfigDirty(id); });
+  $(id).addEventListener('change', function () { markConfigDirty(id); });
 });
 ['volume','brightness'].forEach(function (id) {
   $(id).addEventListener('input', function () { $(id === 'volume' ? 'vol_v' : 'bri_v').textContent = value(id); });
