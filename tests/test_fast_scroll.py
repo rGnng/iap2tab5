@@ -60,8 +60,19 @@ class FastScrollTests(unittest.TestCase):
         self.feed(0,16)
         self.assertEqual(self.feed(20,direction=-1),(1,False))
         self.feed(40,16)
-        self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),190))
-        self.assertEqual(self.feed(200),(1,False))
+        self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),340))
+        self.assertEqual(self.feed(350),(1,False))
+
+    def test_short_pauses_keep_fast_mode_without_another_entry_cue(self):
+        for pages in range(1,6):
+            for rows in (8,10):
+                self.s = State()
+                self.feed(0,rows*pages,rows=rows,pages=pages)
+                for now in (200,450,749):
+                    self.assertEqual(self.feed(now,rows=rows,pages=pages),(rows,False))
+                self.assertFalse(self.lib.fast_scroll_expire(C.byref(self.s),1048))
+                self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),1049))
+                self.assertEqual(self.feed(1050,rows=rows,pages=pages),(1,False))
 
     def test_off_invalid_or_single_row_contexts_never_accelerate(self):
         for pages,rows in [(0,8),(-1,8),(6,8),(2,1),(2,0)]:
@@ -79,6 +90,6 @@ class FastScrollTests(unittest.TestCase):
         start = 2**32-500
         for i in range(15):self.assertEqual(self.feed((start+i*40) % 2**32),(1,False))
         self.assertEqual(self.feed((start+600) % 2**32),(8,True))
-        self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),(start+750) % 2**32))
+        self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),(start+900) % 2**32))
 
 if __name__ == '__main__': unittest.main()

@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #define FAST_SCROLL_WINDOW_MS 1200u
+/* Allow brief gaps in a continuous turn without repeated entry cues. */
+#define FAST_SCROLL_PAUSE_MS 300u
 #define FAST_SCROLL_HISTORY 128
 
 typedef struct {

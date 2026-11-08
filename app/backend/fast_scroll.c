@@ -3,17 +3,10 @@
 
 void fast_scroll_reset(fast_scroll_t *s) { memset(s, 0, sizeof(*s)); }
 
-static unsigned pause_ms(const fast_scroll_t *s)
-{
-    unsigned threshold = (unsigned)(s->rows * s->pages);
-    unsigned pause = threshold ? 2 * FAST_SCROLL_WINDOW_MS / threshold : 300;
-    return pause < 100 ? 100 : pause > 300 ? 300 : pause;
-}
-
 bool fast_scroll_expire(fast_scroll_t *s, uint32_t now)
 {
     bool active = s->active;
-    if(s->count && (uint32_t)(now - s->last_ms) >= pause_ms(s)) fast_scroll_reset(s);
+    if(s->count && (uint32_t)(now - s->last_ms) >= FAST_SCROLL_PAUSE_MS) fast_scroll_reset(s);
     return active && !s->active;
 }
 

@@ -147,9 +147,10 @@ Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
 **Settings → Fast Scroll** selects the activation speed: Off or 1–5 pages per
 1200 ms (default: 2 Pages). A quick spin switches to one visible page per notch,
-with a short two-tone cue and twin contrasting rails on the cursor. Pausing or
-reversing immediately restores normal single-row precision. Speed uses physical
-notches rather than the amplified page jumps; touch scrolling stays unchanged.
+with a short two-tone cue and twin contrasting rails on the cursor. A 300 ms
+pause or a direction reversal restores normal single-row precision. Speed uses
+physical notches rather than the amplified page jumps; touch scrolling stays
+unchanged.
 
 
 **Settings → Screen** groups **Brightness** presets (**Low**, **Mid**, **High**)
