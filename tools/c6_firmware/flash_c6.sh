@@ -5,9 +5,10 @@
 # Usage: tools/c6_firmware/flash_c6.sh /dev/ttyUSB0
 #
 # The Tab5's P4 drives the C6 EN pin through GPIO15.  Put the P4 into
-# bootloader mode first so it does not reset the C6 mid-flash:
-#
-#   esptool.py -p /dev/ttyACM0 --before default_reset --after no_reset run
+# download mode first so it does not reset the C6 mid-flash: with USB-C
+# connected, hold the Tab5 power button until the green LED flashes, then
+# release it. Leave the P4 stopped while this script programs the C6.
+# For adapters without DTR/RTS, use the manual procedure in the root README.
 #
 # C6_ISP J1: 1=3V3 (leave open) 2=TXD 3=RXD 4=RST/EN 5=IO9/BOOT 6=GND
 # DTR goes to IO9, RTS goes to EN.  CTS is unused.

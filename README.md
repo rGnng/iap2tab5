@@ -109,48 +109,342 @@ Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
 ## Build and set up the Tab5
 
+The Tab5 has two processors with separate firmware and programming connections:
+
+| Processor | Firmware | Programming connection |
+| --- | --- | --- |
+| **ESP32-P4** | This project's display, USB, and media-controller application | Tab5 USB-C port → computer |
+| **ESP32-C6** | ESP-Hosted Wi-Fi/BLE co-processor firmware | Internal `J1 / C6_ISP` header → USB-to-UART adapter → computer |
+
+For a first installation, complete both the [P4 procedure](#flash-the-esp32-p4-application)
+and the [C6 procedure](#flash-the-esp32-c6-wi-fible-firmware), then configure the
+SD card and import a library. Flashing the P4 does not update the C6. The web
+firmware updater also updates only the P4 application.
+
 ### Prerequisites
 
-- M5Stack Tab5, an SD card, and an iAP2-capable iPod or iPhone.
+- M5Stack Tab5, a USB-C **data** cable, an SD card, and an iAP2-capable iPod or iPhone.
 - **ESP-IDF 5.5.6**, the version used by the current firmware dependency lock.
 - An MFi P-256 certificate chain and private key for iAP2 authentication.
 - A matching lockdownd pair record for AFC access to the Apple device.
-- **ESP-Hosted 2.13.1** on the Tab5's ESP32-C6 for the Wi-Fi/BLE stack used here.
+- For the C6: a **3.3 V logic** USB-to-UART adapter, access to the internal
+  programming header, and the included **ESP-Hosted 2.13.1** images.
 
 The MFi identity and lockdownd pair record serve separate purposes. Neither is
-included in this repository. C6 firmware images and the initial wired update
-procedure are in the [C6 firmware guide](tools/c6_firmware/README.md). A unit
-running the factory 1.4.1 firmware needs that update for reliable Wi-Fi and BLE.
+included in this repository. The identity is required to build the P4 application;
+the pair record is uploaded later for AFC. The included C6 images need neither.
 
-### Generate the identity, build, and flash
+The commands below use Bash on Linux. Replace `/dev/ttyACM0` and `/dev/ttyUSB0`
+with the actual ports on your computer. On macOS they usually look like
+`/dev/cu.usbmodem…` and `/dev/cu.usbserial…`; on Windows, use the ESP-IDF terminal
+and the corresponding `COM` ports. Espressif's
+[platform setup guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32p4/get-started/index.html)
+covers installing the tools on other operating systems.
 
-From the repository root, generate the identity **before configuring the
-firmware**, because CMake includes the generated source file:
+### Flash the ESP32-P4 application
+
+#### 1. Install and activate ESP-IDF
+
+If ESP-IDF 5.5.6 is already installed, activate it with its `export.sh` and skip
+the installation commands. For a new Debian / Ubuntu installation:
 
 ```bash
+sudo apt install git wget flex bison gperf python3 python3-pip python3-venv \
+    cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+mkdir -p "$HOME/esp"
+git clone --branch v5.5.6 --recursive https://github.com/espressif/esp-idf.git \
+    "$HOME/esp/esp-idf-v5.5.6"
+cd "$HOME/esp/esp-idf-v5.5.6"
+./install.sh esp32p4,esp32c6
+. ./export.sh
+idf.py --version
+python -m esptool version
+```
+
+`idf.py --version` should report `v5.5.6`. In each new terminal, activate the
+environment again:
+
+```bash
+. "$HOME/esp/esp-idf-v5.5.6/export.sh"
+```
+
+The installer provides the compilers, Python environment, `idf.py`, and
+`esptool`. See the [ESP-IDF 5.5.6 installation instructions](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32p4/get-started/linux-macos-setup.html)
+for the full host setup.
+
+#### 2. Generate the MFi identity and build
+
+Return to this repository and generate the identity **before configuring the
+firmware**. Replace the three example paths below with your local paths:
+
+```bash
+cd /path/to/iap2tab5
 python3 tools/gen_iap2_identity.py \
     --cert /path/to/certificate.p7b \
     --key /path/to/identity.pk8
 
-. "$IDF_PATH/export.sh"
 cd firmware
 idf.py set-target esp32p4  # first configure only
 idf.py build
-idf.py -p /dev/ttyACM0 flash monitor
 ```
 
 With no arguments, the identity generator reads `../iap2cert/certificate.p7b`
 and `../iap2cert/identity.pk8`, relative to the repository root. It writes the
-ignored `firmware/main/iap2_identity.c`.
+ignored `firmware/main/iap2_identity.c`, which CMake requires.
 
-Exit the monitor with `Ctrl+]`. If auto-reset fails, hold **BOOT**, tap **RESET**,
-then release **BOOT**. After moving from IDF 5.4 to 5.5, clean the old build and
-perform a full flash once. Later code-only updates can use `idf.py app-flash` or
-the web updater; partition changes require a full flash.
+The first build downloads the managed components. A successful build produces
+these files under `firmware/`:
+
+```text
+build/iap2tab5.bin                       # P4 application; also used for web OTA
+build/bootloader/bootloader.bin          # P4 bootloader
+build/partition_table/partition-table.bin
+build/flash_args                        # generated offsets and images for flashing
+```
+
+Keep the project's `sdkconfig.defaults`: it includes support for the tested
+pre-revision-3 ESP32-P4 hardware. `set-target` resets the project configuration,
+so subsequent builds normally need only `idf.py build`. When changing from IDF
+5.4 to 5.5, run `idf.py fullclean` before rebuilding, then do a full flash.
 
 **Generated firmware contains the MFi private key. Keep the identity and built
 images private.** Lockdownd pair records also contain private keys and are stored
 in the internal SPIFFS partition.
+
+#### 3. Connect the P4 and identify its port
+
+1. Disconnect the iPod and other USB peripherals during the initial flash.
+2. Connect the Tab5's **USB-C** port directly to the computer with a data cable.
+3. List the serial ports in the activated ESP-IDF environment:
+
+   ```bash
+   python -m serial.tools.list_ports -v
+   ```
+
+   On Linux, the P4's native USB Serial/JTAG port is commonly `/dev/ttyACM0`.
+   Comparing the list before and after connecting the cable helps identify it.
+4. Close any serial monitor that has the port open.
+
+If the port is missing or automatic download-mode entry fails, use the Tab5's
+physical procedure: **with USB-C connected, hold the power button until the
+green LED flashes, then release it**. List the ports again, as the port name
+may change. This is the Tab5's single-button download procedure, documented by
+[M5Stack](https://docs.m5stack.com/en/core/Tab5#download-mode).
+
+If this firmware was previously set to `usb_mode: 2`, change the SD card's
+`config.json` to `"usb_mode": 0` before restarting into the application so that
+USB-C remains available for the console. ROM download mode provides the recovery
+path when the running application has taken over USB-C.
+
+#### 4. Flash the complete P4 image and monitor startup
+
+From the repository's `firmware/` directory:
+
+```bash
+idf.py -p /dev/ttyACM0 flash monitor
+```
+
+Use **`flash` for the first installation**. It writes the bootloader, partition
+table, application, and other images listed in the build's generated flash
+arguments. Let `idf.py` select their offsets. Wait for successful write/verify
+messages before disconnecting the cable.
+
+The monitor starts after flashing. If the Tab5 remains in download mode, turn
+it off with a double-click of the power button and turn it on with a single
+click. Reconnect the monitor if the USB port re-enumerates:
+
+```bash
+idf.py -p /dev/ttyACM0 monitor
+```
+
+Exit with **`Ctrl+]`**. Confirm that the application reaches its UI without a
+repeated reset. An empty library is expected before importing one. C6 version
+warnings or Wi-Fi/BLE problems may remain until the C6 procedure below is done.
+
+#### 5. Later updates and recovery
+
+For code-only updates while booting the factory application slot:
+
+```bash
+# Run in firmware/ with the ESP-IDF environment active.
+idf.py build
+idf.py -p /dev/ttyACM0 app-flash monitor
+```
+
+After a web OTA update, the active application is in an OTA slot; `app-flash`
+writes the factory slot and may leave the older OTA application selected. Use
+web OTA again, or return to the complete `flash` procedure when restoring the
+factory application. Use a complete flash after changing the partition table
+or bootloader as well. See [ESP-IDF's OTA boot selection](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32p4/api-reference/system/ota.html#ota-data-partition).
+
+For a web update, open the Tab5's web page, select **`firmware/build/iap2tab5.bin`**
+in the firmware OTA section, upload it, and wait for the reboot. The bootloader,
+partition table, and C6 `network_adapter.bin` are not P4 OTA application images.
+The equivalent upload from the repository root, using the default AP address, is:
+
+```bash
+curl --fail --data-binary @firmware/build/iap2tab5.bin \
+    http://192.168.4.1/api/ota
+```
+
+If an update cannot boot or reach Wi-Fi, enter P4 download mode with the power
+button and repeat `idf.py flash`. A complete flash is different from
+`erase-flash`: a full-chip erase also deletes NVS settings, BLE bonds, and the
+SPIFFS pair record. It is not required for normal updates.
+
+### Flash the ESP32-C6 Wi-Fi/BLE firmware
+
+This project's P4 host uses **ESP-Hosted 2.13.1**. A Tab5 still running the factory
+1.4.1 C6 firmware needs a wired update to the matching images in
+[`tools/c6_firmware/`](tools/c6_firmware/). You can skip this procedure if the
+P4 log already reports C6 firmware `2.13.1` and the radio works.
+
+The factory 1.4.1 firmware cannot perform the required upgrade through the P4's
+SDIO link. The procedure below uses the C6's UART programming header. Later
+ESP-Hosted versions provide co-processor OTA APIs, but this project's web OTA
+page does not implement a C6 updater.
+
+#### 1. Locate and wire the C6 programming header
+
+Turn off the Tab5, disconnect USB power and the battery module if fitted, and
+remove the rear cover to reach **`J1 / C6_ISP`**. Use the PCB markings to identify
+pin 1; do not infer numbering from the direction in which you hold the tablet.
+[M5Stack's C6 programming guide](https://docs.m5stack.com/en/guide/tab5/c6_wifi_restore)
+shows the connector location; the [Tab5 schematic, page 1](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1132/Tab5_Schematics_PDF.pdf)
+shows its signals.
+
+Use a USB-to-UART adapter with **3.3 V signal levels**. Wire TX and RX crossed:
+
+| J1 pin | Tab5 signal | USB-to-UART adapter connection |
+| --- | --- | --- |
+| 1 | `WLAN_3.3V` | **Leave disconnected**; the Tab5 supplies C6 power |
+| 2 | `RF_C6_TXD` | Adapter **RX** |
+| 3 | `RF_C6_RXD` | Adapter **TX** |
+| 4 | `RF_C6_RST` / EN | Adapter **RTS** for automatic reset, or manual reset |
+| 5 | `RF_C6_IO9` / BOOT | Adapter **DTR** for automatic boot selection, or manual boot strap |
+| 6 | GND | Adapter **GND** |
+
+Leave the adapter's power outputs and **CTS** disconnected. This procedure
+powers the board through USB-C; do not also connect adapter 3V3 or 5V to J1.
+An adapter whose supply jumper says “3.3 V” must also use 3.3 V UART signals.
+
+If the adapter has no DTR/RTS, connect only TX, RX, and GND to the adapter and use
+the manual procedure below for pins 4 and 5. The C6 boot strap is **IO9**.
+
+#### 2. Keep the P4 stopped and check the C6 images
+
+1. Power the Tab5 through USB-C and put the **P4** in download mode: hold the
+   Tab5 power button until its green LED flashes, then release it.
+2. Leave the P4 in that mode throughout the C6 flash. Do not start the P4
+   application or its monitor: the application controls C6 reset through GPIO15
+   and can interrupt programming.
+3. Connect the UART adapter to the computer and run
+   `python -m serial.tools.list_ports -v` again. The **adapter's port**, commonly
+   `/dev/ttyUSB0`, is the C6 programming port. The Tab5's `/dev/ttyACM0` is the P4.
+4. In an activated ESP-IDF terminal, return to the repository root and verify
+   the checked-in images:
+
+   ```bash
+   cd /path/to/iap2tab5
+   sha256sum -c tools/c6_firmware/SHA256SUMS
+   ```
+
+   All four files should report `OK`. The checked-in checksum file uses paths
+   relative to the repository root. On macOS, use
+   `shasum -a 256 -c tools/c6_firmware/SHA256SUMS` instead.
+
+The initial C6 installation writes all four images:
+
+| Flash offset | File in `tools/c6_firmware/` |
+| --- | --- |
+| `0x0000` | `bootloader.bin` |
+| `0x8000` | `partition-table.bin` |
+| `0xd000` | `ota_data_initial.bin` |
+| `0x10000` | `network_adapter.bin` |
+
+These images are for the **ESP32-C6 with 4 MB flash**. The P4 application and
+its partition layout belong on the other processor.
+
+#### 3. Write the C6 firmware
+
+**With DTR/RTS automatic reset**, use the helper from the repository root:
+
+```bash
+bash tools/c6_firmware/flash_c6.sh /dev/ttyUSB0
+```
+
+The helper selects `esp32c6`, uses 460800 baud, and writes all four images with
+DIO / 4 MB / 80 MHz flash settings. It tries to enter download mode through
+DTR/RTS, then resets the C6 when finished.
+
+**With manual boot/reset, or if automatic reset fails:**
+
+1. Leave adapter DTR/RTS disconnected so they cannot override the manual straps.
+   Keep the Tab5 powered and the P4 in download mode.
+2. Connect **J1 pin 5 (IO9)** to **J1 pin 6 (GND)**.
+3. Momentarily connect **J1 pin 4 (EN)** to GND, then release EN while keeping
+   IO9 grounded. This resets the C6 into its ROM downloader.
+4. Release IO9 after the reset. With no further reset, the C6 stays in download
+   mode. This follows Espressif's [C6 boot-mode procedure](https://docs.espressif.com/projects/esptool/en/latest/esp32c6/advanced-topics/boot-mode-selection.html).
+5. Run this complete command from the repository root:
+
+   ```bash
+   python -m esptool --chip esp32c6 -p /dev/ttyUSB0 -b 115200 \
+       --before no_reset --after no_reset \
+       write_flash --flash_mode dio --flash_size 4MB --flash_freq 40m \
+       0x0     tools/c6_firmware/bootloader.bin \
+       0x8000  tools/c6_firmware/partition-table.bin \
+       0xd000  tools/c6_firmware/ota_data_initial.bin \
+       0x10000 tools/c6_firmware/network_adapter.bin
+   ```
+
+This uses a slower UART rate and 40 MHz flash setting for the manual recovery
+path. `--before no_reset` preserves the boot mode you just selected;
+`--after no_reset` leaves restarting to you. The underscore spellings match the
+helper and remain accepted as legacy aliases by esptool 5.x.
+
+Wait for all writes and verification messages to finish. At 115200 baud, allow
+several minutes. If a transfer fails, repeat the manual boot sequence before
+retrying the command. The helper accepts only a port argument; use the direct
+command above to change reset behavior, baud rate, or flash settings.
+
+#### 4. Restart both processors and verify the radio
+
+1. Remove any IO9-to-GND or EN-to-GND jumper.
+2. Turn the Tab5 off, disconnect the UART adapter and its wiring, and restore
+   the rear cover. Turn the Tab5 on normally, without holding the power button
+   to enter download mode.
+3. Connect the P4 USB-C console and monitor from `firmware/`:
+
+   ```bash
+   idf.py -p /dev/ttyACM0 monitor
+   ```
+
+4. Look for **`C6 firmware 2.13.1`** in the current application's log, successful
+   SDIO initialization, and no host/co-processor `Version mismatch` warning.
+   `BT controller init RPC failed` should no longer appear.
+5. With no station credentials configured, connect to **Tab5-Debug** and open
+   **http://192.168.4.1**. Open **Settings → Bluetooth** and confirm that scanning
+   finds the D100H when the remote is in pairing mode.
+
+The [C6 firmware guide](tools/c6_firmware/README.md) also describes rebuilding
+the slave images and restoring the factory firmware. Restoring factory 1.4.1
+reintroduces the version mismatch with this project's 2.13.1 host.
+
+### Flashing troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| `idf.py` or `esptool` is missing | Source the ESP-IDF 5.5.6 `export.sh` in this terminal. |
+| P4 build cannot find `iap2_identity.c` | Generate the MFi identity before configuring or building. |
+| No P4 serial port | Use a data cable, connect directly to USB-C, and enter download mode with the power button. Re-list ports after each reset. |
+| Serial port is busy | Close other monitors, terminal programs, and flashing tools using that port. |
+| `Permission denied` on Linux | Grant your user access to the serial device. On Debian / Ubuntu, add it to `dialout` with `sudo usermod -aG dialout "$USER"`, then log out and back in. |
+| P4 image rejected because of chip revision | Use this project's pre-revision-3 defaults for the tested v1.3 board and rebuild with IDF 5.5.6. Do not bypass the revision check with a forced flash. |
+| C6 connection times out | Select the adapter's port, check crossed TX/RX and common ground, keep the P4 stopped, and try the manual IO9/EN sequence. |
+| C6 write stops partway through | Check stable Tab5 power, short/stable UART wiring, and that the P4 has not restarted; retry the manual command at 115200 baud. |
+| C6 flash succeeds but the radio stays offline | Remove boot/reset straps, disconnect adapter control lines, restart both processors, and check the P4 log for the C6 version. |
+| Old application still runs after `app-flash` | An OTA slot may still be selected; use web OTA or the complete P4 flash procedure. |
 
 ### SD card and Wi-Fi
 

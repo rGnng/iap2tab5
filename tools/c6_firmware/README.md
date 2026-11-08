@@ -63,30 +63,28 @@ header is the only programming interface.
 
 ## Flashing
 
+The root README contains the [complete C6 flashing procedure](../../README.md#flash-the-esp32-c6-wi-fible-firmware),
+including tool setup, checksum verification, wiring, and a full manual-reset
+command for adapters without DTR/RTS. The short procedure below assumes the
+ESP-IDF environment is active and the adapter supports automatic reset.
+
 1. Power the Tab5 over USB-C.
 2. Stop the P4 application from driving the C6 reset line. Put the P4 into
-   bootloader mode and leave it there:
+   download mode by holding the Tab5 power button until the green LED flashes,
+   then releasing it. Leave the P4 stopped throughout the C6 flash so its
+   application cannot reset the C6 through GPIO15.
+3. From the repository root, flash the C6 through the **UART adapter's port**:
 
    ```bash
-   # The P4 USB port is the usual /dev/ttyACM0
-   esptool.py -p /dev/ttyACM0 --before default_reset --after no_reset run
+   bash tools/c6_firmware/flash_c6.sh /dev/ttyUSB0
    ```
 
-   On Tab5 this is the equivalent of holding BOOT and tapping RESET. The C6
-   stays powered, but GPIO15 no longer resets it mid-flash.
-3. Flash the C6:
-
-   ```bash
-   tools/c6_firmware/flash_c6.sh /dev/ttyUSB0
-   ```
-
-   If the adapter does not support DTR/RTS auto-reset, hold the C6 `IO9` pad
-   low, tap `EN` to GND, release `IO9`, then run the command with
-   `--before no_reset` instead of `default_reset`.
-
-   The boot strap is `IO9`; do not use `IO0`.
-4. Power-cycle the Tab5 (or reset the P4). The P4 boot log should now show
-   `ESP-Hosted C6 FW: 2.13.1` (or at least a 2.13.x version) and no
+   The helper accepts only the port argument. For manual boot/reset, use the
+   direct `python -m esptool` command in the root README instead of appending
+   reset flags to this script. The C6 boot strap is `IO9`.
+4. After all images are written and verified, remove any manual boot/reset
+   straps, turn off the Tab5, disconnect the UART adapter, and turn the Tab5
+   on normally. The P4 boot log should now show `C6 firmware 2.13.1` and no
    `Version mismatch` warning. `ble_remote` should no longer log
    `BT controller init RPC failed`.
 

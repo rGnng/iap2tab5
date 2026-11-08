@@ -116,8 +116,11 @@ DRBG to mbedTLS when parsing the key so it can derive that point.
 ## Flash / monitor
 
 The Tab5 USB-C port exposes the ESP32-P4 USB Serial/JTAG. Auto-reset into
-download mode normally works; if it does not, hold **BOOT**, tap **RESET**,
-then release **BOOT**.
+download mode normally works. If it does not, connect USB-C to the computer,
+hold the Tab5 power button until the green LED flashes, then release it.
+Recheck the serial port after entering download mode. See the root README's
+[detailed P4 flashing procedure](../README.md#flash-the-esp32-p4-application)
+for tool installation, first flashing, OTA, and recovery.
 
 ```bash
 idf.py -p /dev/ttyACM0 flash monitor
