@@ -2678,7 +2678,7 @@ static uint64_t g_np_cover_track_id;
 #define NP_QUEUE_ROW_H        56
 #define NP_QUEUE_VISIBLE_ROWS  11
 #define NP_QUEUE_LIST_H       (NP_QUEUE_VISIBLE_ROWS * NP_QUEUE_ROW_H)
-/* Rows built for the queue from the current item on.  The full queue is
+/* Rows built for the queue after the current item.  The full queue is
  * always played; only this many upcoming entries are listed. */
 #define NP_QUEUE_MAX_ROWS     100
 
@@ -3749,10 +3749,13 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_style_pad_right(np_queue_list, 0, 0);
         lv_obj_set_style_pad_row(np_queue_list, 0, 0);
         int total = player_queue_count();
-        int start = player_queue_index();
-        if(start < 0) start = 0;
+        int current = player_queue_index();
+        int start = current >= 0 ? current + 1 : total;
         for(int i = start; i < total && i < start + NP_QUEUE_MAX_ROWS; i++) {
-            np_queue_row(np_queue_list, i, i == start);
+            np_queue_row(np_queue_list, i, false);
+        }
+        if(start >= total) {
+            make_label(np_queue_list, "No upcoming songs", FONT_CAPTION, COL_MUTED);
         }
     }
 

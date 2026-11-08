@@ -190,8 +190,31 @@ The hardware build loads the real library from
 `/sdcard/lib/<short8>/library.bin`; the mock library and boot demo playback
 are simulator-only. Library counts are gated on the device connection, so
 with no iPod the library pages are empty and Now Playing shows `No track`.
-The Now Playing queue panel shows a single-item queue (`1/1`) because the
-iAP2 queue list has not been parsed yet.
+The Now Playing queue panel uses the device's parsed queue list and starts
+after the current track. At the end of the list it shows `No upcoming songs`.
+
+### Queue editing investigation (2026-11-08)
+
+The checked [Accessory Interface Specification R32](https://www.scribd.com/document/863231068/Accessory-Interface-Specification-R32-No-Watermark),
+sections 95.12 and 95.13, documents queue reads and `SetNowPlayingInformation`
+(`0x5003`) for seeking, selecting a queue index, or requesting a queue window.
+It does not document a single-item insert, move, or remove command. The
+[Nocturne iAP2 implementation](https://github.com/usenocturne/nocturne/blob/main/crates/iap2/src/csm/now_playing.rs)
+uses the same three parameters. This does not establish that no newer or
+undocumented extension exists; no working seamless edit mechanism has been
+verified on this iPod.
+
+Replaying a revised list with `PlayMediaLibraryItems` (`0x4C07`) and restoring
+the current item/time is a possible fallback, but may interrupt playback.
+The current sender also limits lists to 244 IDs per 2048-byte frame, and the
+reader retains at most 512 IDs; a rebuild must not silently truncate a queue.
+Queue-changing menu actions remain unimplemented pending a verified method
+that preserves uninterrupted playback.
+
+iOS has a separate [MediaPlayer `prepend` API](https://developer.apple.com/documentation/mediaplayer/mpmusicplayercontroller/prepend(_:))
+that inserts items immediately after the current song. It requires code on
+the iOS device; it is not an iAP2 command. An on-device helper would be a
+separate approach and has not been implemented or tested here.
 
 Now Playing artwork comes from the iAP2 File Transfer session (type 2). The
 receiver keeps one buffer per transfer ID, so the queue file (type 3) and the
