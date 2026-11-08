@@ -97,9 +97,10 @@ bool player_device_available(void);
 
 int player_album_count(void);
 
-/* Raw album count regardless of connection; used at boot to load the
- * packed thumbnail cache. */
+/* Stored library counts, available without a connection for cache setup
+ * and the AFC library summary. */
 int player_library_album_count(void);
+int player_library_track_count(void);
 
 /* Latest iAP2 Now Playing artwork as 360x360 RGB565. revision changes when a
  * new image arrives or the track change invalidates the previous image. */

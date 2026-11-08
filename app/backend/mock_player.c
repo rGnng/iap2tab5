@@ -1246,6 +1246,7 @@ bool player_device_available(void)
 /* Raw count for the boot-time thumbnail pack setup. The visible library is
  * still gated by player_device_available(). */
 int player_library_album_count(void) { return album_count; }
+int player_library_track_count(void) { return track_count; }
 
 int player_album_count(void)
 {

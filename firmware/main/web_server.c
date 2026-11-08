@@ -826,6 +826,11 @@ static esp_err_t status_get(httpd_req_t * req)
     cJSON_AddStringToObject(root, "ip", s_net_ip);
     cJSON_AddStringToObject(root, "usbmux", usbmux_host_status());
     cJSON_AddStringToObject(root, "lockdown", lockdown_client_status());
+    lockdown_pair_status_t pairing;
+    lockdown_client_pair_status(&pairing);
+    cJSON_AddBoolToObject(root, "apple_pair_busy", pairing.busy);
+    cJSON_AddBoolToObject(root, "apple_trusted", pairing.trusted && usbmux_host_is_ready());
+    cJSON_AddStringToObject(root, "apple_pair_status", pairing.message);
     cJSON_AddStringToObject(root, "afc", afc_client_status());
     cJSON_AddStringToObject(root, "iap2", iap2_host_status());
     cJSON_AddBoolToObject(root, "iap2_identified",
@@ -1033,6 +1038,14 @@ static esp_err_t sync_post(httpd_req_t * req)
     return httpd_resp_sendstr(req, "copy started; watch the serial log");
 }
 
+static esp_err_t trust_post(httpd_req_t * req)
+{
+    esp_err_t err = lockdown_client_request_pair();
+    if(err != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+        "Connect a device in AFC mode and wait for any sync to finish.");
+    return httpd_resp_sendstr(req, "Pairing started. Unlock the device and tap Trust.");
+}
+
 static esp_err_t pair_post(httpd_req_t * req)
 {
     if(req->content_len == 0 || req->content_len > 256 * 1024) {
@@ -1238,6 +1251,9 @@ esp_err_t web_server_start(void)
     const httpd_uri_t library = {
         .uri = "/api/library", .method = HTTP_POST, .handler = library_post,
     };
+    const httpd_uri_t trust = {
+        .uri = "/api/trust", .method = HTTP_POST, .handler = trust_post,
+    };
     const httpd_uri_t pair = {
         .uri = "/api/pair", .method = HTTP_POST, .handler = pair_post,
     };
@@ -1291,6 +1307,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &ota);
     httpd_register_uri_handler(server, &library);
     httpd_register_uri_handler(server, &pair);
+    httpd_register_uri_handler(server, &trust);
     httpd_register_uri_handler(server, &sync);
     httpd_register_uri_handler(server, &debug);
     httpd_register_uri_handler(server, &log);

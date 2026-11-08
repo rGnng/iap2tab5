@@ -139,6 +139,12 @@ typedef struct {
     bool connected;
     bool sd_ready;
     bool job_active;
+    bool job_finished;
+    bool job_failed;
+    bool usb_connected;
+    bool pair_busy;
+    bool pair_trusted;
+    char pair_status[96];
     int job_kind;              /* 1 = quick, 2 = full */
     int cached_albums;
     int thumb_count;

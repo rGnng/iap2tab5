@@ -16,6 +16,7 @@ idf_component_register(
         "usb_host_core.c"
         "usbmux_host.c"
         "lockdown_client.c"
+        "apple_pairing.c"
         "afc_client.c"
         "thumb_cache.c"
         "star_store.c"

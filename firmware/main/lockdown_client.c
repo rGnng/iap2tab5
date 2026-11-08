@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <time.h>
 
 #include "afc_client.h"
+#include "apple_pairing.h"
 #include "app_config.h"
 #include "player.h"
 #include "thumb_cache.h"
@@ -160,6 +162,39 @@ static void artwork_set_current(uint64_t id)
 static SemaphoreHandle_t s_pair_lock;
 static char * s_pair_ram;
 static size_t s_pair_len;
+static _Atomic bool s_pair_requested;
+static lockdown_pair_status_t s_pair_status;
+
+static void pair_state(bool busy, bool trusted, const char * message)
+{
+    xSemaphoreTake(s_pair_lock, portMAX_DELAY);
+    s_pair_status.busy = busy;
+    s_pair_status.trusted = trusted;
+    snprintf(s_pair_status.message, sizeof(s_pair_status.message), "%s", message);
+    xSemaphoreGive(s_pair_lock);
+}
+
+void lockdown_client_pair_status(lockdown_pair_status_t * out)
+{
+    memset(out, 0, sizeof(*out));
+    if(!s_pair_lock) return;
+    xSemaphoreTake(s_pair_lock, portMAX_DELAY);
+    *out = s_pair_status;
+    xSemaphoreGive(s_pair_lock);
+}
+
+esp_err_t lockdown_client_request_pair(void)
+{
+    if(!s_pair_lock || !usbmux_host_is_ready() || app_config_iap2_mode() || s_art_active)
+        return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_pair_lock, portMAX_DELAY);
+    if(s_pair_status.busy) { xSemaphoreGive(s_pair_lock); return ESP_ERR_INVALID_STATE; }
+    s_pair_status.busy = true;
+    snprintf(s_pair_status.message, sizeof(s_pair_status.message), "Preparing trust...");
+    s_pair_requested = true;
+    xSemaphoreGive(s_pair_lock);
+    return ESP_OK;
+}
 
 static mbedtls_ssl_context s_ssl;
 static mbedtls_ssl_config s_ssl_conf;
@@ -382,8 +417,9 @@ static char * load_pair_record(size_t * out_len)
         xSemaphoreGive(s_pair_lock);
     }
 
-    char * buf = read_file(PAIR_PATH_SD, out_len);
-    if(buf == NULL) buf = read_file(PAIR_PATH_SPIFS, out_len);
+    char * buf = read_file(PAIR_PATH_SPIFS, out_len);
+    if(buf == NULL) buf = read_file(PAIR_PATH_SPIFS ".bak", out_len);
+    if(buf == NULL) buf = read_file(PAIR_PATH_SD, out_len);
     return buf;
 }
 
@@ -404,26 +440,38 @@ esp_err_t lockdown_client_set_pair_record(const char * data, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* Publish only after a complete durable write. Keep the previous identity
+     * on any failure; uploading or retrying trust must not erase a working pair. */
     xSemaphoreTake(s_pair_lock, portMAX_DELAY);
+    const char * tmp = PAIR_PATH_SPIFS ".tmp";
+    const char * backup = PAIR_PATH_SPIFS ".bak";
+    FILE * f = fopen(tmp, "wb");
+    bool ok = f != NULL;
+    if(f) {
+        ok = fwrite(copy, 1, len, f) == len;
+        if(fclose(f) != 0) ok = false;
+    }
+    bool moved = false;
+    if(ok) {
+        struct stat st;
+        if(stat(PAIR_PATH_SPIFS, &st) == 0) {
+            remove(backup);
+            moved = rename(PAIR_PATH_SPIFS, backup) == 0;
+            ok = moved;
+        }
+    }
+    if(ok) ok = rename(tmp, PAIR_PATH_SPIFS) == 0;
+    if(!ok) {
+        if(moved) rename(backup, PAIR_PATH_SPIFS);
+        remove(tmp);
+        xSemaphoreGive(s_pair_lock);
+        free(copy);
+        return ESP_FAIL;
+    }
     free(s_pair_ram);
     s_pair_ram = copy;
     s_pair_len = len;
     xSemaphoreGive(s_pair_lock);
-
-    FILE * f = fopen(PAIR_PATH_SPIFS, "wb");
-    if(f != NULL) {
-        size_t n = fwrite(copy, 1, len, f);
-        fclose(f);
-        if(n == len) {
-            ESP_LOGI(TAG, "pair record stored as %s", PAIR_PATH_SPIFS);
-        }
-        else {
-            ESP_LOGW(TAG, "pair record flash write incomplete");
-        }
-    }
-    else {
-        ESP_LOGW(TAG, "pair record kept in RAM only (no %s)", PAIR_PATH_SPIFS);
-    }
 
     set_status("pair record uploaded");
     ESP_LOGI(TAG, "pair record uploaded (%u bytes)", (unsigned)len);
@@ -638,7 +686,7 @@ static esp_err_t tls_start(usbmux_conn_t * conn, const uint8_t * cert,
     }
 
     ret = mbedtls_pk_parse_key(&s_client_key, key, key_len + 1,
-                               NULL, 0, NULL, NULL);
+                               NULL, 0, mbedtls_ctr_drbg_random, &s_ctr_drbg);
     if(ret != 0) {
         tls_log_error("pk_parse_key", ret);
         return ESP_FAIL;
@@ -726,6 +774,118 @@ static esp_err_t query_type(void)
     return ESP_OK;
 }
 
+static esp_err_t pair_public_key(uint8_t ** key, size_t * len)
+{
+    const char * request = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+        "<key>Label</key><string>Tab5</string><key>Request</key><string>GetValue</string>"
+        "<key>Key</key><string>DevicePublicKey</string></dict></plist>";
+    esp_err_t err = send_plist(request);
+    char * reply = NULL;
+    if(err == ESP_OK) err = recv_plist(&reply);
+    if(err == ESP_OK) {
+        *key = plist_get_data(reply, "Value", len);
+        if(!*key || !*len) err = ESP_ERR_INVALID_RESPONSE;
+    }
+    free(reply);
+    return err;
+}
+
+static esp_err_t pair_with_apple(void)
+{
+    pair_state(true, false, "Creating this Tab5's pairing identity...");
+    uint8_t * key = NULL;
+    size_t key_len = 0;
+    apple_pairing_identity_t identity = {0};
+    esp_err_t err = pair_public_key(&key, &key_len);
+    if(err == ESP_OK) err = apple_pairing_generate(key, key_len, &identity);
+    if(err != ESP_OK) {
+        pair_state(false, false, "Could not create trust. Unlock your iPod and try again.");
+        free(key);
+        return err;
+    }
+    /* Key generation can outlast lockdownd's idle timeout. Reopen and verify
+     * the same device's public key before sending the new pairing request. */
+    usbmux_conn_close(s_conn);
+    s_conn = NULL;
+    err = usbmux_connect(LOCKDOWN_PORT, &s_conn, 5000);
+    uint8_t * check = NULL;
+    size_t check_len = 0;
+    if(err == ESP_OK) err = query_type();
+    if(err == ESP_OK) err = pair_public_key(&check, &check_len);
+    if(err == ESP_OK && (check_len != key_len || memcmp(check, key, key_len)))
+        err = ESP_ERR_INVALID_STATE;
+    free(check); free(key);
+    if(err != ESP_OK) {
+        pair_state(false, false, "Connection changed. Reconnect your iPod and try again.");
+        apple_pairing_free(&identity);
+        return err;
+    }
+    pair_state(true, false, "Unlock your iPod and tap Trust on its screen.");
+    TickType_t started = xTaskGetTickCount();
+    bool finished = false;
+    while(usbmux_host_is_ready() &&
+          xTaskGetTickCount() - started < pdMS_TO_TICKS(120000)) {
+        char * reply = NULL;
+        err = send_plist(identity.request_xml);
+        if(err == ESP_OK) err = recv_plist(&reply);
+        if(err != ESP_OK) { free(reply); break; }
+        char error[96] = "";
+        if(plist_get_string(reply, "Error", error, sizeof(error))) {
+            free(reply);
+            if(strcmp(error, "PairingDialogResponsePending") == 0 ||
+               strcmp(error, "PasswordProtected") == 0) {
+                pair_state(true, false, strcmp(error, "PasswordProtected") == 0 ?
+                    "Unlock your iPod to continue pairing." :
+                    "Tap Trust on your iPod, then enter its passcode.");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+            pair_state(false, false, strcmp(error, "UserDeniedPairing") == 0 ?
+                "Trust was declined. Tap Pair / Trust to try again." :
+                "Could not pair. Unlock the device and try again.");
+            err = ESP_FAIL;
+            finished = true;
+            break;
+        }
+        char request[32] = "";
+        bool valid = plist_get_string(reply, "Request", request, sizeof(request)) &&
+                     strcmp(request, "Pair") == 0;
+        if(!valid) { free(reply); err = ESP_ERR_INVALID_RESPONSE; break; }
+        /* Preserve Apple's escrow bag in the local record, never in logs. */
+        const char * bag = strstr(reply, "<key>EscrowBag</key>");
+        if(bag) {
+            const char * end = strstr(bag, "</data>");
+            if(end) {
+                size_t extra = (size_t)(end + 7 - bag);
+                char * tail = strstr(identity.record_xml, "</dict></plist>");
+                size_t prefix = (size_t)(tail - identity.record_xml);
+                char * record = malloc(prefix + extra + 16);
+                if(!record) { free(reply); err = ESP_ERR_NO_MEM; break; }
+                memcpy(record, identity.record_xml, prefix);
+                memcpy(record + prefix, bag, extra);
+                strcpy(record + prefix + extra, "</dict></plist>");
+                free(identity.record_xml);
+                identity.record_xml = record;
+            }
+        }
+        free(reply);
+        err = lockdown_client_set_pair_record(identity.record_xml, strlen(identity.record_xml));
+        pair_state(false, err == ESP_OK, err == ESP_OK ?
+            "" :
+            "Trust approved, but saving failed. Tap Pair / Trust to retry.");
+        finished = true;
+        break;
+    }
+    if(!finished) {
+        pair_state(false, false, usbmux_host_is_ready() ?
+            "Trust timed out. Unlock your iPod and try again." :
+            "Device disconnected. Reconnect and try again.");
+        err = ESP_ERR_TIMEOUT;
+    }
+    apple_pairing_free(&identity);
+    return err;
+}
+
 static esp_err_t start_session(const char * pair)
 {
     char host_id[80] = {0};
@@ -792,12 +952,6 @@ static esp_err_t start_session(const char * pair)
         uint8_t * key = plist_get_data(pair, "RootPrivateKey", &key_len);
         ESP_LOGI(TAG, "pair cert=%u bytes key=%u bytes", (unsigned)cert_len,
                  (unsigned)key_len);
-        if(cert != NULL && cert_len > 0) {
-            ESP_LOGI(TAG, "cert starts: %.48s", (const char *)cert);
-        }
-        if(key != NULL && key_len > 0) {
-            ESP_LOGI(TAG, "key starts: %.48s", (const char *)key);
-        }
         if(cert == NULL || key == NULL || cert_len == 0 || key_len == 0) {
             free(cert);
             free(key);
@@ -923,10 +1077,11 @@ static void afc_probe(void)
 static void lockdown_task(void * arg)
 {
     (void)arg;
-    bool warned_pair = false;
 
     for(;;) {
         if(!usbmux_host_wait_ready(60000)) {
+            s_pair_requested = false;
+            pair_state(false, false, "Connect and unlock your iPod to pair.");
             set_status("waiting for iPod");
             continue;
         }
@@ -938,13 +1093,21 @@ static void lockdown_task(void * arg)
             ESP_LOGW(TAG, "lockdownd connect failed: %s",
                      esp_err_to_name(err));
             set_status("lockdownd connect failed");
+            if(atomic_exchange(&s_pair_requested, false))
+                pair_state(false, false, "Could not connect. Unlock your iPod and retry pairing.");
             vTaskDelay(pdMS_TO_TICKS(3000));
             continue;
         }
         s_conn = conn;
 
         if(query_type() != ESP_OK) {
+            if(atomic_exchange(&s_pair_requested, false))
+                pair_state(false, false, "Connection failed. Reconnect and retry pairing.");
             goto cleanup;
+        }
+
+        if(atomic_exchange(&s_pair_requested, false)) {
+            if(pair_with_apple() != ESP_OK) goto cleanup;
         }
 
         /* StartSession needs the host pair record. It can arrive from the
@@ -954,12 +1117,8 @@ static void lockdown_task(void * arg)
         for(;;) {
             pair = load_pair_record(&pair_len);
             if(pair != NULL) break;
-            if(!warned_pair) {
-                ESP_LOGW(TAG, "pair record not found; upload it on the web "
-                              "page or place /sdcard/pair.plist");
-                set_status("waiting for pair record");
-                warned_pair = true;
-            }
+            if(s_pair_requested) goto cleanup;
+            set_status("Pair / Trust to connect");
             if(!usbmux_host_is_ready()) break;
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
@@ -968,7 +1127,11 @@ static void lockdown_task(void * arg)
         ESP_LOGI(TAG, "using pair record (%u bytes)", (unsigned)pair_len);
         err = start_session(pair);
         free(pair);
-        if(err != ESP_OK) goto cleanup;
+        if(err != ESP_OK) {
+            pair_state(false, false, "Trust needs renewing. Unlock your iPod and tap Pair / Trust.");
+            goto cleanup;
+        }
+        pair_state(false, true, "");
 
         uint16_t afc_port = 0;
         bool afc_ssl = false;
@@ -998,7 +1161,7 @@ static void lockdown_task(void * arg)
             s_conn = NULL;
             set_status("AFC ready");
 
-            while(usbmux_host_is_ready() && afc_client_is_ready()) {
+            while(usbmux_host_is_ready() && afc_client_is_ready() && !s_pair_requested) {
                 vTaskDelay(pdMS_TO_TICKS(500));
             }
             ESP_LOGW(TAG, "AFC connection closed");
@@ -1015,7 +1178,8 @@ cleanup:
             s_conn = NULL;
         }
         set_status("disconnected");
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        if(!usbmux_host_is_ready()) pair_state(false, false, "Reconnect your device to continue.");
+        vTaskDelay(pdMS_TO_TICKS(s_pair_requested ? 50 : 3000));
     }
 }
 
@@ -1880,6 +2044,10 @@ esp_err_t lockdown_client_sync_artwork(int limit)
         s_art_copied = (db_err == ESP_OK) ? 1 : 0;
         if(db_err != ESP_OK) {
             ESP_LOGW(TAG, "database sync failed: %s", esp_err_to_name(db_err));
+            s_art_failed = 1;
+            s_art_active = false;
+            set_status("Database copy failed. Check the connection and retry.");
+            return db_err;
         }
         set_status("AFC ready");
     }
@@ -2156,7 +2324,8 @@ esp_err_t lockdown_client_start(void)
     s_pair_lock = xSemaphoreCreateMutex();
     if(s_pair_lock == NULL) return ESP_ERR_NO_MEM;
 
-    if(xTaskCreate(lockdown_task, "lockdown", 10240, NULL, 4, NULL) != pdPASS) {
+    if(xTaskCreateWithCaps(lockdown_task, "lockdown", 24576, NULL, 4, NULL,
+                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 

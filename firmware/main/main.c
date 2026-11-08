@@ -98,6 +98,8 @@ static void publish_system_config(void);
 /* ---- Apple File Conduit settings page ---------------------------------- */
 static volatile int s_afc_job_active;
 static volatile int s_afc_job_kind;
+static bool s_afc_job_finished, s_afc_job_failed;
+static char s_afc_job_status[96];
 static int s_afc_cached_albums;
 static int s_afc_thumb_count;
 static int s_afc_cover_count;
@@ -167,6 +169,14 @@ static void ui_afc_status_handler(ui_afc_status_t * out)
     out->afc_mode = !app_config_iap2_mode();
     out->sd_ready = app_config_sd_ready();
     out->connected = afc_client_is_ready();
+    out->usb_connected = usbmux_host_is_ready();
+    lockdown_pair_status_t pairing;
+    lockdown_client_pair_status(&pairing);
+    out->pair_busy = pairing.busy;
+    out->pair_trusted = pairing.trusted && out->usb_connected;
+    snprintf(out->pair_status, sizeof(out->pair_status), "%s", pairing.message);
+    out->job_finished = s_afc_job_finished;
+    out->job_failed = s_afc_job_failed;
     lockdown_artwork_progress_t progress;
     lockdown_client_artwork_progress(&progress);
     out->job_active = s_afc_job_active != 0 || progress.active;
@@ -179,7 +189,8 @@ static void ui_afc_status_handler(ui_afc_status_t * out)
     out->sync_current_id = progress.current_id;
     snprintf(out->sync_album, sizeof(out->sync_album), "%s", progress.album);
     snprintf(out->sync_artist, sizeof(out->sync_artist), "%s", progress.artist);
-    snprintf(out->status, sizeof(out->status), "%s", lockdown_client_status());
+    snprintf(out->status, sizeof(out->status), "%s",
+             s_afc_job_finished ? s_afc_job_status : lockdown_client_status());
 
     snprintf(out->usb_status, sizeof(out->usb_status), "%s",
              lockdown_client_status());
@@ -195,8 +206,8 @@ static void ui_afc_status_handler(ui_afc_status_t * out)
     snprintf(out->usb_operation, sizeof(out->usb_operation), "%s", operation);
     snprintf(out->library_suffix, sizeof(out->library_suffix), "%s",
              app_config_library_short());
-    out->library_albums = player_album_count();
-    out->library_tracks = player_song_count();
+    out->library_albums = player_library_album_count();
+    out->library_tracks = player_library_track_count();
     snprintf(out->library_db_item, sizeof(out->library_db_item),
              "%d albums / %d tracks", out->library_albums,
              out->library_tracks);
@@ -252,17 +263,12 @@ static void ui_afc_status_handler(ui_afc_status_t * out)
     out->cache_bytes = out->thumb_bytes + out->original_bytes;
 }
 
-static void afc_probe_task(void * arg)
-{
-    LV_UNUSED(arg);
-    lockdown_client_run_afc_probe();
-    vTaskDelete(NULL);
-}
-
 static void afc_job_task(void * arg);
 
 static bool afc_start_job_task(uint8_t job)
 {
+    s_afc_job_finished = s_afc_job_failed = false;
+    s_afc_job_status[0] = 0;
     if(job != 0) app_config_set_afc_job(job);
     s_afc_job_active = job ? job : 1;
     s_afc_job_kind = job;
@@ -271,6 +277,8 @@ static bool afc_start_job_task(uint8_t job)
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if(ok != pdPASS) {
         s_afc_job_active = 0;
+        s_afc_job_finished = s_afc_job_failed = true;
+        snprintf(s_afc_job_status, sizeof(s_afc_job_status), "Not enough memory to start sync. Try again.");
         ESP_LOGE(TAG, "failed to create AFC job task");
         return false;
     }
@@ -296,25 +304,42 @@ static void afc_job_task(void * arg)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
+    esp_err_t result = ESP_ERR_TIMEOUT;
     if(afc_client_is_ready()) {
         esp_err_t err = lockdown_client_sync_artwork(job == 1 ? 64 : 0);
+        result = err;
         ESP_LOGW(TAG, "AFC job %u result: %s", job, esp_err_to_name(err));
     }
     else {
         ESP_LOGW(TAG, "AFC job %u: AFC did not become ready", job);
     }
 
+    lockdown_artwork_progress_t progress;
+    lockdown_client_artwork_progress(&progress);
+    s_afc_job_failed = result != ESP_OK || progress.failed > 0;
+    if(progress.failed > 0 && progress.phase > 1) {
+        snprintf(s_afc_job_status, sizeof(s_afc_job_status),
+            "%d of %d covers ready; %d could not be %s.",
+            progress.copied, progress.total, progress.failed,
+            progress.phase == 3 ? "converted" : "copied");
+    }
+    else {
+        snprintf(s_afc_job_status, sizeof(s_afc_job_status), "%s",
+            result == ESP_ERR_TIMEOUT ? "Could not connect. Check device trust and try again." :
+            s_afc_job_failed ? "Database or artwork sync failed. Check the device and SD card." : "Sync complete");
+    }
+    s_afc_job_finished = true;
+    s_afc_cache_tick = 0;
     s_afc_job_active = 0;
-    app_config_set_iap2_mode(true);
-    app_config_save();
-    ESP_LOGW(TAG, "AFC job done; switching back to iAP2");
-    vTaskDelay(pdMS_TO_TICKS(600));
-    web_server_reboot();
+    /* Keep the result visible; Return to player performs the explicit reboot. */
     vTaskDelete(NULL);
 }
 
 static void ui_afc_action_handler(int action)
 {
+    lockdown_pair_status_t pairing;
+    lockdown_client_pair_status(&pairing);
+    if(s_afc_job_active || pairing.busy) return;
     if(action == UI_AFC_ACTION_PAIR) {
         if(app_config_iap2_mode()) {
             app_config_set_iap2_mode(false);
@@ -323,8 +348,8 @@ static void ui_afc_action_handler(int action)
             vTaskDelay(pdMS_TO_TICKS(350));
             web_server_reboot();
         }
-        else if(afc_client_is_ready()) {
-            xTaskCreate(afc_probe_task, "afc_probe", 6144, NULL, 4, NULL);
+        else {
+            lockdown_client_request_pair();
         }
         return;
     }
@@ -339,12 +364,12 @@ static void ui_afc_action_handler(int action)
         return;
     }
 
+    if(action != UI_AFC_ACTION_QUICK_SYNC && action != UI_AFC_ACTION_FULL_SYNC) return;
     uint8_t job = action == UI_AFC_ACTION_QUICK_SYNC ? 1 : 2;
 
-    /* Already in the AFC sync UI: start the worker directly. It will
-     * switch back to iAP2 and reboot when the sync finishes. */
+    /* In AFC mode, run the worker and retain its result on screen. */
     if(!app_config_iap2_mode()) {
-        if(s_afc_job_active) return;
+        if(!afc_client_is_ready() || !app_config_sd_ready()) return;
         afc_start_job_task(job);
         return;
     }

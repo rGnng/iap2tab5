@@ -71,6 +71,8 @@ mkdir -p build/screenshots
 | `--menubar <left\|right>` | Choose the menubar side |
 | `--zoom <factor>` | Scale the window; default `1.0` |
 | `--keys <list>` | Inject comma-separated keys, such as `2,enter` or `context` |
+| `--afc <state>` | Preview AFC: `disconnected`, `ready`, `trust`, `syncing`, `done`, `error` |
+| `--theme <0..2>` | Gray, Aqua, or Windows 95 |
 | `--screenshot <path>` | Save a PNG and exit |
 | `--wait <ms>` | Delay before capture; default `1000` |
 | `--headless` | Use SDL's offscreen video driver |
@@ -126,14 +128,16 @@ firmware updater also updates only the P4 application.
 - M5Stack Tab5, a USB-C **data** cable, an SD card, and an iAP2-capable iPod or iPhone.
 - **ESP-IDF 5.5.6**, the version used by the current firmware dependency lock.
 - An MFi P-256 certificate chain and private key for iAP2 authentication.
-- A matching lockdownd pair record for AFC access to the Apple device.
+- Apple trust for AFC access: use **Pair / Trust** in AFC mode. Existing
+  lockdownd pair records can also be imported.
 - For the C6: a USB-to-UART programming jig set to **3.3 V**, providing both
   C6 power and 3.3 V UART signals, access to the internal programming header,
   and the included **ESP-Hosted 2.13.1** images.
 
 The MFi identity and lockdownd pair record serve separate purposes. Neither is
 included in this repository. The identity is required to build the P4 application;
-the pair record is uploaded later for AFC. The included C6 images need neither.
+the AFC pair record is generated on the Tab5 after Apple trust approval (or
+imported from an existing host). The included C6 images need neither.
 
 The commands below use Bash on Linux. Replace `/dev/ttyACM0` and `/dev/ttyUSB0`
 with the actual ports on your computer. On macOS they usually look like
@@ -522,17 +526,17 @@ cannot handle full-/low-speed devices behind a high-speed hub on USB-A; see
 | **AFC Sync**, USB configuration 4 | Database copying and album thumbnail sync |
 
 These protocol modes are mutually exclusive. Switching between them saves the
-selection in NVS and reboots. Quick/full sync jobs return to iAP2 automatically
-when finished.
+selection in NVS and reboots. Quick/full sync jobs keep their result on screen;
+choose **Exit** to restart in iAP2 mode.
 
 ## Import a media library
 
 Library conversion runs on a host computer. Copying the database or running an
 artwork sync on the Tab5 does not rebuild `library.bin`.
 
-1. Upload the device's lockdownd pair record through the web UI and enter
-   **AFC Sync** mode. See [AFC pairing and bring-up](docs/afc-bringup.md) for
-   pair-record setup.
+1. Enter **AFC Sync** mode and choose **Pair / Trust**. Unlock the Apple
+   device and approve Trust on its screen. Existing pair records can also be
+   uploaded. See [AFC pairing and bring-up](docs/afc-bringup.md).
 2. Use **Copy iPod database** in the web UI to copy the database to
    `/sdcard/AFC/`. Copy `MLDB.SQL` and, if present, `MLDB.WAL` from the card to a
    host directory such as `/tmp/ipod-db/`.
@@ -590,8 +594,10 @@ without ESP-IDF:
 python3 -m unittest discover -s tests -v
 ```
 
-They cover BLE/HID framing, captured protocol vectors, heartbeat encoding, and
-top-right tap/hold handling. Simulator screenshots are useful for reviewing UI
+They cover BLE/HID framing, captured protocol vectors, heartbeat encoding,
+top-right tap/hold handling, library transport, trust approval/retry, and pair
+record persistence. Certificate validation additionally uses `libmbedtls-dev`
+and Python `cryptography`; those checks are skipped when unavailable. Simulator screenshots are useful for reviewing UI
 changes; hardware timing, USB behavior, and BLE still need a Tab5.
 
 ### Regenerate assets

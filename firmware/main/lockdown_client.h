@@ -18,6 +18,15 @@ esp_err_t lockdown_client_start(void);
  * upload). The record is also written to /spiffs/pair.plist. */
 esp_err_t lockdown_client_set_pair_record(const char * data, size_t len);
 
+typedef struct {
+    bool busy;
+    bool trusted;
+    char message[96];
+} lockdown_pair_status_t;
+/* Nonblocking: the lockdown task owns the whole Apple trust exchange. */
+esp_err_t lockdown_client_request_pair(void);
+void lockdown_client_pair_status(lockdown_pair_status_t * out);
+
 const char * lockdown_client_status(void);
 
 /* Re-runs the AFC directory/stat/read probe on the current session. */

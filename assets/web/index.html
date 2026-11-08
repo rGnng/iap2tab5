@@ -259,7 +259,9 @@ pre {
         </div>
         <div class="hint">Uploading replaces <code>/sdcard/lib/&lt;id&gt;/library.bin</code> and reboots the device.
           “Copy iPod database” writes the AFC database snapshot to the SD card.</div>
-        <label class="field"><span class="lbl">Pair record (plist)</span>
+        <div class="actions"><button id="btn_trust" onclick="pairApple()">Pair / Trust</button></div>
+        <div class="hint" id="apple_trust">In AFC mode, connect and unlock your device, then tap Trust on its screen.</div>
+        <label class="field"><span class="lbl">Advanced: import pair record (plist)</span>
           <input type="file" id="pair_file" accept=".plist">
         </label>
         <div class="actions"><button onclick="uploadPair()">Upload pair record</button></div>
@@ -276,7 +278,14 @@ pre {
         <label class="field"><span class="lbl">Brightness <span id="bri_v">70</span>%</span>
           <input type="range" id="brightness" min="0" max="100" step="1">
         </label>
-        <label class="field"><span class="lbl">Key sound</span>
+        <label class="field"><span class="lbl">Theme</span>
+          <select id="theme">
+            <option value="0">Gray</option>
+            <option value="1">Aqua</option>
+            <option value="2">Windows 95</option>
+          </select>
+        </label>
+        <label class="field"><span class="lbl">Key Feedback</span>
           <select id="sound_mode">
             <option value="2">Touch + Key</option>
             <option value="1">Touch</option>
@@ -407,6 +416,11 @@ function render(s, c) {
   $('np_cur').textContent = fmtTime(cur);
   $('np_bar').style.width = dur > 0 ? Math.min(100, cur / dur * 100) + '%' : '0%';
 
+  $('btn_trust').disabled = !!s.iap2_mode || !!s.apple_pair_busy;
+  if (s.apple_trusted) $('apple_trust').textContent = '';
+  else if (s.apple_pair_status) $('apple_trust').textContent = s.apple_pair_status;
+  else $('apple_trust').textContent = 'In AFC mode, connect and unlock your device, then tap Trust on its screen.';
+
   $('device_rows').innerHTML =
     row('iAP2', s.iap2) +
     row('USB mux', s.usbmux) +
@@ -433,6 +447,7 @@ function render(s, c) {
   setVal('volume', c.volume); $('vol_v').textContent = c.volume;
   setVal('brightness', c.brightness); $('bri_v').textContent = c.brightness;
   setVal('sound_mode', String(c.sound_mode));
+  setVal('theme', String(c.theme));
   $('debug_log').checked = !!c.debug_log;
   $('iap2_mode').checked = !!c.iap2_mode;
   setVal('usb_mode', String(c.usb_mode));
@@ -473,6 +488,7 @@ function saveConfig() {
     screen_flip: +$('screen_flip').value,
     wifi_mode: +$('wifi_mode').value,
     sound_mode: +$('sound_mode').value,
+    theme: +$('theme').value,
     debug_log: $('debug_log').checked,
     iap2_mode: $('iap2_mode').checked,
     usb_mode: +$('usb_mode').value,
@@ -542,6 +558,11 @@ function uploadFirmware() {
     toast('Update accepted; the device is rebooting');
     setTimeout(refresh, 12000);
   });
+}
+function pairApple() {
+  api('/api/trust', {method: 'POST'})
+    .then(function (text) { toast(text); })
+    .catch(function (e) { toast(e.message, true); });
 }
 function uploadPair() {
   if (!$('pair_file').files[0]) { toast('Choose a plist first', true); return; }

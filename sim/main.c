@@ -30,6 +30,8 @@ static void print_usage(const char * argv0)
            LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
     printf("Usage: %s [options]\n\n", argv0);
     printf("  --zoom <factor>       Window zoom, e.g. 0.75 (default: 1.0)\n");
+    printf("  --theme <0..2>        Gray, Aqua, or Windows 95\n");
+    printf("  --afc <state>         AFC: disconnected, ready, trust, syncing, done, error\n");
     printf("  --screenshot <path>   Render one frame to a PNG and exit\n");
     printf("  --wait <ms>           Wait before the screenshot (default: 1000)\n");
     printf("  --screen <1-6>        Start on a specific screen\n");
@@ -230,11 +232,37 @@ static int sdl_key_watch(void * userdata, SDL_Event * event)
     return 0;
 }
 
+static const char * sim_afc_state;
+
 static void sim_afc_status(ui_afc_status_t * out)
 {
     memset(out, 0, sizeof(*out));
-    out->available = false;
-    snprintf(out->status, sizeof(out->status), "simulator");
+    out->available = sim_afc_state != NULL;
+    out->afc_mode = sim_afc_state != NULL;
+    out->sd_ready = out->sd_info_ready = true;
+    out->usb_connected = sim_afc_state && strcmp(sim_afc_state, "disconnected") != 0;
+    out->connected = out->pair_trusted = out->usb_connected && strcmp(sim_afc_state, "trust") != 0;
+    out->pair_busy = sim_afc_state && strcmp(sim_afc_state, "trust") == 0;
+    out->job_active = sim_afc_state && strcmp(sim_afc_state, "syncing") == 0;
+    out->job_finished = sim_afc_state && (strcmp(sim_afc_state, "done") == 0 || strcmp(sim_afc_state, "error") == 0);
+    out->job_failed = sim_afc_state && strcmp(sim_afc_state, "error") == 0;
+    out->library_albums = 2096;
+    out->library_tracks = 14201;
+    out->thumb_count = 1824;
+    out->library_db_bytes = 1900000;
+    out->sd_used_bytes = 872218624;
+    out->sd_total_bytes = 31715491840ULL;
+    out->sync_phase = 2;
+    out->sync_total = 2096;
+    out->sync_attempted = 1372;
+    out->sync_copied = 1372;
+    out->job_kind = 2;
+    snprintf(out->library_updated, sizeof(out->library_updated), "2026-11-08 10:32");
+    snprintf(out->pair_status, sizeof(out->pair_status), "%s", out->pair_busy ?
+        "Tap Trust on your iPod, then enter its passcode." : out->connected ?
+        "" : "Unlock your iPod before pairing.");
+    snprintf(out->sync_album, sizeof(out->sync_album), "TrickRoom - Album Mix");
+    snprintf(out->status, sizeof(out->status), "Some files could not be copied. Reconnect and retry.");
 }
 
 static void sim_afc_action(int action)
@@ -254,6 +282,7 @@ int main(int argc, char ** argv)
     const char * screenshot_path = NULL;
     int wait_ms = 1000;
     int start_screen = 0;
+    int theme = 0;
     const char * menubar_side = NULL;
     const char * keys = NULL;
     bool headless = false;
@@ -292,6 +321,12 @@ int main(int argc, char ** argv)
         }
         else if(strcmp(argv[i], "--boot-freeze") == 0 && i + 1 < argc) {
             boot_freeze_ms = atoi(argv[++i]);
+        }
+        else if(strcmp(argv[i], "--theme") == 0 && i + 1 < argc) {
+            theme = atoi(argv[++i]);
+        }
+        else if(strcmp(argv[i], "--afc") == 0 && i + 1 < argc) {
+            sim_afc_state = argv[++i];
         }
         else if(strcmp(argv[i], "--headless") == 0) {
             headless = true;
@@ -334,6 +369,11 @@ int main(int argc, char ** argv)
     lv_sdl_mousewheel_create();
     SDL_AddEventWatch(sdl_key_watch, NULL);
 
+    ui_system_config_t settings = {.theme = theme, .touch_enabled = 1,
+        .volume = 65, .brightness = 70, .menubar_left = 1, .sort_desc = 1,
+        .sound_enabled = true, .sound_mode = 2, .wifi_status = "WiFi off", .wifi_ip = "--"};
+    ui_apply_saved_settings(&settings);
+    ui_set_afc_sync_mode(sim_afc_state != NULL);
     ui_set_afc_status_cb(sim_afc_status);
     ui_set_afc_action_cb(sim_afc_action);
     ui_init();

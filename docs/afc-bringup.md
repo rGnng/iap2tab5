@@ -35,33 +35,49 @@ service com.apple.afc on port 51547 (ssl=0)
 read 16 bytes from MediaLibrary.sqlitedb OK
 ```
 
-## Pair record
+## Pair and trust on the Tab5
 
-The connected iPod is the device whose pair record is:
+Enter AFC mode, connect the Apple device to USB-A, and choose **Pair / Trust
+Apple**. Unlock the Apple device, tap **Trust**, and enter its passcode if asked.
+The Tab5 generates its own RSA host identity; no computer or exported pair
+record is needed. The connection panel shows USB connection, approved trust,
+and ready file access separately. Approval is polled for up to two minutes;
+denial, timeout, disconnection, and save failures leave the previous record
+intact and allow a retry. Keep the device connected while pairing runs.
 
-```text
-/var/lib/lockdown/3fd3332ac4237bedefa634a5df804b1aa95c137b.plist
-HostID FF5A5A6C-BEC3-A7F8-4B17-912E3916C2F1
-WiFiMACAddress 98:46:0a:cc:17:8f
-```
+Pairing runs on the lockdown worker, not the display task. The Pair request
+contains certificates and host identifiers only; private keys stay on the Tab5.
+After generation, the device public key is checked again to avoid sending an
+identity for a device that was swapped while generating keys. A successful
+reply's escrow bag is saved with the identity.
 
-The other record (`00008150-000935823E22401C.plist`, HostID
-`715C85C3-...`) belongs to a different device and gives `InvalidHostID` on
-this iPod.
+The web page has the same **Pair / Trust** action (`POST /api/trust`,
+AFC mode required). `/api/status` includes `apple_pair_busy`, `apple_trusted`,
+and `apple_pair_status` for progress. Apple approval always happens on the
+Apple device itself.
 
-Ways to load it:
+Existing pair records remain supported through web upload (`POST /api/pair`),
+serial upload (`u`, plist, then `EOF`), or `/sdcard/pair.plist`. The saved
+`/spiffs/pair.plist` takes precedence over the SD copy so a newly approved
+identity survives reboot. Saves use a temporary file and keep the previous
+record as `/spiffs/pair.plist.bak`; that backup is also used if a reboot
+interrupts replacement. Records contain private keys and must stay out of Git.
+Code-only OTA preserves SPIFFS; a full flash can overwrite it.
 
-1. Web upload: open the Tab5 web page and use **Pair record -> Upload
-   pair.plist**. `/api/pair` accepts the raw plist. The firmware stores it at
-   `/spiffs/pair.plist` and uses it immediately.
-2. Serial upload: press `u`, send the plist text, then a line containing
-   `EOF`.
-3. SD card: `/sdcard/pair.plist` (requires a reboot or a later remount).
+## Sync screen
 
-The pair record contains private keys. It is stored in the internal SPIFFS
-partition, not in the repository. A full `idf.py flash` regenerates and
-overwrites the storage partition, so the pair record has to be uploaded
-again afterwards; code-only `idf.py app-flash` updates keep it.
+The square layout follows Gray, Aqua, and Windows 95. Connection and Apple
+trust are on the left; imported album/track counts, cached covers, and sync
+progress are on the right. The footer shows SD usage and **Exit**.
+
+- **Quick sync:** validates the imported library and caches the first 64 albums.
+- **Full sync:** copies the database snapshot and caches all imported album art.
+- Existing covers are reused. Copying a database snapshot does not rebuild the
+  browsable `library.bin`; the desktop import step is still required for new
+  tracks or albums.
+- Sync requires AFC access and an SD card. Pairing, repeat sync, and leaving AFC
+  are disabled while an operation runs. Results stay visible when sync finishes;
+  **Exit** restarts in iAP2 mode. Failed database copies stop the job.
 
 ## mbedTLS patch
 
