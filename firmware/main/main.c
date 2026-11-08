@@ -749,9 +749,11 @@ void app_main(void)
 
     bsp_display_backlight_on();
     bsp_display_brightness_set(g_app_config.brightness);
-    /* Keep the QC/NTC pin untouched at boot until the charge path has been
-     * validated; only enable the charger. */
-    charge_set_enabled(g_app_config.charge_enabled);
+    esp_err_t charge_err = charge_apply(g_app_config.charge_enabled,
+                                        g_app_config.qc_high);
+    if(charge_err != ESP_OK) {
+        ESP_LOGE(TAG, "charger setup failed: %s", esp_err_to_name(charge_err));
+    }
     serial_input_start();
 
     usb_host_core_set_apple_config(g_app_config.iap2_mode ? 2 : 4);

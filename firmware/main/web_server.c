@@ -344,28 +344,21 @@ static esp_err_t power_get(httpd_req_t * req)
     int bus_mv = 0;
     int current_ma = 0;
     if(err == ESP_OK) {
-        uint8_t reg;
+        const uint8_t regs[] = {0x00, 0x02, 0x01};
+        uint16_t values[3] = {0};
         uint8_t raw[2];
-        uint16_t bus_raw = 0;
-        int16_t shunt_raw = 0;
-        uint16_t config_raw = 0;
-        reg = 0x00;
-        if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK) {
-            config_raw = (uint16_t)((raw[0] << 8) | raw[1]);
-        }
-        reg = 0x02;
-        if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK) {
-            bus_raw = (uint16_t)((raw[0] << 8) | raw[1]);
-        }
-        reg = 0x01;
-        if(i2c_master_transmit_receive(dev, &reg, 1, raw, 2, 100) == ESP_OK) {
-            shunt_raw = (int16_t)((raw[0] << 8) | raw[1]);
+        for(size_t i = 0; i < 3 && err == ESP_OK; i++) {
+            err = i2c_master_transmit_receive(dev, &regs[i], 1, raw, 2, 100);
+            if(err == ESP_OK) values[i] = (uint16_t)((raw[0] << 8) | raw[1]);
         }
         i2c_master_bus_rm_device(dev);
-        bus_mv = bus_raw * 5 / 4;
-        current_ma = shunt_raw * 5 / 10;
-        cJSON_AddNumberToObject(root, "shunt_raw", shunt_raw);
-        cJSON_AddNumberToObject(root, "ina226_config", config_raw);
+        if(err == ESP_OK) {
+            int16_t shunt_raw = (int16_t)values[2];
+            bus_mv = values[1] * 5 / 4;
+            current_ma = shunt_raw * 5 / 10;
+            cJSON_AddNumberToObject(root, "shunt_raw", shunt_raw);
+            cJSON_AddNumberToObject(root, "ina226_config", values[0]);
+        }
     }
 
     cJSON_AddBoolToObject(root, "ina226_ok", err == ESP_OK);
@@ -373,22 +366,28 @@ static esp_err_t power_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "current_ma", current_ma);
 
     esp_io_expander_handle_t io = bsp_io_expander1_init();
-    uint32_t level = 0, out = 0;
+    uint32_t level = 0, out = 0, direction = 0, highz = 0xff;
     if(io != NULL) {
         esp_io_expander_get_level(io, IO_EXPANDER_PIN_NUM_3 |
                                           IO_EXPANDER_PIN_NUM_5 |
                                           IO_EXPANDER_PIN_NUM_6 |
                                           IO_EXPANDER_PIN_NUM_7, &level);
         if(io->read_output_reg) io->read_output_reg(io, &out);
+        if(io->read_direction_reg) io->read_direction_reg(io, &direction);
+        if(io->read_highz_reg) io->read_highz_reg(io, &highz);
     }
+    cJSON_AddNumberToObject(root, "expander_output", out);
+    cJSON_AddNumberToObject(root, "expander_direction", direction);
+    cJSON_AddNumberToObject(root, "expander_highz", highz);
     cJSON_AddBoolToObject(root, "usb5v_en",
                           (out & IO_EXPANDER_PIN_NUM_3) != 0);
     cJSON_AddBoolToObject(root, "nchg_qc_en",
                           (out & IO_EXPANDER_PIN_NUM_5) != 0);
     cJSON_AddBoolToObject(root, "chg_stat",
                           (level & IO_EXPANDER_PIN_NUM_6) != 0);
-    cJSON_AddBoolToObject(root, "chg_en",
-                          (out & IO_EXPANDER_PIN_NUM_7) != 0);
+    cJSON_AddBoolToObject(root, "chg_en", charge_read_enabled());
+    cJSON_AddBoolToObject(root, "qc_driven",
+                          (direction & ~highz & IO_EXPANDER_PIN_NUM_5) != 0);
 
     char * text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -410,18 +409,19 @@ static esp_err_t charge_post(httpd_req_t * req)
         qc_high = atoi(qc) != 0;
     }
 
-    /* Set the NTC/QC divider before enabling; the IP2326 can latch an NTC
-     * fault if EN rises while the divider is outside the normal range. */
-    esp_err_t qc_err = charge_set_qc_high(qc_high);
-    esp_err_t err = charge_set_enabled(enable);
-    if(qc_err == ESP_OK) g_app_config.qc_high = qc_high;
-    if(err == ESP_OK) g_app_config.charge_enabled = enable;
-    if(qc_err == ESP_OK || err == ESP_OK) app_config_save();
+    esp_err_t err = charge_apply(enable, qc_high);
+    if(err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "charger configuration failed");
+    }
+    g_app_config.qc_high = qc_high;
+    g_app_config.charge_enabled = enable;
+    app_config_save();
 
     char reply[128];
     snprintf(reply, sizeof(reply), "CHG_EN %d: %s, nCHG_QC_EN %d: %s",
              enable ? 1 : 0, esp_err_to_name(err),
-             qc_high ? 1 : 0, esp_err_to_name(qc_err));
+             qc_high ? 1 : 0, esp_err_to_name(err));
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_sendstr(req, reply);
 }
@@ -743,21 +743,20 @@ static esp_err_t config_post(httpd_req_t * req)
     if(cJSON_IsNumber(item)) {
         g_app_config.usb_mode = (item->valueint == 2) ? 2 : 0;
     }
-    item = cJSON_GetObjectItemCaseSensitive(root, "charge_enabled");
-    if(cJSON_IsBool(item)) {
-        bool enabled = cJSON_IsTrue(item);
-        if(enabled != g_app_config.charge_enabled) {
-            charge_set_enabled(enabled);
-            g_app_config.charge_enabled = enabled;
+    const cJSON * charge_item = cJSON_GetObjectItemCaseSensitive(root, "charge_enabled");
+    const cJSON * qc_item = cJSON_GetObjectItemCaseSensitive(root, "qc_high");
+    if(cJSON_IsBool(charge_item) || cJSON_IsBool(qc_item)) {
+        bool enable = cJSON_IsBool(charge_item) ? cJSON_IsTrue(charge_item)
+                                                : g_app_config.charge_enabled;
+        bool qc_high = cJSON_IsBool(qc_item) ? cJSON_IsTrue(qc_item)
+                                            : g_app_config.qc_high;
+        if(charge_apply(enable, qc_high) != ESP_OK) {
+            cJSON_Delete(root);
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "charger configuration failed");
         }
-    }
-    item = cJSON_GetObjectItemCaseSensitive(root, "qc_high");
-    if(cJSON_IsBool(item)) {
-        bool high = cJSON_IsTrue(item);
-        if(high != g_app_config.qc_high) {
-            charge_set_qc_high(high);
-            g_app_config.qc_high = high;
-        }
+        g_app_config.charge_enabled = enable;
+        g_app_config.qc_high = qc_high;
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "volume");
     if(cJSON_IsNumber(item)) {

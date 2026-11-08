@@ -125,19 +125,22 @@ ESP-IDF 5.5.6 的 external hub driver **仍不支持 Transaction Translator (TT)
 }
 ```
 
-- 开机时 `app_main()` 调用 `charge_set_enabled(g_app_config.charge_enabled)`，把 IO expander `PI4IOE5V6408 #2` 的 `E2.P7`（IP2326 `CHG_EN`）拉高/拉低
-- `qc_high` 控制 `E2.P5`（`nCHG_QC_EN`）的原始电平，默认 `false`；这是调试/兼容项，会影响 IP2326 的 QC/NTC 相关电路
+- 开机时 `app_main()` 调用 `charge_apply()`：先关闭充电，配置 `E2.P6` 为状态输入、`E2.P5` 为分压控制输出，最后按保存的设置驱动 `E2.P7`（IP2326 `CHG_EN`）。Web 两个充电设置入口共用同一顺序，硬件配置失败时不会保存为成功。
+- `E2.P5` 和 `E2.P7` 必须显式设为推挽输出；PI4IOE5V6408 默认高阻，仅写输出寄存器会出现“软件已开启、实际引脚未驱动”。
+- `qc_high` 控制 `E2.P5`（`nCHG_QC_EN`）的原始电平，默认 `false`。按原理图 R65/R68/Q12 与 IP2326 NTC 阈值推算，低电平选择常规电流，高电平选择降流分压；这不是 USB-C PD 协商开关。
 - 调用位置在显示/背光初始化之后、USB host 启动之前
 - Web 根页面的 **Power / charging** 卡片可以实时查看并切换
 - `POST /api/charge?en=0|1&qc=0|1` 立即生效并保存到 `config.json`
 - `GET /api/power` 返回：
-  - `bus_mv` / `current_ma`：INA226 电池总线电压/电流
+  - `bus_mv` / `current_ma`：INA226 电池总线电压/电流；本板 IN+ 接电池侧、IN− 接充电器侧，所以负电流表示充电，正电流表示放电
   - `shunt_raw` / `ina226_config`：INA226 原始分流电压和配置寄存器，用于区分“真的没电流”和“测量没配置”
+  - `ina226_ok`：配置、电压、分流电压读取全部成功才为 `true`，读取失败不会伪装成有效的零电流
   - `usb5v_en`：USB-A 5V 开关
-  - `chg_en`：当前 `CHG_EN` 输出
+  - `chg_en`：`CHG_EN` 的输出锁存、方向和推挽模式均正确才为 `true`
+  - `expander_output` / `expander_direction` / `expander_highz`：控制引脚的配置寄存器；`qc_driven` 表示分压控制引脚已设为推挽输出
   - `nchg_qc_en`：当前 `E2.P5` 原始电平
   - `chg_stat`：`E2.P6` / IP2326 `BAT_STAT` 原始电平。按数据手册，涓流充电时输出低电平，进入恒流/恒压后输出高电平；它不是简单的“充电/未充电”标志
-- 充电需要 USB-C 口有 5V 输入；`usb_mode=2` 时 USB-C 是 host，需要 powered hub/dock 向上游供 5V
+- 充电需要外部供电。[官方原理图第 5 页](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1132/Tab5_Schematics_PDF.pdf#page=5) 中，USB-C 的 `USB_5VIN` 和 DC 输入降压得到的 `PRE_5V` 经 D17/D16 向充电器供电；`usb_mode=2` 时，USB-C powered hub/dock 需要向上游供电。
 - 不装电池时切换这个选项没有实际影响
 
 ## 把 USB 切换加到 Settings UI

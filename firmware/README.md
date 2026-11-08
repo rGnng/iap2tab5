@@ -175,7 +175,7 @@ live in `../docs/sd/`. Two files are used:
   "brightness": 70,
   "usb_mode": 0,
   "charge_enabled": true,
-  "qc_high": true
+  "qc_high": false
 }
 ```
 
@@ -187,9 +187,12 @@ live in `../docs/sd/`. Two files are used:
   dual host (Both A+C, verified). The old USB-C-FS-only value `1` is
   normalised to `0`.
 - `charge_enabled`: `true` enables the IP2326 charger (`CHG_EN`, E2.P7);
-  can also be toggled at runtime from the web
+  can also be toggled at runtime from the web. Both charger control pins must
+  use push-pull output mode: setting the output latch alone leaves them high-Z.
 - `qc_high`: raw level of `E2.P5` / `nCHG_QC_EN`; debug/compatibility knob
-  for the IP2326 QC/NTC circuit
+  for the board's NTC/current divider, default `false` (nominal current).
+  Startup and web changes disable charging, configure the divider and status
+  input, then apply the requested charger enable state.
 
 Missing or invalid files fall back to built-in defaults. The firmware writes
 the file back after every settings change (one write per second at most while
