@@ -548,6 +548,74 @@ static int track_index_by_meta(const char * title, const char * album)
 }
 #endif
 
+/* Album/artist membership: 96 KB in PSRAM, built once after loading the
+ * immutable library. Sort offsets, never metadata or catalog rows: album
+ * sorting must not affect membership, and songs retain their file order.
+ * Binary searches use local bounds so getters remain safe across tasks. */
+static MOCK_LARGE_BSS uint16_t album_track_order[MAX_TRACKS];
+static MOCK_LARGE_BSS uint16_t artist_song_order[MAX_TRACKS];
+static bool membership_index_ready;
+
+static uint64_t membership_id(uint16_t offset, bool by_artist)
+{
+    return by_artist ? tracks[offset].artist_id : tracks[offset].album_id;
+}
+
+static int membership_compare(const void * a, const void * b, bool by_artist)
+{
+    uint16_t ia = *(const uint16_t *)a, ib = *(const uint16_t *)b;
+    uint64_t pa = membership_id(ia, by_artist), pb = membership_id(ib, by_artist);
+    if(pa != pb) return pa < pb ? -1 : 1;
+    return (ia > ib) - (ia < ib);
+}
+
+static int album_track_compare(const void * a, const void * b)
+{
+    return membership_compare(a, b, false);
+}
+
+static int artist_song_compare(const void * a, const void * b)
+{
+    return membership_compare(a, b, true);
+}
+
+static void membership_index_build(void)
+{
+    membership_index_ready = false;
+    for(int i = 0; i < track_count; i++) {
+        album_track_order[i] = artist_song_order[i] = (uint16_t)i;
+    }
+    qsort(album_track_order, track_count, sizeof(album_track_order[0]), album_track_compare);
+    qsort(artist_song_order, track_count, sizeof(artist_song_order[0]), artist_song_compare);
+    membership_index_ready = true;
+}
+
+/* First entry >= id (lower bound) or > id (upper bound). All 64-bit IDs,
+ * including zero and UINT64_MAX, work without sentinel IDs or id + 1. */
+static int membership_bound(const uint16_t * order, uint64_t id,
+                            bool by_artist, bool upper)
+{
+    int lo = 0, hi = track_count;
+    while(lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        uint64_t parent = membership_id(order[mid], by_artist);
+        if(parent < id || (upper && parent == id)) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+static bool membership_get(const uint16_t * order, uint64_t id, int index,
+                           bool by_artist, player_track_t * out)
+{
+    int first = membership_bound(order, id, by_artist, false);
+    if(index >= track_count - first) return false;
+    uint16_t offset = order[first + index];
+    if(membership_id(offset, by_artist) != id) return false;
+    *out = tracks[offset];
+    return true;
+}
+
 /* "Play from here" lists.  Each action builds the ordered list the UI
  * shows, then starts it from the chosen item:
  *   album    : chosen track to the end of the album (no wrap);
@@ -1123,6 +1191,7 @@ static void load_library(void)
 void player_init(void)
 {
     track_id_index_ready = false;
+    membership_index_ready = false;
     track_count = 0;
     album_count = 0;
     artist_count = 0;
@@ -1154,9 +1223,15 @@ void player_init(void)
     album_seen_dirty_since_us = 0;
 
     load_library();
+#if defined(ESP_PLATFORM)
+    int64_t index_start = esp_timer_get_time();
+#endif
     track_id_index_build();
+    membership_index_build();
 
 #if defined(ESP_PLATFORM)
+    ESP_LOGI(TAG, "library indexes: %d tracks in %lld us", track_count,
+             (long long)(esp_timer_get_time() - index_start));
     album_seen_load();
     /* stars.csv is the source of truth across reboots. It is per-library, so
      * switching iPods cannot leak stars into another media library. */
@@ -1381,6 +1456,10 @@ int player_album_track_count(uint64_t album_id)
 #if defined(ESP_PLATFORM)
     if(!player_device_available()) return 0;
 #endif
+    if(membership_index_ready) {
+        return membership_bound(album_track_order, album_id, false, true) -
+               membership_bound(album_track_order, album_id, false, false);
+    }
     int count = 0;
     for(int i = 0; i < track_count; i++) {
         if(tracks[i].album_id == album_id) count++;
@@ -1394,6 +1473,9 @@ bool player_album_track_get(uint64_t album_id, int index, player_track_t * out)
     if(!player_device_available()) return false;
 #endif
     if(index < 0 || out == NULL) return false;
+    if(membership_index_ready) {
+        return membership_get(album_track_order, album_id, index, false, out);
+    }
     int seen = 0;
     for(int i = 0; i < track_count; i++) {
         if(tracks[i].album_id != album_id) continue;
@@ -1410,6 +1492,10 @@ int player_artist_song_count(uint64_t artist_id)
 #if defined(ESP_PLATFORM)
     if(!player_device_available()) return 0;
 #endif
+    if(membership_index_ready) {
+        return membership_bound(artist_song_order, artist_id, true, true) -
+               membership_bound(artist_song_order, artist_id, true, false);
+    }
     int count = 0;
     for(int i = 0; i < track_count; i++) {
         if(tracks[i].artist_id == artist_id) count++;
@@ -1423,6 +1509,9 @@ bool player_artist_song_get(uint64_t artist_id, int index, player_track_t * out)
     if(!player_device_available()) return false;
 #endif
     if(index < 0 || out == NULL) return false;
+    if(membership_index_ready) {
+        return membership_get(artist_song_order, artist_id, index, true, out);
+    }
     int seen = 0;
     for(int i = 0; i < track_count; i++) {
         if(tracks[i].artist_id != artist_id) continue;

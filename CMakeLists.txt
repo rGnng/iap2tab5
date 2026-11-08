@@ -121,6 +121,18 @@ if(IAP2TAB5_BUILD_UI_TESTS)
         $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
     target_link_libraries(screen_off_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
     add_test(NAME screen_off_input COMMAND screen_off_test)
+    set(NP_TEST_SOURCES ${UI_SOURCES})
+    list(REMOVE_ITEM NP_TEST_SOURCES app/ui/ui.c)
+    add_executable(now_playing_update_test tests/now_playing_update_test.c
+        third_party/cjson/cJSON.c ${NP_TEST_SOURCES})
+    target_include_directories(now_playing_update_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(now_playing_update_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
+    target_link_libraries(now_playing_update_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
+    foreach(theme RANGE 0 2)
+        add_test(NAME now_playing_updates_theme_${theme} COMMAND now_playing_update_test ${theme})
+    endforeach()
 endif()
 
 # Convenience: `cmake --build build --target run`

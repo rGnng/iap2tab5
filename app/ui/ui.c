@@ -3012,6 +3012,8 @@ static void np_display_refresh_cb(lv_event_t * event)
 static uint64_t np_last_track;
 static int np_last_queue_count = -1;
 static uint32_t np_last_queue_rev;
+static player_snapshot_t np_rendered_snapshot;
+static bool np_rendered_valid;
 
 typedef enum {
     NP_BG_THEME = 0,
@@ -3105,17 +3107,24 @@ static void np_queue_action(void * user)
     if(g_focus_count > 0) focus_select(np_queue_focus_start);
 }
 
-static void np_refresh_ui(void)
+/* LVGL reallocates and invalidates label text even when it is identical.
+ * Leave unchanged labels alone, including their fade/marquee state. */
+static bool np_set_text(lv_obj_t * label, const char * text)
 {
-    if(ui_device_blocked()) return;
-    player_snapshot_t snapshot;
-    player_get_snapshot(&snapshot);
+    if(strcmp(lv_label_get_text(label), text) == 0) return false;
+    lv_label_set_text(label, text);
+    return true;
+}
 
-    bool has_track = snapshot.track.title[0] != '\0';
-    const char * title = has_track ? snapshot.track.title : "";
+static void np_refresh_snapshot(const player_snapshot_t * snapshot)
+{
+    bool first = !np_rendered_valid;
+    const player_snapshot_t * old = &np_rendered_snapshot;
+    bool has_track = snapshot->track.title[0] != '\0';
+    bool visibility_changed = first || has_track != (old->track.title[0] != '\0');
+    const char * title = has_track ? snapshot->track.title : "";
     if(np_title != NULL) {
-        if(strcmp(lv_label_get_text(np_title), title) != 0) {
-            lv_label_set_text(np_title, title);
+        if(np_set_text(np_title, title)) {
             if(!np_queue_visible) {
                 /* Fit the title to its text, capped at the metadata column
                  * width so long titles fade within the column. */
@@ -3128,55 +3137,52 @@ static void np_refresh_ui(void)
                 lv_obj_set_width(np_title, title_w);
             }
         }
-        lv_obj_set_hidden(np_title, !has_track);
+        if(visibility_changed) lv_obj_set_hidden(np_title, !has_track);
     }
-    if(np_star_btn != NULL) {
+    if(np_star_btn != NULL && visibility_changed) {
         lv_obj_set_hidden(np_star_btn, !has_track);
     }
 
     if(np_queue_visible) {
-        char meta_text[192] = "";
-        if(has_track) {
-            const char * artist = snapshot.track.artist;
-            const char * album = snapshot.track.album;
-            if(artist[0] != '\0' && album[0] != '\0') {
-                snprintf(meta_text, sizeof(meta_text), "%s - %s", artist, album);
+        if(visibility_changed || strcmp(snapshot->track.artist, old->track.artist) != 0 ||
+           strcmp(snapshot->track.album, old->track.album) != 0) {
+            char meta_text[192] = "";
+            if(has_track) {
+                const char * artist = snapshot->track.artist;
+                const char * album = snapshot->track.album;
+                if(artist[0] != '\0' && album[0] != '\0') {
+                    snprintf(meta_text, sizeof(meta_text), "%s - %s", artist, album);
+                }
+                else if(artist[0] != '\0') {
+                    snprintf(meta_text, sizeof(meta_text), "%s", artist);
+                }
+                else if(album[0] != '\0') {
+                    snprintf(meta_text, sizeof(meta_text), "%s", album);
+                }
             }
-            else if(artist[0] != '\0') {
-                snprintf(meta_text, sizeof(meta_text), "%s", artist);
-            }
-            else if(album[0] != '\0') {
-                snprintf(meta_text, sizeof(meta_text), "%s", album);
-            }
-        }
-        if(meta_text[0] != '\0') {
-            lv_label_set_text(np_meta, meta_text);
-            lv_obj_set_hidden(np_meta, false);
-        }
-        else {
-            lv_label_set_text(np_meta, "");
-            lv_obj_set_hidden(np_meta, true);
+            np_set_text(np_meta, meta_text);
+            lv_obj_set_hidden(np_meta, meta_text[0] == '\0');
         }
     }
     else {
-        const char * artist = has_track ? snapshot.track.artist : "";
-        const char * album = has_track ? snapshot.track.album : "";
-        lv_label_set_text(np_artist, artist);
-        lv_obj_set_hidden(np_artist, artist[0] == '\0');
-        lv_label_set_text(np_album, album);
-        lv_obj_set_hidden(np_album, album[0] == '\0');
+        const char * artist = has_track ? snapshot->track.artist : "";
+        const char * album = has_track ? snapshot->track.album : "";
+        bool artist_changed = np_set_text(np_artist, artist);
+        bool album_changed = np_set_text(np_album, album);
+        if(first || artist_changed) lv_obj_set_hidden(np_artist, artist[0] == '\0');
+        if(first || album_changed) lv_obj_set_hidden(np_album, album[0] == '\0');
     }
 
     /* The NP cache is keyed by the iAP2 song ID (track_key).  A track
      * change or a new iAP2 artwork revision refreshes the cover; the album
      * artwork cache used by the library pages is deliberately not involved. */
-    if(snapshot.real_device && np_cover_widget != NULL) {
+    if(snapshot->real_device && np_cover_widget != NULL) {
         uint32_t art_rev = player_artwork_revision();
-        bool track_changed = (snapshot.track.id != g_np_cover_track_id);
+        bool track_changed = (snapshot->track.id != g_np_cover_track_id);
         if(art_rev != g_np_cover_rev || track_changed) {
             g_np_cover_rev = art_rev;
-            g_np_cover_track_id = snapshot.track.id;
-            const void * src = iap2_cover_src(snapshot.track.id);
+            g_np_cover_track_id = snapshot->track.id;
+            const void * src = iap2_cover_src(snapshot->track.id);
             lv_image_set_src(np_cover_widget, src);
             lv_obj_set_style_bg_color(np_cover_widget,
                 lv_color_hex(src ? COL_PANEL : COL_PANEL_ALT), 0);
@@ -3185,31 +3191,53 @@ static void np_refresh_ui(void)
         }
     }
 
-    char current[16];
-    char total[16];
-    format_time(snapshot.elapsed_sec, current, sizeof(current));
-    format_time(snapshot.duration_sec, total, sizeof(total));
-    lv_label_set_text(np_time_cur, current);
-    lv_label_set_text(np_time_dur, total);
+    bool elapsed_changed = first || snapshot->elapsed_sec != old->elapsed_sec;
+    bool duration_changed = first || snapshot->duration_sec != old->duration_sec;
+    if(elapsed_changed) {
+        char current[16];
+        format_time(snapshot->elapsed_sec, current, sizeof(current));
+        np_set_text(np_time_cur, current);
+    }
+    if(duration_changed) {
+        char total[16];
+        format_time(snapshot->duration_sec, total, sizeof(total));
+        np_set_text(np_time_dur, total);
+        lv_bar_set_range(np_progress, 0, snapshot->duration_sec ? (int32_t)snapshot->duration_sec : 1);
+    }
+    if(elapsed_changed || duration_changed) {
+        lv_bar_set_value(np_progress, (int32_t)snapshot->elapsed_sec, LV_ANIM_OFF);
+    }
+    if(first || snapshot->status != old->status) {
+        np_set_text(np_play_icon, snapshot->status == PLAYER_PLAYING ? ICON_PAUSE : ICON_PLAY);
+    }
+    if(first || snapshot->shuffle != old->shuffle) {
+        lv_obj_set_style_text_color(np_shuffle_icon,
+                                    lv_color_hex(snapshot->shuffle ? COL_ACCENT : COL_MUTED), 0);
+        theme_mode_button(np_shuffle_btn, snapshot->shuffle);
+    }
+    if(first || snapshot->repeat != old->repeat) {
+        bool active = snapshot->repeat != PLAYER_REPEAT_OFF;
+        lv_obj_set_style_text_color(np_repeat_icon,
+                                    lv_color_hex(active ? COL_ACCENT : COL_MUTED), 0);
+        theme_mode_button(np_repeat_btn, active);
+        np_set_text(np_repeat_icon,
+                    snapshot->repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE : ICON_REPEAT);
+    }
+    if(first || snapshot->starred != old->starred) {
+        np_set_text(np_star_icon, snapshot->starred ? ICON_STAR_FILL : ICON_STAR);
+        lv_obj_set_style_text_color(np_star_icon,
+                                    lv_color_hex(snapshot->starred ? COL_ACCENT : COL_MUTED), 0);
+    }
+    np_rendered_snapshot = *snapshot;
+    np_rendered_valid = true;
+}
 
-    lv_bar_set_range(np_progress, 0, snapshot.duration_sec ? (int32_t)snapshot.duration_sec : 1);
-    lv_bar_set_value(np_progress, (int32_t)snapshot.elapsed_sec, LV_ANIM_OFF);
-
-    lv_label_set_text(np_play_icon,
-                      snapshot.status == PLAYER_PLAYING ? ICON_PAUSE : ICON_PLAY);
-    lv_obj_set_style_text_color(np_shuffle_icon,
-                                lv_color_hex(snapshot.shuffle ? COL_ACCENT : COL_MUTED), 0);
-    lv_obj_set_style_text_color(np_repeat_icon,
-                                lv_color_hex(snapshot.repeat != PLAYER_REPEAT_OFF
-                                             ? COL_ACCENT : COL_MUTED), 0);
-    theme_mode_button(np_shuffle_btn, snapshot.shuffle);
-    theme_mode_button(np_repeat_btn, snapshot.repeat != PLAYER_REPEAT_OFF);
-    lv_label_set_text(np_repeat_icon,
-                      snapshot.repeat == PLAYER_REPEAT_ONE ? ICON_REPEAT_ONE : ICON_REPEAT);
-    lv_label_set_text(np_star_icon,
-                      snapshot.starred ? ICON_STAR_FILL : ICON_STAR);
-    lv_obj_set_style_text_color(np_star_icon,
-                                lv_color_hex(snapshot.starred ? COL_ACCENT : COL_MUTED), 0);
+static void np_refresh_ui(void)
+{
+    if(ui_device_blocked()) return;
+    player_snapshot_t snapshot;
+    player_get_snapshot(&snapshot);
+    np_refresh_snapshot(&snapshot);
 }
 
 static void np_tick(void)
@@ -3219,17 +3247,18 @@ static void np_tick(void)
     player_get_snapshot(&snapshot);
 
     bool track_changed = (snapshot.track.id != np_last_track);
-    bool queue_changed = (player_queue_count() != np_last_queue_count) ||
-                         (player_queue_revision() != np_last_queue_rev);
+    int queue_count = player_queue_count();
+    uint32_t queue_rev = player_queue_revision();
+    bool queue_changed = queue_count != np_last_queue_count || queue_rev != np_last_queue_rev;
     np_last_track = snapshot.track.id;
-    np_last_queue_count = player_queue_count();
-    np_last_queue_rev = player_queue_revision();
+    np_last_queue_count = queue_count;
+    np_last_queue_rev = queue_rev;
 
-    if(track_changed || queue_changed) {
+    if(track_changed || (queue_changed && np_queue_visible)) {
         ui_rebuild_page();
         return;
     }
-    np_refresh_ui();
+    np_refresh_snapshot(&snapshot);
 }
 
 static void np_same_key(void)
@@ -3771,6 +3800,7 @@ static void np_create(lv_obj_t * parent)
 {
     uint32_t create_start = g_ui_trace ? perf_now() : 0;
     np_queue_lookup_us = np_queue_widget_us = 0;
+    np_rendered_valid = false;
     np_queue_list = NULL;
     np_meta = NULL;
     np_artist = NULL;
@@ -4112,7 +4142,7 @@ static void np_create(lv_obj_t * parent)
     if(np_queue_visible && g_focus_count > 0) focus_select(np_queue_focus_start);
     g_np_cover_rev = player_artwork_revision();
     g_np_cover_track_id = snapshot.track.id;
-    np_refresh_ui();
+    np_refresh_snapshot(&snapshot);
     ui_set_hint("UP/DOWN Select   ENTER Play/Jump   7 Play/Pause");
     if(g_ui_trace) UI_PERF_LOG("np_build: open=%d left=%u lookup=%u widgets=%u total=%u us rows=%d",
         np_queue_visible, (unsigned)(left_done - create_start),
@@ -5393,12 +5423,12 @@ static void artists_album_action(void * user)
 
 static void artists_track_action(void * user)
 {
+    /* Rows carry an index within this artist's songs, not the whole library. */
     int track_index = (int)(intptr_t)user;
     player_track_t track;
     player_artist_t artist;
-    if(track_index >= 0 && track_index < player_song_count() &&
-       player_song_get(track_index, &track) &&
-       player_artist_get(artists_selected, &artist)) {
+    if(player_artist_get(artists_selected, &artist) &&
+       player_artist_song_get(artist.id, track_index, &track)) {
         player_play_artist_from(artist.id, track.id);
     }
 }
@@ -5606,16 +5636,9 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_add_event_cb(album_list, albums_track_scroll_end_cb,
                         LV_EVENT_SCROLL_END, NULL);
 
-    /* Collect the artist's tracks in one pass.  The preview keeps only a
-     * short list; the opened detail keeps every track. */
-    int songs = player_song_count();
-    int artist_songs = 0;
-    for(int i = 0; i < songs; i++) {
-        player_track_t track;
-        if(player_song_get(i, &track) && track.artist_id == artist.id) {
-            artist_songs++;
-        }
-    }
+    /* Read only this artist's indexed members, in their original order.
+     * The preview keeps a short list; opened details keep every track. */
+    int artist_songs = player_artist_song_count(artist.id);
 
     int max_tracks = interactive ? artist_songs : DETAIL_PREVIEW_MAX_TRACKS;
     if(max_tracks > artist_songs) max_tracks = artist_songs;
@@ -5637,9 +5660,9 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
             return;
         }
 
-        for(int i = 0; i < songs && track_rows < max_tracks; i++) {
+        for(int i = 0; i < artist_songs && track_rows < max_tracks; i++) {
             player_track_t track;
-            if(!player_song_get(i, &track) || track.artist_id != artist.id) continue;
+            if(!player_artist_song_get(artist.id, i, &track)) continue;
 
             int slot = -1;
             for(int a = 0; a < album_total; a++) {
@@ -5705,7 +5728,7 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
             if(track_albums[j] != a) continue;
             int track_index = track_indices[j];
             player_track_t track;
-            if(!player_song_get(track_index, &track)) continue;
+            if(!player_artist_song_get(artist.id, track_index, &track)) continue;
             bool current = (track.id == snapshot.track.id);
 
             lv_obj_t * row = make_row(album_list, ARTIST_TRACK_ROW_H);
