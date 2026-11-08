@@ -127,8 +127,9 @@ firmware updater also updates only the P4 application.
 - **ESP-IDF 5.5.6**, the version used by the current firmware dependency lock.
 - An MFi P-256 certificate chain and private key for iAP2 authentication.
 - A matching lockdownd pair record for AFC access to the Apple device.
-- For the C6: a **3.3 V logic** USB-to-UART adapter, access to the internal
-  programming header, and the included **ESP-Hosted 2.13.1** images.
+- For the C6: a USB-to-UART programming jig set to **3.3 V**, providing both
+  C6 power and 3.3 V UART signals, access to the internal programming header,
+  and the included **ESP-Hosted 2.13.1** images.
 
 The MFi identity and lockdownd pair record serve separate purposes. Neither is
 included in this repository. The identity is required to build the P4 application;
@@ -307,41 +308,44 @@ page does not implement a C6 updater.
 #### 1. Locate and wire the C6 programming header
 
 Turn off the Tab5, disconnect USB power and the battery module if fitted, and
-remove the rear cover to reach **`J1 / C6_ISP`**. Use the PCB markings to identify
-pin 1; do not infer numbering from the direction in which you hold the tablet.
+disconnect any other Tab5 power source. **Keep all Tab5 power disconnected
+throughout the C6 flash.** Remove the rear cover to reach **`J1 / C6_ISP`**.
+Use the PCB markings to identify pin 1; do not infer numbering from the
+direction in which you hold the tablet.
 [M5Stack's C6 programming guide](https://docs.m5stack.com/en/guide/tab5/c6_wifi_restore)
 shows the connector location; the [Tab5 schematic, page 1](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1132/Tab5_Schematics_PDF.pdf)
 shows its signals.
 
-Use a USB-to-UART adapter with **3.3 V signal levels**. Wire TX and RX crossed:
+With the TTL programming jig unplugged from the computer, **set its voltage
+selector to 3.3 V**. The jig supplies the C6 through J1 pin 1 and must also use
+3.3 V UART signals. Wire TX and RX crossed:
 
 | J1 pin | Tab5 signal | USB-to-UART adapter connection |
 | --- | --- | --- |
-| 1 | `WLAN_3.3V` | **Leave disconnected**; the Tab5 supplies C6 power |
+| 1 | `WLAN_3.3V` | Jig **3.3 V output**; supplies C6 power |
 | 2 | `RF_C6_TXD` | Adapter **RX** |
 | 3 | `RF_C6_RXD` | Adapter **TX** |
 | 4 | `RF_C6_RST` / EN | Adapter **RTS** for automatic reset, or manual reset |
 | 5 | `RF_C6_IO9` / BOOT | Adapter **DTR** for automatic boot selection, or manual boot strap |
 | 6 | GND | Adapter **GND** |
 
-Leave the adapter's power outputs and **CTS** disconnected. This procedure
-powers the board through USB-C; do not also connect adapter 3V3 or 5V to J1.
-An adapter whose supply jumper says “3.3 V” must also use 3.3 V UART signals.
+Leave **CTS** and any **5 V output** disconnected. Do not reconnect the Tab5's
+USB-C cable, battery, or other power source while the jig is supplying 3.3 V.
+Check that the jig's voltage selection applies to both its supply output and
+UART signal levels.
 
-If the adapter has no DTR/RTS, connect only TX, RX, and GND to the adapter and use
-the manual procedure below for pins 4 and 5. The C6 boot strap is **IO9**.
+If the adapter has no DTR/RTS, connect **3.3 V, TX, RX, and GND** and use the
+manual procedure below for pins 4 and 5. The C6 boot strap is **IO9**.
 
-#### 2. Keep the P4 stopped and check the C6 images
+#### 2. Power the C6 from the jig and check the images
 
-1. Power the Tab5 through USB-C and put the **P4** in download mode: hold the
-   Tab5 power button until its green LED flashes, then release it.
-2. Leave the P4 in that mode throughout the C6 flash. Do not start the P4
-   application or its monitor: the application controls C6 reset through GPIO15
-   and can interrupt programming.
-3. Connect the UART adapter to the computer and run
+1. Confirm that all Tab5 power sources are disconnected, the jig is set to
+   **3.3 V**, and its 3.3 V output and GND are connected to J1 pins 1 and 6.
+2. Connect the jig to the computer to supply the C6, then run
    `python -m serial.tools.list_ports -v` again. The **adapter's port**, commonly
-   `/dev/ttyUSB0`, is the C6 programming port. The Tab5's `/dev/ttyACM0` is the P4.
-4. In an activated ESP-IDF terminal, return to the repository root and verify
+   `/dev/ttyUSB0`, is the C6 programming port. The P4's USB-C cable stays
+   disconnected; there is no P4 download-mode step in this procedure.
+3. In an activated ESP-IDF terminal, return to the repository root and verify
    the checked-in images:
 
    ```bash
@@ -380,7 +384,7 @@ DTR/RTS, then resets the C6 when finished.
 **With manual boot/reset, or if automatic reset fails:**
 
 1. Leave adapter DTR/RTS disconnected so they cannot override the manual straps.
-   Keep the Tab5 powered and the P4 in download mode.
+   Keep the C6 powered by the jig's 3.3 V output, with all Tab5 power disconnected.
 2. Connect **J1 pin 5 (IO9)** to **J1 pin 6 (GND)**.
 3. Momentarily connect **J1 pin 4 (EN)** to GND, then release EN while keeping
    IO9 grounded. This resets the C6 into its ROM downloader.
@@ -408,13 +412,15 @@ several minutes. If a transfer fails, repeat the manual boot sequence before
 retrying the command. The helper accepts only a port argument; use the direct
 command above to change reset behavior, baud rate, or flash settings.
 
-#### 4. Restart both processors and verify the radio
+#### 4. Disconnect the jig, restore Tab5 power, and verify the radio
 
-1. Remove any IO9-to-GND or EN-to-GND jumper.
-2. Turn the Tab5 off, disconnect the UART adapter and its wiring, and restore
-   the rear cover. Turn the Tab5 on normally, without holding the power button
-   to enter download mode.
-3. Connect the P4 USB-C console and monitor from `firmware/`:
+1. Unplug the jig from the computer to remove its 3.3 V supply. Remove any
+   IO9-to-GND or EN-to-GND jumper and disconnect all jig wiring from J1,
+   including the 3.3 V connection.
+2. Restore the rear cover, reconnect the battery if used, and connect the Tab5's
+   USB-C cable to the computer. Turn the Tab5 on normally, without holding the
+   power button to enter download mode.
+3. Monitor the P4 USB-C console from `firmware/`:
 
    ```bash
    idf.py -p /dev/ttyACM0 monitor
@@ -441,9 +447,9 @@ reintroduces the version mismatch with this project's 2.13.1 host.
 | Serial port is busy | Close other monitors, terminal programs, and flashing tools using that port. |
 | `Permission denied` on Linux | Grant your user access to the serial device. On Debian / Ubuntu, add it to `dialout` with `sudo usermod -aG dialout "$USER"`, then log out and back in. |
 | P4 image rejected because of chip revision | Use this project's pre-revision-3 defaults for the tested v1.3 board and rebuild with IDF 5.5.6. Do not bypass the revision check with a forced flash. |
-| C6 connection times out | Select the adapter's port, check crossed TX/RX and common ground, keep the P4 stopped, and try the manual IO9/EN sequence. |
-| C6 write stops partway through | Check stable Tab5 power, short/stable UART wiring, and that the P4 has not restarted; retry the manual command at 115200 baud. |
-| C6 flash succeeds but the radio stays offline | Remove boot/reset straps, disconnect adapter control lines, restart both processors, and check the P4 log for the C6 version. |
+| C6 connection times out | Select the adapter's port, confirm the jig is set to 3.3 V and powers J1 pin 1, check crossed TX/RX and common ground, and try the manual IO9/EN sequence. Keep all Tab5 power disconnected. |
+| C6 write stops partway through | Check the jig's 3.3 V supply and stable UART wiring; keep Tab5 USB/battery power disconnected and retry the manual command at 115200 baud. |
+| C6 flash succeeds but the radio stays offline | Remove boot/reset straps and all jig wiring, restore normal Tab5 power, and check the P4 log for the C6 version. |
 | Old application still runs after `app-flash` | An OTA slot may still be selected; use web OTA or the complete P4 flash procedure. |
 
 ### SD card and Wi-Fi

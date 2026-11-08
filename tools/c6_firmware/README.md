@@ -41,20 +41,25 @@ The SHA-256 sums are in `SHA256SUMS`.
 
 ## Hardware connection
 
-Remove the Tab5 back cover. The C6 programming header is on the PCB (the
-silkscreen is inside the cover). It is the 6-pin `J1` / `C6_ISP` header:
+Turn off the Tab5 and **disconnect USB, the battery, and any other Tab5 power
+source**. Keep them disconnected throughout programming. Remove the back cover
+to reach the 6-pin `J1` / `C6_ISP` header; its silkscreen is inside the cover.
+
+With the TTL jig unplugged from the computer, **set it to 3.3 V**. It must
+supply both C6 power and 3.3 V UART signals. Connect it as follows:
 
 | J1 pin | Net | Connect to |
 | --- | --- | --- |
-| 1 | `WLAN_3.3V` | **leave open** (Tab5 supplies C6 power) |
+| 1 | `WLAN_3.3V` | jig **3.3 V output** (C6 power) |
 | 2 | `RF_C6_TXD` | adapter **RX** |
 | 3 | `RF_C6_RXD` | adapter **TX** |
 | 4 | `RF_C6_RST` / EN | adapter **RTS** |
 | 5 | `RF_C6_IO9` / BOOT | adapter **DTR** (or manual boot strap) |
 | 6 | GND | adapter **GND** |
 
-The boot strap on the Tab5 C6 is **IO9**, not IO0. The adapter's CTS pin is not
-used. Do not connect the adapter's 3V3 while the Tab5 is powered.
+The boot strap on the Tab5 C6 is **IO9**, not IO0. Leave CTS and any 5 V output
+disconnected. The jig powers the C6 through J1 pin 1; do not reconnect Tab5
+power while the jig is attached.
 
 If the adapter has only RTS/CTS and no DTR, leave CTS open, use RTS for the
 reset line (or reset manually), and pull **IO9** to GND while resetting to enter
@@ -68,11 +73,10 @@ including tool setup, checksum verification, wiring, and a full manual-reset
 command for adapters without DTR/RTS. The short procedure below assumes the
 ESP-IDF environment is active and the adapter supports automatic reset.
 
-1. Power the Tab5 over USB-C.
-2. Stop the P4 application from driving the C6 reset line. Put the P4 into
-   download mode by holding the Tab5 power button until the green LED flashes,
-   then releasing it. Leave the P4 stopped throughout the C6 flash so its
-   application cannot reset the C6 through GPIO15.
+1. Confirm that Tab5 USB/battery/other power is disconnected and the TTL jig is
+   set to **3.3 V**, with its supply output connected to J1 pin 1 and GND to pin 6.
+2. Connect the jig to the computer to power the C6. Keep the Tab5's own power
+   disconnected; no P4 download-mode step is needed.
 3. From the repository root, flash the C6 through the **UART adapter's port**:
 
    ```bash
@@ -82,9 +86,10 @@ ESP-IDF environment is active and the adapter supports automatic reset.
    The helper accepts only the port argument. For manual boot/reset, use the
    direct `python -m esptool` command in the root README instead of appending
    reset flags to this script. The C6 boot strap is `IO9`.
-4. After all images are written and verified, remove any manual boot/reset
-   straps, turn off the Tab5, disconnect the UART adapter, and turn the Tab5
-   on normally. The P4 boot log should now show `C6 firmware 2.13.1` and no
+4. After all images are written and verified, unplug the jig from the computer,
+   remove any manual boot/reset straps, and disconnect all jig wiring, including
+   3.3 V. Restore the cover, reconnect normal Tab5 power, and turn it on.
+   The P4 boot log should now show `C6 firmware 2.13.1` and no
    `Version mismatch` warning. `ble_remote` should no longer log
    `BT controller init RPC failed`.
 

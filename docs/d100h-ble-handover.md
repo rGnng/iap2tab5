@@ -190,8 +190,9 @@ SHA256SUMS
 
 The factory 1.4.1 firmware has no in-band OTA path (ESP-Hosted slave OTA was
 added in 2.6.0), so the first update requires the internal C6 USB-TTL header.
-See `tools/c6_firmware/README.md` for the pinout, the P4-bootloader step, and
-`flash_c6.sh`. This one-time wired flash is still **pending**.
+See `tools/c6_firmware/README.md` for the pinout, the jig-powered 3.3 V setup,
+and `flash_c6.sh`. At this stage of bring-up the wired flash was still
+**pending**; section 12.1 records its completion.
 
 ---
 
@@ -759,18 +760,18 @@ s, \r       -> focus first nearby device, connect
 
 ### 8.4 C6 firmware
 
-Read `tools/c6_firmware/README.md`. Short version:
+Read `tools/c6_firmware/README.md`. The corrected power setup is to disconnect
+all Tab5 power and supply the C6 from the TTL jig set to 3.3 V. Short version:
 
 ```bash
-# Put the P4 in bootloader so it stops driving C6 reset:
-esptool.py -p /dev/ttyACM0 --before default_reset --after no_reset run
-
-# Connect a 3.3V USB-UART to the internal C6 header (TX/RX/DTR/RTS/GND,
-# do not connect 3V3), then:
+# Disconnect Tab5 USB/battery/other power. Set the unplugged TTL jig to 3.3V.
+# Connect jig 3.3V to J1 pin 1, crossed TX/RX, DTR/RTS, and GND.
+# Plug the jig into the computer to power the C6, then:
 tools/c6_firmware/flash_c6.sh /dev/ttyUSB0
 ```
 
-Power-cycle the Tab5 afterwards. Expected boot log: a 2.13.x C6 version and no
+Unplug the jig and remove all its wiring and boot/reset straps before restoring
+Tab5 power. Expected boot log: a 2.13.x C6 version and no
 `BT controller init RPC failed`.
 
 ### 8.5 C6 firmware rebuild
@@ -920,7 +921,7 @@ strap is IO9, not IO0**:
 
 | J1 pin | Net | Programmer |
 | --- | --- | --- |
-| 1 | `WLAN_3.3V` | do not connect (Tab5 supplies power) |
+| 1 | `WLAN_3.3V` | jig 3.3 V output; all Tab5 power disconnected |
 | 2 | `RF_C6_TXD` | adapter RX |
 | 3 | `RF_C6_RXD` | adapter TX |
 | 4 | `RF_C6_RST` / EN | adapter RTS (or manual reset) |
@@ -942,9 +943,10 @@ python -m esptool --chip esp32c6 -p /dev/ttyUSB0 -b 115200 \
 ```
 
 The bootloader/partition-table/ota_data had already been written and verified.
-The practical workaround for the CH340's weak 3.3V and the P4 reset line was:
-power the C6 from the programmer's 3.3V with the Tab5 fully off, or keep the P4
-in bootloader; any reset during the large app write aborts the transfer.
+The corrected flashing setup is to disconnect all Tab5 power and supply the
+C6 from the programmer with its voltage selector set to 3.3 V. This supersedes
+the earlier suggestion to power the Tab5 and keep the P4 in bootloader mode.
+Check the jig's 3.3 V supply if a large app write is interrupted.
 
 Post-upgrade boot log:
 
