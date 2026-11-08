@@ -16,6 +16,7 @@ idf_component_register(
         "usb_host_core.c"
         "usbmux_host.c"
         "lockdown_client.c"
+        "scaled_tjpgd.c"
         "apple_pairing.c"
         "afc_client.c"
         "thumb_cache.c"
@@ -34,7 +35,6 @@ idf_component_register(
         "."
         "../../app/backend"
         "../../app/ui"
-        "../managed_components/lvgl__lvgl/src/libs/tjpgd"
     REQUIRES
         bt
         esp_hosted

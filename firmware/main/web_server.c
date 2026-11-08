@@ -832,6 +832,17 @@ static esp_err_t status_get(httpd_req_t * req)
     cJSON_AddBoolToObject(root, "apple_trusted", pairing.trusted && usbmux_host_is_ready());
     cJSON_AddStringToObject(root, "apple_pair_status", pairing.message);
     cJSON_AddStringToObject(root, "afc", afc_client_status());
+    lockdown_artwork_progress_t progress;
+    lockdown_client_artwork_progress(&progress);
+    cJSON * sync = cJSON_AddObjectToObject(root, "afc_sync");
+    if(sync != NULL) {
+        cJSON_AddBoolToObject(sync, "active", progress.active);
+        cJSON_AddNumberToObject(sync, "phase", progress.phase);
+        cJSON_AddNumberToObject(sync, "total", progress.total);
+        cJSON_AddNumberToObject(sync, "attempted", progress.attempted);
+        cJSON_AddNumberToObject(sync, "cached", progress.copied);
+        cJSON_AddNumberToObject(sync, "failed", progress.failed);
+    }
     cJSON_AddStringToObject(root, "iap2", iap2_host_status());
     cJSON_AddBoolToObject(root, "iap2_identified",
                           iap2_host_is_identified());
@@ -1036,6 +1047,25 @@ static esp_err_t sync_post(httpd_req_t * req)
                                    "task failed");
     }
     return httpd_resp_sendstr(req, "copy started; watch the serial log");
+}
+
+static esp_err_t cache_reset_post(httpd_req_t * req)
+{
+    lockdown_artwork_progress_t progress;
+    lockdown_pair_status_t pairing;
+    lockdown_client_artwork_progress(&progress);
+    lockdown_client_pair_status(&pairing);
+    if(progress.active || pairing.busy || app_config_peek_afc_job() ||
+       !app_config_sd_ready()) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+            "Wait for sync or pairing to finish and ensure the SD card is ready.");
+    }
+    if(app_config_set_iap2_mode(false) != ESP_OK ||
+       app_config_set_afc_job(3) != ESP_OK) return httpd_resp_send_500(req);
+    httpd_resp_sendstr(req, "Rebooting to clear artwork cache and sync.");
+    vTaskDelay(pdMS_TO_TICKS(800));
+    web_server_reboot();
+    return ESP_OK;
 }
 
 static esp_err_t trust_post(httpd_req_t * req)
@@ -1260,6 +1290,9 @@ esp_err_t web_server_start(void)
     const httpd_uri_t sync = {
         .uri = "/api/sync", .method = HTTP_POST, .handler = sync_post,
     };
+    const httpd_uri_t cache_reset = {
+        .uri = "/api/afc/cache/reset", .method = HTTP_POST, .handler = cache_reset_post,
+    };
     const httpd_uri_t debug = {
         .uri = "/debug", .method = HTTP_GET, .handler = debug_get,
     };
@@ -1309,6 +1342,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(server, &pair);
     httpd_register_uri_handler(server, &trust);
     httpd_register_uri_handler(server, &sync);
+    httpd_register_uri_handler(server, &cache_reset);
     httpd_register_uri_handler(server, &debug);
     httpd_register_uri_handler(server, &log);
     httpd_register_uri_handler(server, &debuglog);

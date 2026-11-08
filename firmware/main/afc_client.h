@@ -36,11 +36,13 @@ esp_err_t afc_client_stat(const char * path, uint64_t * size,
 int afc_client_read_file(const char * path, void * buffer, size_t max_len);
 
 /* Reads a whole file into a 128-byte aligned PSRAM buffer. The caller frees
- * *out with free(). */
+ * *out with free(). Files exceeding the 8 MiB budget or available contiguous
+ * PSRAM return ESP_ERR_INVALID_SIZE; use
+ * afc_client_copy_file() to stream those directly to SD. */
 esp_err_t afc_client_read_all(const char * path, uint8_t ** out,
                               size_t * out_len);
 
-/* Streams a remote file to a local file in 32 KB chunks and reports its
+/* Streams a remote file to a local file in 64 KB chunks and reports its
  * size and SHA-256. */
 esp_err_t afc_client_copy_file(const char * remote_path,
                                const char * local_path,

@@ -1,11 +1,13 @@
 #include "app_config.h"
 
 #include <stdio.h>
+#include <fcntl.h>
 #include <string.h>
 
 #include "bsp/esp-bsp.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "mbedtls/sha256.h"
@@ -128,10 +130,10 @@ uint8_t app_config_take_afc_job(void)
     uint8_t job = 0;
     if(nvs_open("usbcfg", NVS_READWRITE, &h) != ESP_OK) return 0;
     if(nvs_get_u8(h, "afcjob", &job) != ESP_OK) job = 0;
-    nvs_erase_key(h, "afcjob");
-    nvs_commit(h);
+    esp_err_t err = nvs_erase_key(h, "afcjob");
+    if(err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
-    return job;
+    return err == ESP_OK ? job : 0;
 }
 
 static bool is_hex_str(const char * s, size_t n)
@@ -778,22 +780,31 @@ void app_config_sd_info_refresh_idle(void)
 esp_err_t app_config_hash_file(const char * path, uint64_t * size,
                                char * hex, size_t hex_len)
 {
-    FILE * f = fopen(path, "rb");
-    if(f == NULL) return ESP_ERR_NOT_FOUND;
+    int fd = open(path, O_RDONLY);
+    if(fd < 0) return ESP_ERR_NOT_FOUND;
 
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
 
-    uint8_t buf[4096];
+    /* Aligned, sector-sized reads use the P4 SDMMC multi-block DMA path.
+     * Use POSIX read: size-optimized newlib fread with _IONBF reads single
+     * bytes. A small unaligned stdio/stack buffer reads one sector at a
+     * time. Keep the old bounded fallback when PSRAM is scarce. */
+    uint8_t fallback[4096];
+    uint8_t * bulk = heap_caps_aligned_alloc(128, 64 * 1024,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t * buf = bulk != NULL ? bulk : fallback;
+    size_t capacity = bulk != NULL ? 64 * 1024 : sizeof(fallback);
     uint64_t total = 0;
-    size_t n;
-    while((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+    ssize_t n;
+    while((n = read(fd, buf, capacity)) > 0) {
         mbedtls_sha256_update(&ctx, buf, n);
         total += n;
     }
-    bool ok = ferror(f) == 0;
-    fclose(f);
+    bool ok = n == 0;
+    close(fd);
+    heap_caps_free(bulk);
 
     unsigned char digest[32];
     mbedtls_sha256_finish(&ctx, digest);

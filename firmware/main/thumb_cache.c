@@ -1,6 +1,7 @@
 #include "thumb_cache.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,48 @@ static void make_paths(void)
              app_config_library_dir());
 }
 
+static bool is_cached_cover(const char * name)
+{
+    const char * ext = name;
+    while(*ext >= '0' && *ext <= '9') ext++;
+    if(ext == name) return false;
+    const char * suffixes[] = {".thm", ".cov", ".jpg", ".jpeg", ".png",
+                               ".wbp", ".webp", ".gif", ".art"};
+    for(size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        if(strcasecmp(ext, suffixes[i]) == 0) return true;
+    }
+    return false;
+}
+
+esp_err_t thumb_cache_reset(void)
+{
+    if(s_pack != NULL || s_idx != NULL || s_valid != NULL ||
+       !app_config_sd_ready()) return ESP_ERR_INVALID_STATE;
+    make_paths();
+    /* Invalidate before deleting data; an interrupted reset cannot advertise
+     * a missing pack as valid. No recursive directory deletion. */
+    if(remove(s_idx_path) != 0 && errno != ENOENT) return ESP_FAIL;
+    if(remove(s_pack_path) != 0 && errno != ENOENT) return ESP_FAIL;
+    DIR * dir = opendir(app_config_artwork_dir());
+    if(dir == NULL) return errno == ENOENT ? ESP_OK : ESP_FAIL;
+    esp_err_t result = ESP_OK;
+    unsigned removed = 0;
+    struct dirent * ent;
+    while((ent = readdir(dir)) != NULL) {
+        if(!is_cached_cover(ent->d_name)) continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", app_config_artwork_dir(), ent->d_name);
+        struct stat st;
+        if(stat(path, &st) != 0) { result = ESP_FAIL; continue; }
+        if(!S_ISREG(st.st_mode)) continue;
+        if(remove(path) != 0) result = ESP_FAIL;
+        else removed++;
+    }
+    closedir(dir);
+    ESP_LOGI(TAG, "artwork cache reset: pack/index and %u cover files removed", removed);
+    return result;
+}
+
 static esp_err_t create_pack(void)
 {
     s_pack = fopen(s_pack_path, "w+b");
@@ -56,6 +99,7 @@ static esp_err_t create_pack(void)
         ESP_LOGE(TAG, "cannot create %s", s_pack_path);
         return ESP_FAIL;
     }
+    setvbuf(s_pack, NULL, _IONBF, 0);
 
     thumb_cache_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
@@ -75,9 +119,9 @@ static esp_err_t create_pack(void)
     /* Preallocate the whole slot array so later writes are sequential and
      * the FAT does not have to grow the file one cluster at a time. */
     size_t remaining = (size_t)s_count * THUMB_CACHE_THUMB_SIZE;
-    uint8_t * buf = heap_caps_malloc(64 * 1024,
-                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(buf == NULL) buf = heap_caps_malloc(64 * 1024, MALLOC_CAP_8BIT);
+    uint8_t * buf = heap_caps_aligned_alloc(128, 64 * 1024,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(buf == NULL) buf = heap_caps_aligned_alloc(128, 64 * 1024, MALLOC_CAP_8BIT);
     if(buf != NULL) {
         memset(buf, 0, 64 * 1024);
         while(remaining > 0) {

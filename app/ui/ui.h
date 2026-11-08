@@ -145,7 +145,7 @@ typedef struct {
     bool pair_busy;
     bool pair_trusted;
     char pair_status[96];
-    int job_kind;              /* 1 = quick, 2 = full */
+    int job_kind;              /* 2 = library sync */
     int cached_albums;
     int thumb_count;
     int cover_count;
@@ -189,8 +189,7 @@ typedef struct {
 
 enum {
     UI_AFC_ACTION_PAIR = 0,
-    UI_AFC_ACTION_QUICK_SYNC,
-    UI_AFC_ACTION_FULL_SYNC,
+    UI_AFC_ACTION_SYNC = 2,
     UI_AFC_ACTION_IPOD_MODE,
 };
 

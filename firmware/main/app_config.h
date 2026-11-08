@@ -81,7 +81,8 @@ esp_err_t app_config_set_library_id(const char * id);
 bool app_config_iap2_mode(void);
 esp_err_t app_config_set_iap2_mode(bool enabled);
 
-/* One-shot AFC job flag in NVS: 0 none, 1 quick sync, 2 full sync. */
+/* One-shot AFC job flag in NVS: 0 none, 2 sync, 3 reset artwork then sync.
+ * Legacy job 1 is treated as an ordinary sync. */
 esp_err_t app_config_set_afc_job(uint8_t job);
 uint8_t app_config_peek_afc_job(void);
 uint8_t app_config_take_afc_job(void);

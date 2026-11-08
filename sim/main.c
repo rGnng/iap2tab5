@@ -259,8 +259,8 @@ static void sim_afc_status(ui_afc_status_t * out)
     out->job_kind = 2;
     snprintf(out->library_updated, sizeof(out->library_updated), "2026-11-08 10:32");
     snprintf(out->pair_status, sizeof(out->pair_status), "%s", out->pair_busy ?
-        "Tap Trust on your iPod, then enter its passcode." : out->connected ?
-        "" : "Unlock your iPod before pairing.");
+        "Tap Trust on the device, then enter its passcode." : out->connected ?
+        "" : "Unlock the device before pairing.");
     snprintf(out->sync_album, sizeof(out->sync_album), "TrickRoom - Album Mix");
     snprintf(out->status, sizeof(out->status), "Some files could not be copied. Reconnect and retry.");
 }

@@ -42,17 +42,16 @@ esp_err_t lockdown_client_hash_media(void);
 /* Hashes /sdcard/AFC/MLDB.{SQL,WAL,SHM} to verify a completed copy. */
 esp_err_t lockdown_client_verify_sd_media(void);
 
-/* Copies album artwork via AFC (AFC mode) and generates cached 54x54 thumbs.
- * limit 0 copies every album with a manifest entry. */
-esp_err_t lockdown_client_sync_artwork(int limit);
+/* Refreshes the database and incrementally caches all missing artwork. */
+esp_err_t lockdown_client_sync_artwork(void);
 
 /* Sync one album's artwork by library album ID. */
 esp_err_t lockdown_client_sync_artwork_id(int album_id);
 
 typedef struct {
     bool active;
-    int kind;              /* 1 = quick, 2 = full */
-    int phase;             /* 1 = downloading, 2 = converting */
+    int kind;              /* 2 = library sync */
+    int phase;             /* 1 = database, 2 = streaming covers, 3 = remaining originals */
     int total;             /* albums with a manifest entry in this run */
     int attempted;
     int copied;

@@ -37,7 +37,7 @@
  *   B          upload /sdcard/JPFONT.TTF as base64, end with EOF
  *   +          upload /sdcard/wifi.txt as base64, end with EOF
  *   =          print /sdcard/wifi.txt
- *   C / E      AFC artwork sync: first 64 albums / all albums
+ *   C / E      AFC library sync (incremental artwork cache)
  *   # <id>     AFC artwork sync for one album ID
  *   9 <id>     dump the current library's <id>.cov as base64 (debug)
  *   0          delete the packed thumb cache (debug)
@@ -770,14 +770,8 @@ static void serial_input_task(void * arg)
             continue;
         }
 
-        if(c == 'C') {
-            esp_err_t err = lockdown_client_sync_artwork(64);
-            ESP_LOGI("art", "sync 64: %s", esp_err_to_name(err));
-            continue;
-        }
-
-        if(c == 'E') {
-            esp_err_t err = lockdown_client_sync_artwork(0);
+        if(c == 'C' || c == 'E') {
+            esp_err_t err = lockdown_client_sync_artwork();
             ESP_LOGI("art", "sync all: %s", esp_err_to_name(err));
             continue;
         }

@@ -17,6 +17,7 @@ static const char * TAG = "afc";
 #define AFC_MAGIC_LEN   8
 #define AFC_HDR_LEN     40
 #define AFC_RECV_TIMEOUT 15000
+#define AFC_MEMORY_FILE_LIMIT (8 * 1024 * 1024)
 
 #define AFC_OP_STATUS        0x01
 #define AFC_OP_DATA          0x02
@@ -76,19 +77,26 @@ esp_err_t afc_client_raw(uint64_t operation, const void * payload,
 
     uint64_t packet_num = s_packet_num++;
 
-    uint8_t header[AFC_HDR_LEN];
-    memset(header, 0, sizeof(header));
+    /* Path and file-read requests are small: send header and arguments in
+     * one mux packet instead of paying for two USB transfers per request. */
+    uint8_t header[AFC_HDR_LEN + 512];
+    memset(header, 0, AFC_HDR_LEN);
     memcpy(header, AFC_MAGIC, AFC_MAGIC_LEN);
     wr_le64(header + 8, AFC_HDR_LEN + payload_len);
     wr_le64(header + 16, AFC_HDR_LEN + payload_len);
     wr_le64(header + 24, packet_num);
     wr_le64(header + 32, operation);
 
-    if(usbmux_conn_send(s_conn, header, sizeof(header)) != sizeof(header)) {
+    size_t first_len = AFC_HDR_LEN;
+    if(payload_len > 0 && payload_len <= sizeof(header) - AFC_HDR_LEN) {
+        memcpy(header + AFC_HDR_LEN, payload, payload_len);
+        first_len += payload_len;
+    }
+    if(usbmux_conn_send(s_conn, header, first_len) != (int)first_len) {
         set_status("AFC send header failed");
         return ESP_FAIL;
     }
-    if(payload_len > 0 &&
+    if(payload_len > sizeof(header) - AFC_HDR_LEN &&
        usbmux_conn_send(s_conn, payload, payload_len) != (int)payload_len) {
         set_status("AFC send payload failed");
         return ESP_FAIL;
@@ -362,13 +370,16 @@ esp_err_t afc_client_read_all(const char * remote_path, uint8_t ** out,
     if(afc_client_stat(remote_path, &expected, type, sizeof(type)) != ESP_OK) {
         expected = 0;
     }
+    /* Leave space for display buffers, USB and the JPEG decoder. Callers
+     * can use copy_file() for originals larger than the in-memory budget. */
+    if(expected > AFC_MEMORY_FILE_LIMIT) return ESP_ERR_INVALID_SIZE;
 
     size_t cap = expected > 0 ? (size_t)expected + 1 : 256 * 1024;
     if(cap < 64 * 1024) cap = 64 * 1024;
     uint8_t * buf = heap_caps_aligned_alloc(128, cap,
                                             MALLOC_CAP_SPIRAM |
                                             MALLOC_CAP_8BIT);
-    if(buf == NULL) return ESP_ERR_NO_MEM;
+    if(buf == NULL) return ESP_ERR_INVALID_SIZE;
 
     size_t path_len = strlen(remote_path) + 1;
     uint8_t * payload = malloc(path_len + 8);
@@ -412,6 +423,9 @@ esp_err_t afc_client_read_all(const char * remote_path, uint8_t ** out,
                                 &data, &len);
         if(result != ESP_OK) {
             free(data);
+            /* Reserve INVALID_SIZE for the caller's SD-streaming fallback;
+             * a malformed wire response is not an oversized file. */
+            if(result == ESP_ERR_INVALID_SIZE) result = ESP_ERR_INVALID_RESPONSE;
             goto cleanup;
         }
         if(op != AFC_OP_DATA) {
@@ -425,6 +439,11 @@ esp_err_t afc_client_read_all(const char * remote_path, uint8_t ** out,
             free(data);
             break;
         }
+        if(len > AFC_MEMORY_FILE_LIMIT - used) {
+            free(data);
+            result = ESP_ERR_INVALID_SIZE;
+            goto cleanup;
+        }
         if(used + len > cap) {
             size_t new_cap = cap * 2;
             while(new_cap < used + len) new_cap *= 2;
@@ -433,7 +452,7 @@ esp_err_t afc_client_read_all(const char * remote_path, uint8_t ** out,
                                                    MALLOC_CAP_8BIT);
             if(nb == NULL) {
                 free(data);
-                result = ESP_ERR_NO_MEM;
+                result = ESP_ERR_INVALID_SIZE;
                 goto cleanup;
             }
             memcpy(nb, buf, used);
@@ -593,7 +612,7 @@ esp_err_t afc_client_copy_file(const char * remote_path,
 
     if(out != NULL) {
         uint64_t t0 = (uint64_t)esp_timer_get_time();
-        fclose(out);
+        if(fclose(out) != 0) result = ESP_FAIL;
         close_us = (uint64_t)esp_timer_get_time() - t0;
     }
 

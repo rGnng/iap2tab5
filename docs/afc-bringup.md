@@ -37,8 +37,7 @@ read 16 bytes from MediaLibrary.sqlitedb OK
 
 ## Pair and trust on the Tab5
 
-Enter AFC mode, connect the Apple device to USB-A, and choose **Pair / Trust
-Apple**. Unlock the Apple device, tap **Trust**, and enter its passcode if asked.
+Enter AFC mode, connect the Apple device to USB-A, and choose **Pair / Trust**. Unlock the Apple device, tap **Trust**, and enter its passcode if asked.
 The Tab5 generates its own RSA host identity; no computer or exported pair
 record is needed. The connection panel shows USB connection, approved trust,
 and ready file access separately. Approval is polled for up to two minutes;
@@ -66,12 +65,16 @@ Code-only OTA preserves SPIFFS; a full flash can overwrite it.
 
 ## Sync screen
 
-The square layout follows Gray, Aqua, and Windows 95. Connection and Apple
-trust are on the left; imported album/track counts, cached covers, and sync
-progress are on the right. The footer shows SD usage and **Exit**.
+The square layout follows Gray, Aqua, and Windows 95. A narrow left column
+shows one Device state, **Pair / Trust**, and SD usage, with **Exit** below it.
+Pairing instructions appear only when needed. The wider right area contains
+library counts and sync progress; the redundant USB/trust/file-access checklist
+has been removed.
 
-- **Quick sync:** validates the imported library and caches the first 64 albums.
-- **Full sync:** copies the database snapshot and caches all imported album art.
+- **Sync:** refreshes the database snapshot and incrementally caches missing
+  album art. There is one sync action; no separate Quick/Full choice.
+- The panel shows live status, progress, and the current album, without numbered
+  stage labels. Artwork normally downloads, decodes, and writes in one pass.
 - Existing covers are reused. Copying a database snapshot does not rebuild the
   browsable `library.bin`; the desktop import step is still required for new
   tracks or albums.
@@ -114,7 +117,7 @@ Trigger the copy:
 - web page: **Media library -> Copy to SD**
 - HTTP: `POST /api/sync`
 
-The copy streams 32 KB AFC reads and prints a SHA-256 digest for each file.
+The copy streams 64 KB AFC reads and prints a SHA-256 digest for each file.
 The serial command `V` re-reads the local files and prints their hashes for a
 byte-for-byte check.
 
@@ -126,14 +129,99 @@ Verified on the inserted card:
 /sdcard/AFC/MLDB.SHM     32768  sha256=757f0b1581fda8d4fc692973ce6a8106fa191013a709ec424ec079f88b5ac77c
 ```
 
-The card used here writes at roughly 0.4 MB/s, so the 50 MB database takes
-about two minutes. `Y` formats the card (destroying all data) and mounts it;
+During initial bring-up the card wrote at roughly 0.4 MB/s, so the 50 MB
+database took about two minutes. This is historical; see the sync performance
+notes below for the current path. `Y` formats the card (destroying all data) and mounts it;
 the first boot mount after inserting an unformatted card fails, and an
 explicit `Y` is needed.
 
 After `StartService`, the firmware closes the lockdownd connection and keeps
 only AFC open. The device otherwise resets the idle lockdownd connection
 after about 30 seconds of a long copy, which also takes AFC down.
+
+## Sync performance and cache rebuild
+
+`POST /api/afc/cache/reset` explicitly queues a reboot, clears the current
+library's packed thumbnails and numeric cover files, and starts a fresh Sync.
+It does not remove `library.bin`, stars, album-seen history, pairing, settings,
+or the separate Now Playing cache. The one-shot request is consumed before
+any deletion, and reset runs before UI/cache file handles open. An absent SD
+card or an active sync/pairing operation rejects the request. This debug
+operation has no additional button in the normal Sync screen.
+
+`GET /api/status` exposes `afc_sync` progress. For complete benchmark logs,
+advance `GET /api/log?since=...` using each response's `X-Log-Seq` header;
+repeatedly requesting `since=0` returns the same first chunk, not the tail.
+
+Research and implementation:
+
+- The [LVGL 9.6 TJPGD configuration](https://github.com/lvgl/lvgl/blob/v9.6.0/src/libs/tjpgd/tjpgdcnf.h)
+  disables scaling, and its decoder removes the pixel-reduction implementation.
+  Our former requests for scaled decoding failed, then retried from SD at 1:1.
+  AFC now uses a separate copy of [upstream TJpgDec](https://elm-chan.org/fsw/tjpgd/en/appnote.html),
+  with actual 1/2, 1/4 and 1/8 decoding and RGB565 output. It keeps a 4 KiB work
+  pool and samples directly into the thumbnail; it does not allocate a full
+  software-decoded frame. Stock LVGL and managed dependencies are unchanged.
+- SD verification uses 64 KiB, 128-byte-aligned reads, matching the P4 DMA path
+  in [ESP-IDF's SDMMC driver](https://github.com/espressif/esp-idf/blob/v5.5.6/components/sdmmc/sdmmc_cmd.c).
+  These use POSIX `read()`: [size-optimized newlib](https://github.com/espressif/newlib-esp32/blob/master/newlib/libc/stdio/fread.c)
+  can turn unbuffered `fread()` into single-byte I/O. SHA-256 and byte-count verification still cover the
+  complete database files.
+  The old small-buffer path remains available on allocation failure.
+- Small AFC requests combine the header and arguments in one USB/mux send.
+  Reads remain 64 KiB and sequential. This reduces transfers without increasing
+  the outstanding-data window or introducing concurrent requests on one AFC
+  stream. [libimobiledevice's AFC client](https://github.com/libimobiledevice/libimobiledevice/blob/master/src/afc.c)
+  also serializes request/reply access to a client; parallel workers would need
+  explicit ownership and receive-flow-control work first.
+- Compressed covers over 8 MiB, or unable to fit contiguous PSRAM, stream to a
+  temporary SD file in bounded chunks,
+  then use the scaled decoder with an aligned read buffer. A short/failed copy
+  is never published as an available original.
+- Both [P4 hardware JPEG](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32p4/api-reference/peripherals/jpeg.html)
+  and TJpgDec support baseline JPEG. A marker probe identifies progressive
+  originals without three full-file decoder attempts on every sync. These
+  files remain on SD and are reported as unsupported, not counted as cached.
+- The thumbnail pack is preallocated with aligned bulk writes. Per-run logs
+  report reused covers and aggregate read/decode/write time.
+
+### Device measurements (2026-11-08)
+
+One connected iPod and SD card, Gray theme, USB-A plus USB-C, SD debug logging
+enabled. The imported library has 2,096 albums / 20,688 tracks and 2,090 artwork
+manifest entries. Both cold runs started with an empty artwork cache. Timings
+use firmware log timestamps from sync start to completion, excluding cache
+reset, reboot, and pack creation. Baseline: `ce9d86d-sync-base`; optimized:
+`ce9d86d-sync-final3`.
+
+| Measurement | Baseline | Optimized |
+| --- | ---: | ---: |
+| Fresh artwork sync, including database verification | 1,306.809 s (21:47) | 681.651 s (11:22) |
+| Repeat sync with cached covers | 65.130 s | 21.036 s |
+| Database copy plus full verification | about 36 s | about 18 s |
+| Covers successfully cached after the cold run | 1,989 | 1,992 |
+| Cold artwork download failures | 4 | 0 |
+
+The fresh run is about 48% faster; repeat sync is about 68% faster. All three
+SQL/WAL/SHM hashes matched the source in both runs. The optimized repeat reused
+1,992 thumbnails and read zero artwork bytes over AFC. Pairing remained trusted.
+The 98 remaining conversion failures are 96 progressive JPEGs and two files
+whose sampling factors are unsupported (album IDs 99 and 1465). They are still
+reported as failures, and their originals remain on SD.
+
+The optimized cold pass read 1,285,418,273 artwork bytes. Its one-pass counters
+recorded 174.574 s reading (including SD spooling where needed), 444.543 s
+in decoding, and 16.080 s writing. The remaining-original pass took 23.550 s,
+compared with 906.018 s before. Software JPEG decoding is now the main cost.
+TJpgDec's larger Huffman lookup configuration is a candidate for a subsequent
+benchmark with a larger work pool; its speedup has not been measured here.
+
+Validation: 88 host tests, ESP-IDF firmware and desktop simulator builds, Gray /
+Aqua / Windows 95 screen checks, OTA, cold and repeat device syncs. JPEG tests
+exercise production memory/file callbacks at all four scales, check colors
+and odd-sized image edges, and check truncated input. Other tests cover SHA-256
+read boundaries/failure paths, AFC request framing, low-memory SD fallback,
+and cache deletion scope.
 
 ## Debug keys
 

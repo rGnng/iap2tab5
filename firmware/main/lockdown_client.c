@@ -18,7 +18,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "driver/jpeg_decode.h"
-#include "tjpgd.h"
+#include "scaled_tjpgd.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -799,7 +799,7 @@ static esp_err_t pair_with_apple(void)
     esp_err_t err = pair_public_key(&key, &key_len);
     if(err == ESP_OK) err = apple_pairing_generate(key, key_len, &identity);
     if(err != ESP_OK) {
-        pair_state(false, false, "Could not create trust. Unlock your iPod and try again.");
+        pair_state(false, false, "Could not create trust. Unlock the device and try again.");
         free(key);
         return err;
     }
@@ -820,7 +820,7 @@ static esp_err_t pair_with_apple(void)
         apple_pairing_free(&identity);
         return err;
     }
-    pair_state(true, false, "Unlock your iPod and tap Trust on its screen.");
+    pair_state(true, false, "Unlock the device and tap Trust on its screen.");
     TickType_t started = xTaskGetTickCount();
     bool finished = false;
     while(usbmux_host_is_ready() &&
@@ -835,8 +835,8 @@ static esp_err_t pair_with_apple(void)
             if(strcmp(error, "PairingDialogResponsePending") == 0 ||
                strcmp(error, "PasswordProtected") == 0) {
                 pair_state(true, false, strcmp(error, "PasswordProtected") == 0 ?
-                    "Unlock your iPod to continue pairing." :
-                    "Tap Trust on your iPod, then enter its passcode.");
+                    "Unlock the device to continue pairing." :
+                    "Tap Trust on the device, then enter its passcode.");
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
@@ -878,7 +878,7 @@ static esp_err_t pair_with_apple(void)
     }
     if(!finished) {
         pair_state(false, false, usbmux_host_is_ready() ?
-            "Trust timed out. Unlock your iPod and try again." :
+            "Trust timed out. Unlock the device and try again." :
             "Device disconnected. Reconnect and try again.");
         err = ESP_ERR_TIMEOUT;
     }
@@ -1094,7 +1094,7 @@ static void lockdown_task(void * arg)
                      esp_err_to_name(err));
             set_status("lockdownd connect failed");
             if(atomic_exchange(&s_pair_requested, false))
-                pair_state(false, false, "Could not connect. Unlock your iPod and retry pairing.");
+                pair_state(false, false, "Could not connect. Unlock the device and retry pairing.");
             vTaskDelay(pdMS_TO_TICKS(3000));
             continue;
         }
@@ -1128,7 +1128,7 @@ static void lockdown_task(void * arg)
         err = start_session(pair);
         free(pair);
         if(err != ESP_OK) {
-            pair_state(false, false, "Trust needs renewing. Unlock your iPod and tap Pair / Trust.");
+            pair_state(false, false, "Trust needs renewing. Unlock the device and tap Pair / Trust.");
             goto cleanup;
         }
         pair_state(false, true, "");
@@ -1379,13 +1379,13 @@ static int tjpgd_output(JDEC * jd, void * bitmap, JRECT * rect)
     tjpgd_yield_if_needed();
     int bw = (int)rect->right - (int)rect->left + 1;
     lv_area_t area = { rect->left, rect->top, rect->right, rect->bottom };
-    uint32_t stride = (uint32_t)bw * 3;
+    uint32_t stride = (uint32_t)bw * 2;
     art_sample_rect(&area, (const uint8_t *)bitmap, stride,
-                    LV_COLOR_FORMAT_RGB888, ctx->thumb,
+                    LV_COLOR_FORMAT_RGB565, ctx->thumb,
                     ART_THUMB_SIZE, ART_THUMB_SIZE, ctx->out_w, ctx->out_h);
     if(ctx->cover != NULL) {
         art_sample_rect(&area, (const uint8_t *)bitmap, stride,
-                        LV_COLOR_FORMAT_RGB888, ctx->cover,
+                        LV_COLOR_FORMAT_RGB565, ctx->cover,
                         ART_COVER_SIZE, ART_COVER_SIZE, ctx->out_w, ctx->out_h);
     }
     return 1;
@@ -1396,10 +1396,16 @@ static bool tjpgd_decode_sampled(const char * src, uint8_t * thumb,
 {
     FILE * f = fopen(src, "rb");
     if(f == NULL) return false;
+    /* TJPGD asks for 512 bytes at a time. An aligned stdio buffer batches
+     * these into efficient SD reads for oversized originals. */
+    uint8_t * input = heap_caps_aligned_alloc(128, 64 * 1024,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(input != NULL) setvbuf(f, (char *)input, _IOFBF, 64 * 1024);
 
     void * pool = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if(pool == NULL) {
         fclose(f);
+        heap_caps_free(input);
         return false;
     }
 
@@ -1410,10 +1416,11 @@ static bool tjpgd_decode_sampled(const char * src, uint8_t * thumb,
         .cover = cover,
     };
     JDEC jd;
-    JRESULT rc = jd_prepare(&jd, tjpgd_input, pool, 4096, &ctx);
+    JRESULT rc = tab5_jd_prepare(&jd, tjpgd_input, pool, 4096, &ctx);
     if(rc != JDR_OK) {
         heap_caps_free(pool);
         fclose(f);
+        heap_caps_free(input);
         return false;
     }
 
@@ -1427,6 +1434,7 @@ static bool tjpgd_decode_sampled(const char * src, uint8_t * thumb,
     if(ctx.out_w <= 0 || ctx.out_h <= 0) {
         heap_caps_free(pool);
         fclose(f);
+        heap_caps_free(input);
         return false;
     }
 
@@ -1437,9 +1445,10 @@ static bool tjpgd_decode_sampled(const char * src, uint8_t * thumb,
         snprintf(kind, sizeof(kind), "sw 1/%u", 1u << scale);
         art_set_info(jd.width, jd.height, kind);
     }
-    rc = jd_decomp(&jd, tjpgd_output, scale);
+    rc = tab5_jd_decomp(&jd, tjpgd_output, scale);
     heap_caps_free(pool);
     fclose(f);
+    heap_caps_free(input);
     if(rc != JDR_OK) return false;
     ESP_LOGI(TAG, "art %s: sw %ux%u scale=1/%u decoded",
              src, (unsigned)jd.width, (unsigned)jd.height, 1u << scale);
@@ -1463,7 +1472,7 @@ static bool tjpgd_decode_sampled_mem(const uint8_t * data, size_t len,
         .cover = cover,
     };
     JDEC jd;
-    JRESULT rc = jd_prepare(&jd, tjpgd_input, pool, 4096, &ctx);
+    JRESULT rc = tab5_jd_prepare(&jd, tjpgd_input, pool, 4096, &ctx);
     if(rc != JDR_OK) {
         heap_caps_free(pool);
         return false;
@@ -1487,7 +1496,7 @@ static bool tjpgd_decode_sampled_mem(const uint8_t * data, size_t len,
         snprintf(kind, sizeof(kind), "sw 1/%u", 1u << scale);
         art_set_info(jd.width, jd.height, kind);
     }
-    rc = jd_decomp(&jd, tjpgd_output, scale);
+    rc = tab5_jd_decomp(&jd, tjpgd_output, scale);
     heap_caps_free(pool);
     if(rc != JDR_OK) return false;
     ESP_LOGI(TAG, "art mem: sw %ux%u scale=1/%u decoded",
@@ -1729,6 +1738,40 @@ bool lockdown_client_decode_cover_mem(const uint8_t * data, size_t len,
                                     ART_COVER_SIZE);
 }
 
+/* Both the P4 JPEG engine and our TJPGD/LVGL fallback only support baseline
+ * JPEG. Inspect markers without reading the compressed pixels, so an
+ * unsupported original does not trigger three full reads on every sync. */
+static bool jpeg_file_is_progressive(const char * path)
+{
+    FILE * f = fopen(path, "rb");
+    if(f == NULL) return false;
+    bool progressive = false;
+    if(fgetc(f) != 0xff || fgetc(f) != 0xd8) goto out;
+    for(;;) {
+        if(fgetc(f) != 0xff) break;
+        int marker;
+        do { marker = fgetc(f); } while(marker == 0xff);
+        if(marker < 0 || marker == 0 || marker == 0xda || marker == 0xd9) break;
+        if(marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        int hi = fgetc(f), lo = fgetc(f);
+        if(hi < 0 || lo < 0) break;
+        unsigned length = (unsigned)((hi << 8) | lo);
+        if(length < 2) break;
+        if(marker == 0xc0) break;
+        if(marker == 0xc2) {
+            uint8_t frame[6];
+            progressive = length >= 8 && fread(frame, 1, sizeof(frame), f) == sizeof(frame) &&
+                frame[0] == 8 && (frame[1] || frame[2]) && (frame[3] || frame[4]) &&
+                (frame[5] == 1 || frame[5] == 3) && length == 8u + 3u * frame[5];
+            break;
+        }
+        if(fseek(f, (long)length - 2, SEEK_CUR) != 0) break;
+    }
+out:
+    fclose(f);
+    return progressive;
+}
+
 static bool make_art_cache(const char * src, const char * thumb_dst,
                            const char * cover_dst)
 {
@@ -1738,6 +1781,14 @@ static bool make_art_cache(const char * src, const char * thumb_dst,
     snprintf(lv_src, sizeof(lv_src), "A:%s", src);
     struct stat src_st;
     if(stat(src, &src_st) == 0) s_last_bytes = (uint32_t)src_st.st_size;
+    const char * ext = strrchr(src, '.');
+    bool is_jpeg = ext != NULL && (strcasecmp(ext, ".jpg") == 0 ||
+                                   strcasecmp(ext, ".jpeg") == 0);
+    if(is_jpeg && jpeg_file_is_progressive(src)) {
+        art_set_info(0, 0, "progressive-jpeg");
+        ESP_LOGW(TAG, "art %s: progressive JPEG unsupported", src);
+        return false;
+    }
 
     const size_t thumb_size = (size_t)ART_THUMB_SIZE * ART_THUMB_SIZE * 2;
     const size_t cover_size = (size_t)ART_COVER_SIZE * ART_COVER_SIZE * 2;
@@ -1761,9 +1812,6 @@ static bool make_art_cache(const char * src, const char * thumb_dst,
     if(s_cover_buf != NULL) memset(s_cover_buf, 0, cover_size);
 
     bool decoded = false;
-    const char * ext = strrchr(src, '.');
-    bool is_jpeg = ext != NULL && (strcasecmp(ext, ".jpg") == 0 ||
-                                   strcasecmp(ext, ".jpeg") == 0);
     int target = cover_dst != NULL ? ART_COVER_SIZE : ART_THUMB_SIZE;
     if(is_jpeg) {
         if(cover_dst == NULL) {
@@ -1878,11 +1926,48 @@ static bool write_mem_file(const char * path, const uint8_t * data, size_t len)
     return n == len;
 }
 
+static bool artwork_download_large(uint64_t id, const char * remote)
+{
+    char tmp[96], final[96], type[32];
+    uint64_t expected = 0;
+    if(afc_client_stat(remote, &expected, type, sizeof(type)) != ESP_OK || !expected)
+        return false;
+    snprintf(tmp, sizeof(tmp), "%s/%llu.art", artwork_dir(), (unsigned long long)id);
+    /* Only one 64 KiB transfer buffer is needed; the fallback decoder reads
+     * from SD instead of retaining a multi-megabyte compressed file in RAM. */
+    bool ok = afc_client_copy_file(remote, tmp, expected, NULL, 0) == ESP_OK;
+    struct stat st;
+    ok = ok && stat(tmp, &st) == 0 && (uint64_t)st.st_size == expected;
+    const char * ext = NULL;
+    if(ok) {
+        FILE * f = fopen(tmp, "rb");
+        if(f != NULL) {
+            uint8_t head[12];
+            size_t n = fread(head, 1, sizeof(head), f);
+            fclose(f);
+            ext = artwork_ext_mem(head, n);
+        }
+    }
+    if(ext != NULL) {
+        snprintf(final, sizeof(final), "%s/%llu.%s", artwork_dir(),
+                 (unsigned long long)id, ext);
+        ok = rename(tmp, final) == 0;
+        if(ok) thumb_cache_set_original((uint32_t)id);
+    }
+    else ok = false;
+    if(!ok) remove(tmp);
+    s_last_bytes = (uint32_t)expected;
+    art_set_info(0, 0, "sd-stream");
+    return ok;
+}
+
 /* One-pass path: read the original over AFC into PSRAM, decode only as much
  * as the 54x54 thumbnail needs, and append it to the packed cache. No original
  * file is written to SD and no per-album .thm file is created. */
 static bool artwork_stream_one(uint64_t id)
 {
+    s_last_read_ms = s_last_decode_ms = s_last_write_ms = 0;
+    s_last_bytes = 0;
     if(artwork_cache_ready(id)) return true;
     if(thumb_cache_original(id)) return true;
 
@@ -1891,11 +1976,15 @@ static bool artwork_stream_one(uint64_t id)
 
     uint8_t * data = NULL;
     size_t len = 0;
-    s_last_decode_ms = 0;
-    s_last_write_ms = 0;
     uint64_t t0 = (uint64_t)esp_timer_get_time();
     esp_err_t err = afc_client_read_all(remote, &data, &len);
     s_last_read_ms = (int)(((uint64_t)esp_timer_get_time() - t0) / 1000);
+    if(err == ESP_ERR_INVALID_SIZE) {
+        ESP_LOGI(TAG, "artwork %llu: streaming large original to SD", (unsigned long long)id);
+        bool ok = artwork_download_large(id, remote);
+        s_last_read_ms = (int)(((uint64_t)esp_timer_get_time() - t0) / 1000);
+        return ok;
+    }
     if(err != ESP_OK) {
         s_last_bytes = 0;
         art_set_info(0, 0, "afc-read");
@@ -1992,7 +2081,7 @@ static bool artwork_convert_one(uint64_t id)
     return true;
 }
 
-esp_err_t lockdown_client_sync_artwork(int limit)
+esp_err_t lockdown_client_sync_artwork(void)
 {
     if(!afc_client_is_ready()) {
         set_status("AFC not ready for artwork");
@@ -2005,7 +2094,7 @@ esp_err_t lockdown_client_sync_artwork(int limit)
         return ESP_ERR_INVALID_STATE;
     }
     mkdir(artwork_dir(), 0777);
-    cache_slow_log_begin(limit == 0);
+    cache_slow_log_begin(true);
 
     int total = player_album_count();
     int planned = 0;
@@ -2013,31 +2102,29 @@ esp_err_t lockdown_client_sync_artwork(int limit)
         char remote[160];
         if(!player_artwork_remote(id, remote, sizeof(remote))) continue;
         planned++;
-        if(limit > 0 && planned >= limit) break;
     }
 
     uint64_t sd_total = 0, sd_free = 0;
     esp_vfs_fat_info("/sdcard", &sd_total, &sd_free);
 
-    s_art_kind = limit > 0 ? 1 : 2;
+    s_art_kind = 2;
     s_art_total = planned;
     s_art_current = 0;
     s_art_active = true;
 
-    ESP_LOGI(TAG, "artwork sync start (limit=%d, albums=%d, planned=%d, "
-             "sd free=%llu/%llu)", limit, total, planned,
+    ESP_LOGI(TAG, "artwork sync start (albums=%d, planned=%d, "
+             "sd free=%llu/%llu)", total, planned,
              (unsigned long long)(sd_free / (1024 * 1024)),
              (unsigned long long)(sd_total / (1024 * 1024)));
 
-    /* Phase 1: database sync. Full sync refreshes the MLDB snapshot; quick
-     * sync only validates the already installed library. */
+    /* Refresh and verify the database snapshot before artwork work. */
     s_art_phase = 1;
     artwork_set_current(0);
     s_art_total = 1;
     s_art_attempted = 0;
     s_art_copied = 0;
     s_art_failed = 0;
-    if(limit == 0) {
+    {
         set_status("database sync");
         esp_err_t db_err = lockdown_client_sync_media();
         s_art_attempted = 1;
@@ -2051,12 +2138,8 @@ esp_err_t lockdown_client_sync_artwork(int limit)
         }
         set_status("AFC ready");
     }
-    else {
-        s_art_attempted = 1;
-        s_art_copied = 1;
-    }
 
-    /* Phase 2: download only. The originals stay on SD until phase 3. */
+    /* Read/decode/write missing covers in one pass; reuse existing slots. */
     s_art_phase = 2;
     s_art_total = planned;
     int attempted = 0, copied = 0, failed = 0;
@@ -2070,16 +2153,22 @@ esp_err_t lockdown_client_sync_artwork(int limit)
     thumb_cache_scan(artwork_dir(), (uint32_t)total);
     set_status("AFC ready");
 
+    uint64_t read_ms = 0, decode_ms = 0, write_ms = 0, read_bytes = 0;
+    int reused = 0;
     for(uint64_t id = 1; id <= (uint64_t)total; id++) {
-        if(limit > 0 && attempted >= limit) break;
         char remote[160];
         if(!player_artwork_remote(id, remote, sizeof(remote))) continue;
 
         artwork_set_current(id);
         attempted++;
         s_art_attempted = attempted;
+        if(artwork_cache_ready(id)) reused++;
         uint64_t t0 = (uint64_t)esp_timer_get_time();
         bool streamed = artwork_stream_one(id);
+        read_ms += s_last_read_ms;
+        decode_ms += s_last_decode_ms;
+        write_ms += s_last_write_ms;
+        read_bytes += s_last_bytes;
         uint64_t elapsed_ms =
             ((uint64_t)esp_timer_get_time() - t0) / 1000;
         if(!streamed || elapsed_ms >= SLOW_ALBUM_MS) {
@@ -2100,6 +2189,9 @@ esp_err_t lockdown_client_sync_artwork(int limit)
         }
     }
     ESP_LOGI(TAG, "download phase done: %d ready, %d failed", copied, failed);
+    ESP_LOGI(TAG, "artwork IO: reused=%d read=%llums decode=%llums write=%llums bytes=%llu",
+             reused, (unsigned long long)read_ms, (unsigned long long)decode_ms,
+             (unsigned long long)write_ms, (unsigned long long)read_bytes);
 
     /* Phase 3: decode everything that landed and make the thumbnails. */
     s_art_phase = 3;
@@ -2108,7 +2200,6 @@ esp_err_t lockdown_client_sync_artwork(int limit)
     s_art_copied = 0;
     s_art_failed = 0;
     for(uint64_t id = 1; id <= (uint64_t)total; id++) {
-        if(limit > 0 && attempted >= limit) break;
         char remote[160];
         if(!player_artwork_remote(id, remote, sizeof(remote))) continue;
 

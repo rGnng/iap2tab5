@@ -289,15 +289,18 @@ static void afc_job_task(void * arg)
 {
     LV_UNUSED(arg);
     uint8_t job = app_config_take_afc_job();
-    if(job == 0) {
+    if(job != 1 && job != 2) {
+        s_afc_job_active = 0;
+        s_afc_job_finished = s_afc_job_failed = true;
+        snprintf(s_afc_job_status, sizeof(s_afc_job_status),
+                 "Could not read the sync request. Try again.");
         vTaskDelete(NULL);
         return;
     }
 
     s_afc_job_active = job;
     s_afc_job_kind = job;
-    ESP_LOGW(TAG, "AFC job %u starting %s sync", job,
-             job == 1 ? "quick" : "full");
+    ESP_LOGW(TAG, "AFC job %u starting sync", job);
 
     /* The iPod / lockdownd session may still be coming up. */
     for(int i = 0; i < 240 && !afc_client_is_ready(); i++) {
@@ -306,7 +309,7 @@ static void afc_job_task(void * arg)
 
     esp_err_t result = ESP_ERR_TIMEOUT;
     if(afc_client_is_ready()) {
-        esp_err_t err = lockdown_client_sync_artwork(job == 1 ? 64 : 0);
+        esp_err_t err = lockdown_client_sync_artwork();
         result = err;
         ESP_LOGW(TAG, "AFC job %u result: %s", job, esp_err_to_name(err));
     }
@@ -364,8 +367,8 @@ static void ui_afc_action_handler(int action)
         return;
     }
 
-    if(action != UI_AFC_ACTION_QUICK_SYNC && action != UI_AFC_ACTION_FULL_SYNC) return;
-    uint8_t job = action == UI_AFC_ACTION_QUICK_SYNC ? 1 : 2;
+    if(action != UI_AFC_ACTION_SYNC) return;
+    uint8_t job = 2;
 
     /* In AFC mode, run the worker and retain its result on screen. */
     if(!app_config_iap2_mode()) {
@@ -377,8 +380,7 @@ static void ui_afc_action_handler(int action)
     app_config_set_afc_job(job);
     app_config_set_iap2_mode(false);
     app_config_save();
-    ESP_LOGW(TAG, "AFC %s sync queued; rebooting to AFC",
-             job == 1 ? "quick" : "full");
+    ESP_LOGW(TAG, "AFC sync queued; rebooting to AFC");
     vTaskDelay(pdMS_TO_TICKS(350));
     web_server_reboot();
 }
@@ -624,6 +626,16 @@ void app_main(void)
     }
 
     app_config_init();
+    /* Consume the destructive request durably before doing any deletion.
+     * Run before player/UI/cache handles open, and never repeat on reboot. */
+    if(app_config_peek_afc_job() == 3) {
+        if(app_config_take_afc_job() == 3 && thumb_cache_reset() == ESP_OK) {
+            app_config_set_afc_job(2);
+        }
+        else {
+            ESP_LOGE(TAG, "artwork cache reset failed; automatic sync cancelled");
+        }
+    }
     debug_log_set_sd_enabled(g_app_config.debug_log);
 
     setenv("TZ", "CST-8", 1);
@@ -757,7 +769,7 @@ void app_main(void)
             usbmux_host_start();
             lockdown_client_start();
             uint8_t pending_job = app_config_peek_afc_job();
-            if(pending_job != 0) afc_start_job_task(pending_job);
+            if(pending_job == 1 || pending_job == 2) afc_start_job_task(pending_job);
         }
     }
 
