@@ -7382,7 +7382,7 @@ enum {
     SETTING_KEY_FEEDBACK,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
-    SETTING_SCREEN_OFF,
+    SETTING_SCREEN,
     SETTING_USB,
     SETTING_BOOT,
     SETTING_ABOUT,
@@ -7405,6 +7405,9 @@ static lv_obj_t * settings_detail_theme_gray_check;
 static lv_obj_t * settings_detail_theme_aqua_check;
 static lv_obj_t * settings_detail_theme_win95_check;
 static lv_obj_t * settings_screen_off_checks[3];
+static lv_obj_t * settings_brightness_checks[3];
+static const int settings_brightness_values[] = {5, 45, 100};
+static const int settings_idle_minutes[] = {30, 60, 0};
 static lv_obj_t * settings_time_ampm_value;
 static lv_obj_t * settings_time_ampm_column;
 static lv_obj_t * settings_time_ampm_spacer;
@@ -7436,7 +7439,6 @@ enum {
 static int settings_time_segment;
 static lv_obj_t * settings_detail_touch_value;
 static lv_obj_t * settings_detail_menubar_value;
-static lv_obj_t * settings_detail_brightness_value;
 static lv_obj_t * settings_detail_sort_value;
 static lv_obj_t * settings_detail_order_value;
 static lv_obj_t * settings_detail_np_bg_theme_check;
@@ -7448,7 +7450,6 @@ static lv_obj_t * settings_detail_volume_value;
 static lv_obj_t * settings_detail_sound_touch_check;
 static lv_obj_t * settings_detail_sound_both_check;
 static lv_obj_t * settings_detail_sound_none_check;
-static int settings_brightness = 70;
 
 typedef enum {
     USB_MODE_HOST = 0,
@@ -7475,9 +7476,8 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(cfg->np_bg_mode >= NP_BG_THEME && cfg->np_bg_mode <= NP_BG_COVER_GRADIENT) {
         g_np_bg_mode = (np_bg_mode_t)cfg->np_bg_mode;
     }
-    settings_brightness = cfg->brightness;
-    if(settings_brightness < 0) settings_brightness = 0;
-    if(settings_brightness > 100) settings_brightness = 100;
+    if(g_system_config.brightness < 0) g_system_config.brightness = 0;
+    if(g_system_config.brightness > 100) g_system_config.brightness = 100;
     g_usb_mode = cfg->usb_mode == 2 ? USB_MODE_BOTH : USB_MODE_HOST;
     g_theme = ui_theme_get(cfg->theme);
     g_system_config.theme = g_theme->id;
@@ -7496,7 +7496,7 @@ static const char * const settings_names[SETTING_COUNT] = {
     "Key Feedback",
     "Theme",
     "Now Playing Background",
-    "Screen Off",
+    "Screen",
     "USB Options",
     "Boot Screen",
     "About",
@@ -7505,9 +7505,13 @@ static const char * const settings_names[SETTING_COUNT] = {
 
 static int settings_initial_focus(int index)
 {
-    if(index == SETTING_SCREEN_OFF) {
-        return g_system_config.screen_off_minutes == 30 ? 0 :
-               g_system_config.screen_off_minutes == 60 ? 1 : 2;
+    if(index == SETTING_SCREEN) {
+        int nearest = 0;
+        for(int i = 1; i < 3; i++) {
+            if(abs(g_system_config.brightness - settings_brightness_values[i]) <
+               abs(g_system_config.brightness - settings_brightness_values[nearest])) nearest = i;
+        }
+        return nearest;
     }
     if(index == SETTING_NOW_PLAYING_BG) {
         return g_np_bg_mode == NP_BG_BLURRED_COVER
@@ -7650,12 +7654,21 @@ static void settings_update_menubar_labels(void)
     }
 }
 
-static void settings_update_brightness_labels(void)
+static void settings_update_screen_checks(void)
 {
-    char text[8];
-    snprintf(text, sizeof(text), "%d%%", settings_brightness);
-    if(settings_detail_brightness_value) {
-        lv_label_set_text(settings_detail_brightness_value, text);
+    for(int i = 0; i < 3; i++) {
+        const char * brightness = g_system_config.brightness == settings_brightness_values[i]
+                                    ? ICON_CHECK : "";
+        const char * idle = g_system_config.screen_off_minutes == settings_idle_minutes[i]
+                              ? ICON_CHECK : "";
+        if(settings_brightness_checks[i] &&
+           strcmp(lv_label_get_text(settings_brightness_checks[i]), brightness) != 0) {
+            lv_label_set_text(settings_brightness_checks[i], brightness);
+        }
+        if(settings_screen_off_checks[i] &&
+           strcmp(lv_label_get_text(settings_screen_off_checks[i]), idle) != 0) {
+            lv_label_set_text(settings_screen_off_checks[i], idle);
+        }
     }
 }
 
@@ -7690,7 +7703,6 @@ static void settings_system_changed(void)
     g_system_config.menubar_left = ui_menubar_left() ? 1 : 0;
     g_system_config.touch_enabled = ui_touch_enabled() ? 1 : 0;
     g_system_config.np_bg_mode = (int)g_np_bg_mode;
-    g_system_config.brightness = settings_brightness;
     g_system_config.usb_mode = (int)g_usb_mode;
 
     settings_update_system_labels();
@@ -8097,6 +8109,14 @@ static lv_obj_t * settings_make_choice_row(lv_obj_t * parent, const char * label
     return row;
 }
 
+static void settings_section(lv_obj_t * parent, const char * title)
+{
+    lv_obj_t * row = make_row(parent, 38);
+    lv_obj_set_style_pad_left(row, 24, 0);
+    lv_obj_set_clickable(row, false);
+    make_label(row, title, FONT_GROUP, COL_MUTED);
+}
+
 static void settings_format_bytes(uint64_t bytes, char * out, size_t out_len)
 {
     if(bytes >= (uint64_t)1024 * 1024 * 1024) {
@@ -8222,21 +8242,31 @@ static void settings_theme_touch_cb(lv_event_t * event)
 
 static void settings_screen_off_action(void * user)
 {
-    static const int minutes[] = {30, 60, 0};
     int index = (int)(intptr_t)user;
     if(index < 0 || index > 2) return;
-    g_system_config.screen_off_minutes = minutes[index];
-    screen_idle_configure(&g_screen_idle, minutes[index], lv_tick_get());
-    for(int i = 0; i < 3; i++) {
-        if(settings_screen_off_checks[i])
-            lv_label_set_text(settings_screen_off_checks[i], i == index ? ICON_CHECK : "");
-    }
+    g_system_config.screen_off_minutes = settings_idle_minutes[index];
+    screen_idle_configure(&g_screen_idle, settings_idle_minutes[index], lv_tick_get());
+    settings_update_screen_checks();
     settings_system_changed();
 }
 
 static void settings_screen_off_touch_cb(lv_event_t * event)
 {
     settings_screen_off_action(lv_event_get_user_data(event));
+}
+
+static void settings_brightness_action(void * user)
+{
+    int index = (int)(intptr_t)user;
+    if(index < 0 || index > 2) return;
+    g_system_config.brightness = settings_brightness_values[index];
+    settings_update_screen_checks();
+    settings_system_changed();
+}
+
+static void settings_brightness_touch_cb(lv_event_t * event)
+{
+    settings_brightness_action(lv_event_get_user_data(event));
 }
 
 static void settings_ble_toggle_action(void * user)
@@ -8339,6 +8369,11 @@ static void settings_ble_scan_connect_cb(lv_event_t * event)
 
 static void settings_tick(void)
 {
+    if(g_current_screen == SCR_SETTINGS && settings_selected == SETTING_SCREEN &&
+       !settings_detail_dirty) {
+        settings_update_screen_checks();
+        return;
+    }
     if(g_current_screen != SCR_SETTINGS ||
        settings_selected != SETTING_BLUETOOTH || !settings_detail_open) {
         return;
@@ -8603,6 +8638,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_detail_theme_aqua_check = NULL;
     settings_detail_theme_win95_check = NULL;
     memset(settings_screen_off_checks, 0, sizeof(settings_screen_off_checks));
+    memset(settings_brightness_checks, 0, sizeof(settings_brightness_checks));
     settings_detail_screen_value = NULL;
     settings_detail_wifi_mode_value = NULL;
     settings_detail_wifi_status_value = NULL;
@@ -8617,7 +8653,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
     settings_time_minute_value = NULL;
     settings_detail_touch_value = NULL;
     settings_detail_menubar_value = NULL;
-    settings_detail_brightness_value = NULL;
     settings_detail_sort_value = NULL;
     settings_detail_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
@@ -8885,12 +8920,28 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             }
             break;
         }
-        case SETTING_SCREEN_OFF: {
+        case SETTING_SCREEN: {
+            static const char * const brightness_labels[] = {"Low", "Mid", "High"};
+            settings_section(parent, "Brightness");
+            for(int i = 0; i < 3; i++) {
+                lv_obj_t * row = settings_make_choice_row(parent, brightness_labels[i],
+                    g_system_config.brightness == settings_brightness_values[i],
+                    &settings_brightness_checks[i]);
+                char percent[8];
+                snprintf(percent, sizeof(percent), "%d%%", settings_brightness_values[i]);
+                lv_obj_t * value = make_label(row, percent, FONT_H2, COL_MUTED);
+                lv_obj_move_to_index(value, lv_obj_get_index(settings_brightness_checks[i]));
+                if(interactive) focus_add_clickable(row, settings_brightness_action,
+                    NULL, (void *)(intptr_t)i, true);
+                else touch_add_clickable(row, settings_brightness_touch_cb,
+                    (void *)(intptr_t)i);
+            }
+            settings_section(parent, "Idle Timer");
             static const char * const labels[] = {"30 min", "1 hour", "Off"};
-            int selected = settings_initial_focus(SETTING_SCREEN_OFF);
             for(int i = 0; i < 3; i++) {
                 lv_obj_t * row = settings_make_choice_row(parent, labels[i],
-                    i == selected, &settings_screen_off_checks[i]);
+                    g_system_config.screen_off_minutes == settings_idle_minutes[i],
+                    &settings_screen_off_checks[i]);
                 if(interactive) focus_add_clickable(row, settings_screen_off_action,
                     NULL, (void *)(intptr_t)i, true);
                 else touch_add_clickable(row, settings_screen_off_touch_cb,
@@ -9142,7 +9193,8 @@ static void settings_create(lv_obj_t * parent)
     settings_time_minute_value = NULL;
     settings_detail_touch_value = NULL;
     settings_detail_menubar_value = NULL;
-    settings_detail_brightness_value = NULL;
+    memset(settings_brightness_checks, 0, sizeof(settings_brightness_checks));
+    memset(settings_screen_off_checks, 0, sizeof(settings_screen_off_checks));
     settings_detail_sort_value = NULL;
     settings_detail_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
