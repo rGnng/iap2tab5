@@ -150,7 +150,8 @@ or keypad input restarts it. Hold the clock area for two seconds to turn off
 the screen immediately, including during playback. The first touch or key
 wakes the screen without activating a control. USB, playback and Wi-Fi keep running.
 
-**Settings → Now Playing Background → Cover gradient** uses colors from the
+**Cover gradient** is the default Now Playing background, configurable in
+**Settings → Now Playing Background**. It uses colors from the
 current iPod artwork, including artwork that arrives after the page opens.
 It selects a dominant hue and two distinct accents, then builds soft ambient
 color lights around the artwork. Gray uses deep colors; Aqua uses matching

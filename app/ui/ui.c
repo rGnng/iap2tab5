@@ -268,6 +268,7 @@ static ui_system_config_t g_system_config = {
     .sound_enabled = true,
     .sound_mode = 2,
     .volume = 65,
+    .np_bg_mode = 2,
     .wifi_status = "WiFi off",
     .wifi_ip = "--",
 };
@@ -3062,7 +3063,7 @@ typedef enum {
     NP_BG_COVER_GRADIENT,
 } np_bg_mode_t;
 
-static np_bg_mode_t g_np_bg_mode = NP_BG_THEME;
+static np_bg_mode_t g_np_bg_mode = NP_BG_COVER_GRADIENT;
 
 static void np_prev_action(void * user)
 {
