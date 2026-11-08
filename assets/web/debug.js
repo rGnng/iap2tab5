@@ -98,6 +98,10 @@ function render(s,c,p) {
   uptime=s.uptime_s;
   $('chips').innerHTML=T.chip('Firmware',s.firmware,'')+T.chip('Device',s.iap2_identified ? 'Linked' : s.iap2_mode ? 'Waiting' : 'Library Sync',s.iap2_identified ? 'ok' : '');
   $('screen_state').textContent=s.screen_on===undefined ? '—' : s.screen_on ? 'On' : 'Off';
+  var library=s.library_available===undefined ? !!(s.sd_ready && s.iap2_mode && s.iap2_identified) : s.library_available;
+  ['albums','artists','songs','playlists'].forEach(function(k) {
+    document.querySelector('[data-key="'+k+'"]').disabled=!library;
+  });
   var d=s.display || {};
   $('display_rows').innerHTML=d.available ?
     T.row('Backlight PWM',d.pwm_duty+' / '+(d.pwm_period || 1024)+' · '+d.pwm_hz+' Hz')+

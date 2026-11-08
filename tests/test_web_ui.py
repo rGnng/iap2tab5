@@ -163,6 +163,21 @@ class WebUITests(unittest.TestCase):
         self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
         self.assertFalse(self.errors)
 
+    def test_debug_library_buttons_follow_availability(self):
+        self.status['iap2_identified'] = False
+        self.status['library_available'] = False
+        self.open('/debug')
+        for name in ['albums','artists','songs','playlists']:
+            self.assertTrue(self.page.locator('[data-key="'+name+'"]').is_disabled())
+        self.assertTrue(self.page.locator('[data-key="settings"]').is_enabled())
+        self.assertTrue(self.page.locator('[data-key="nowplaying"]').is_enabled())
+        self.status['iap2_identified'] = True
+        self.status['library_available'] = True
+        self.page.evaluate('refresh()')
+        self.page.wait_for_function('!document.querySelector("[data-key=albums]").disabled')
+        for name in ['albums','artists','songs','playlists']:
+            self.assertTrue(self.page.locator('[data-key="'+name+'"]').is_enabled())
+
 
 if __name__ == '__main__':
     unittest.main()

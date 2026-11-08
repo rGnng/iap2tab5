@@ -1815,6 +1815,7 @@ typedef struct {
 static const page_t g_pages[SCR_COUNT];
 
 static void ui_show_screen(screen_id_t id);
+static bool ui_screen_enabled(screen_id_t id);
 static void ui_rebuild_page(void);
 static bool ui_list_page(int direction);
 static void np_toggle_queue(void);
@@ -1830,8 +1831,9 @@ static void menu_click_async(void * arg)
 
 static void menu_click_cb(lv_event_t * event)
 {
-    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     int index = (int)(intptr_t)lv_event_get_user_data(event);
+    if(!ui_screen_enabled((screen_id_t)index)) return;
+    ui_feedback_emit(UI_FEEDBACK_CLICK, false);
     ui_call_async(menu_click_async, (void *)(intptr_t)index);
 }
 
@@ -1845,7 +1847,6 @@ static bool g_dev_present;
 static bool g_dev_sd_ready = true;
 static bool g_sd_missing_seen;
 static volatile bool g_dev_state_dirty;
-static bool g_dev_blocked_last;
 
 static bool ui_sd_needs_reboot(void)
 {
@@ -1867,6 +1868,16 @@ static bool ui_device_blocked(void)
     if(!g_dev_sd_ready || ui_sd_needs_reboot()) return true;
     if(g_dev_iap2_mode && !g_dev_present) return true;
     return false;
+}
+
+bool ui_library_available(void)
+{
+    return !g_afc_sync_mode && !ui_device_blocked();
+}
+
+static bool ui_screen_enabled(screen_id_t id)
+{
+    return !ui_screen_needs_devices(id) || ui_library_available();
 }
 
 void ui_set_device_state(bool iap2_mode, bool present, bool sd_ready)
@@ -1899,7 +1910,6 @@ static void ui_player_changed(void)
 
 static void ui_menu_update(void)
 {
-    bool blocked = ui_device_blocked();
     player_snapshot_t snapshot;
     player_get_snapshot(&snapshot);
 
@@ -1907,7 +1917,9 @@ static void ui_menu_update(void)
         if(g_menu_items[i] == NULL || g_menu_icons[i] == NULL) continue;
         bool active = (i == (int)g_current_screen) ||
                       (i == SCR_SETTINGS && g_current_screen == SCR_BLUETOOTH);
-        bool dimmed = blocked && i != SCR_NOW_PLAYING && i != SCR_SETTINGS;
+        bool dimmed = !ui_screen_enabled((screen_id_t)i);
+        if(dimmed) lv_obj_add_state(g_menu_items[i], LV_STATE_DISABLED);
+        else lv_obj_remove_state(g_menu_items[i], LV_STATE_DISABLED);
         /* The selected tile is a solid square: the full 96 x 96 touch area
          * uses the focus grey fill, with a white icon and no edge strip. */
         lv_obj_set_style_bg_color(g_menu_items[i],
@@ -2393,17 +2405,16 @@ static void ui_tick_cb(lv_timer_t * timer)
         g_dev_state_dirty = false;
         bool blocked = ui_device_blocked();
         ui_menu_update();
+        if(blocked && g_ctx_menu_open) context_menu_close();
 
         /* The device disappeared while a library tab was open: that tab can
          * no longer render, so fall back to Now Playing (which shows the
          * plug / SD placeholder).  Only Settings and Now Playing stay. */
-        if(blocked && !g_dev_blocked_last && !g_afc_sync_mode &&
+        if(blocked && !g_afc_sync_mode &&
            ui_screen_needs_devices(g_current_screen)) {
-            g_dev_blocked_last = blocked;
             ui_show_screen(SCR_NOW_PLAYING);
             return;
         }
-        g_dev_blocked_last = blocked;
 
         if(g_current_screen == SCR_NOW_PLAYING && !g_afc_sync_mode) {
             ui_rebuild_page();
@@ -2494,6 +2505,10 @@ static void ui_page_load_cb(lv_timer_t * timer)
     lv_timer_pause(timer);
     if(!g_page_loading || g_page_loading_screen != g_current_screen) return;
     screen_id_t screen = g_current_screen;
+    if(!ui_screen_enabled(screen)) {
+        ui_show_screen(SCR_NOW_PLAYING);
+        return;
+    }
     uint32_t start = g_ui_trace ? perf_now() : 0;
     lv_obj_clean(g_page);
     g_pages[screen].create(g_page);
@@ -2574,6 +2589,9 @@ static void ui_tab_refresh_cb(lv_event_t * event)
 static void ui_show_screen(screen_id_t id)
 {
     if(g_afc_sync_mode || id < 0 || id >= SCR_COUNT) return;
+    /* All entry paths share this gate, including async touch callbacks,
+     * keyboard shortcuts, keypad tabs, context navigation and web debug. */
+    if(!ui_screen_enabled(id)) return;
     if(g_ctx_menu_open) context_menu_close();
     if(g_current_screen == SCR_SETTINGS && id != SCR_SETTINGS) ble_remote_scan_stop();
     if(id == g_current_screen) {
@@ -2611,6 +2629,10 @@ static void ui_show_screen(screen_id_t id)
 
 static void ui_rebuild_page(void)
 {
+    if(!ui_screen_enabled(g_current_screen)) {
+        ui_show_screen(SCR_NOW_PLAYING);
+        return;
+    }
     if(g_page_loading) {
         lv_timer_pause(g_page_load_timer);
         lv_obj_clean(g_page);
@@ -2768,6 +2790,10 @@ static void ui_dispatch_key(ui_key_t key)
         return;
     }
 
+    if(!ui_screen_enabled(g_current_screen)) {
+        ui_show_screen(SCR_NOW_PLAYING);
+        return;
+    }
     if(ui_page_defer_key(key)) return;
 
     if(g_ctx_menu_open) {
@@ -2852,13 +2878,15 @@ static void ui_dispatch_key(ui_key_t key)
                 break;
             }
             int target = (int)g_current_screen - 1;
-            if(target == SCR_BLUETOOTH) target--;
+            while(target >= 0 && (target == SCR_BLUETOOTH ||
+                  !ui_screen_enabled((screen_id_t)target))) target--;
             if(target >= 0) ui_show_screen((screen_id_t)target);
             break;
         }
         case UI_KEY_SCREEN_NEXT: {
             int target = (int)g_current_screen + 1;
-            if(target == SCR_BLUETOOTH) target++;
+            while(target < SCR_COUNT && (target == SCR_BLUETOOTH ||
+                  !ui_screen_enabled((screen_id_t)target))) target++;
             if(target < SCR_COUNT) ui_show_screen((screen_id_t)target);
             break;
         }
@@ -9457,6 +9485,10 @@ void ui_handle_key_repeat(ui_key_t key, int count)
 {
     if(count <= 0) return;
     if(ui_user_activity()) return;
+    if(!g_afc_sync_mode && !ui_screen_enabled(g_current_screen)) {
+        ui_show_screen(SCR_NOW_PLAYING);
+        return;
+    }
     if(count == 1) {
         ui_handle_key(key);
         return;

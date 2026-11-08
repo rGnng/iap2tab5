@@ -51,6 +51,9 @@ esp_err_t app_config_init(void);
 esp_err_t app_config_save(void);
 
 bool app_config_sd_ready(void);
+/* Background card-status check, outside the display lock. A live card loss
+ * latches unavailable until reboot; mounted files are never torn down here. */
+void app_config_sd_poll(void);
 
 typedef struct {
     bool ready;

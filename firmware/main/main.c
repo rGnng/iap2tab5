@@ -760,6 +760,8 @@ void app_main(void)
     snprintf(np_cache_dir, sizeof(np_cache_dir), "%s/np",
              app_config_library_dir());
     ui_set_np_cache_dir(np_cache_dir);
+    /* Fail closed from the first frame, before USB identification finishes. */
+    ui_set_device_state(g_app_config.iap2_mode, false, app_config_sd_ready());
     ui_init();
     if(player_library_album_count() > 0) {
         thumb_cache_open((uint32_t)player_library_album_count());
@@ -836,14 +838,18 @@ void app_main(void)
 
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        app_config_sd_poll();
         {
             bool present = false;
             iap2_state_t state;
             if(g_app_config.iap2_mode && iap2_host_get_state(&state)) {
                 present = state.identified;
             }
-            ui_set_device_state(g_app_config.iap2_mode != 0, present,
-                                app_config_sd_ready());
+            if(bsp_display_lock(1000)) {
+                ui_set_device_state(g_app_config.iap2_mode != 0, present,
+                                    app_config_sd_ready());
+                bsp_display_unlock();
+            }
         }
         if(s_save_pending) {
             s_save_pending = false;

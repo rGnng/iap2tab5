@@ -164,6 +164,75 @@ static void tap_title(void)
     puts("tap: album opens and Back returns");
 }
 
+static lv_obj_t * menu_tile(int slot)
+{
+    lv_obj_t *menu = lv_obj_get_child(lv_screen_active(), 0);
+    lv_obj_t *tiles = lv_obj_get_child(menu, 1);
+    check(lv_obj_get_child_count(tiles) == 6, "Menubar must contain six navigation tiles");
+    return lv_obj_get_child(tiles, slot);
+}
+
+static void expect_active(int slot)
+{
+    check(lv_obj_get_style_bg_opa(menu_tile(slot), 0) == LV_OPA_COVER,
+          "Expected navigation tile must remain active");
+}
+
+static void tap_tile(int slot)
+{
+    lv_point_t p = centre(menu_tile(slot));
+    pointer(p.x, p.y, true); pointer(p.x, p.y, false); pump(300);
+}
+
+static void blocked_navigation(void)
+{
+    check(!ui_library_available(), "Library must be unavailable with a prerequisite missing");
+    expect_active(0);
+    for(int slot = 1; slot <= 4; slot++) {
+        check(lv_obj_has_state(menu_tile(slot), LV_STATE_DISABLED), "Library tiles must be disabled");
+        tap_tile(slot); expect_active(0);
+        ui_handle_key((ui_key_t)(UI_KEY_1 + slot)); pump(200); expect_active(0);
+        ui_select_screen(slot); pump(200); expect_active(0);
+    }
+    ui_handle_key(UI_KEY_SCREEN_NEXT); pump(300); expect_active(5);
+    ui_handle_key(UI_KEY_SCREEN_PREV); pump(300); expect_active(0);
+    tap_tile(5); expect_active(5);
+    tap_tile(0); expect_active(0);
+}
+
+static void device_gating(void)
+{
+    ui_set_device_state(true, true, true); pump(600);
+    for(int screen = 1; screen <= 4; screen++) {
+        check(ui_library_available(), "Connected iPod and SD must enable browsing");
+        check(!lv_obj_has_state(menu_tile(screen), LV_STATE_DISABLED), "Library tile must re-enable");
+        ui_select_screen(screen); pump(300); expect_active(screen);
+        if(screen == 1) ui_handle_key(UI_KEY_CONTEXT);
+        ui_set_device_state(true, false, true); pump(600); expect_active(0);
+        blocked_navigation();
+        ui_set_device_state(true, true, true); pump(600);
+    }
+
+    /* Input and deferred loads must respect a disconnect before the 500 ms
+     * UI tick has had a chance to process its dirty-state flag. */
+    ui_select_screen(1); pump(300); ui_set_device_state(true, false, true);
+    ui_handle_key(UI_KEY_ENTER); expect_active(0);
+    ui_set_device_state(true, true, true); pump(600);
+    ui_select_screen(1); pump(300); ui_set_device_state(true, false, true);
+    ui_handle_key_repeat(UI_KEY_DOWN, 4); expect_active(0);
+    ui_set_device_state(true, true, true); pump(600);
+    ui_select_screen(1); ui_set_device_state(true, false, true); pump(100); expect_active(0);
+
+    /* A removed SD card stays unavailable after insertion until reboot,
+     * because the cached library and open files belong to the old mount. */
+    ui_set_device_state(true, true, true); pump(600);
+    ui_select_screen(2); pump(300);
+    ui_set_device_state(true, true, false); pump(600); blocked_navigation();
+    ui_set_device_state(true, false, false); pump(600); blocked_navigation();
+    ui_set_device_state(true, true, true); pump(600); blocked_navigation();
+    puts("PASS: missing-device navigation, disconnect fallback and SD reboot gate");
+}
+
 int main(int argc, char ** argv)
 {
     lv_init();
@@ -189,6 +258,7 @@ int main(int argc, char ** argv)
         drag(names[region], region, true);
     }
     tap_title();
+    device_gating();
     puts("PASS: album touch scrolling and tapping");
     return 0;
 }

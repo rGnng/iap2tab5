@@ -127,6 +127,12 @@ or BLE, the serial console, or the web debug page. The serial equivalents
 include `w` / `s` for knob movement, `b` for Back, and `c` for the context menu;
 see the [full serial key map](firmware/README.md#serial-debug-keys).
 
+Albums, Artists, Songs and Playlists require both an identified iPod and a
+ready SD card. Their tiles are disabled and tab navigation skips them while
+either is unavailable. Disconnecting during browsing returns to Now Playing;
+Settings remains accessible. Reconnect the iPod to resume browsing. After
+removing and reinserting the SD card, reboot to reload the cached library.
+
 The D100H supports tap-to-skip and hold-to-seek on its previous/next controls.
 Its top-right key opens the context menu on a tap and toggles Star on a hold.
 Hold the knob down and turn it to adjust iPod volume: clockwise raises it,

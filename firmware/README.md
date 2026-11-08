@@ -261,6 +261,15 @@ The INA226 measures the battery connector, so its voltage is not a USB power
 measurement when the battery has been removed. `lcd_enabled` in `/api/power`
 reads the LCD enable pin separately.
 
+`library_available` in `/api/status` reports the UI's actual library gate.
+Albums, Artists, Songs and Playlists are disabled until the SD library is ready
+and the iPod is identified; all touch, keyboard/keypad and debug navigation
+uses the same check. An unavailable library returns to Now Playing, cancels
+pending page loads and skips the disabled tabs when switching pages.
+The application polls card status outside the display lock every two seconds;
+two consecutive failures latch the SD card unavailable without unmounting open
+files. Reinsert and reboot after removal to rebuild the library state.
+
 Backlight control uses a fixed crystal clock and nominal 44.1 kHz, 9-bit PWM,
 following [M5GFX's Tab5 configuration](https://github.com/m5stack/M5GFX/blob/master/extras/board_spec/boards/m5stack_tab5.json)
 and [PWM implementation](https://github.com/m5stack/M5GFX/blob/master/src/lgfx/v1/platforms/esp32/Light_PWM.inl).

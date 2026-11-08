@@ -57,7 +57,11 @@ app_config_t g_app_config = {
     .iap2_mode = true,
 };
 
-static bool s_sd_ready;
+static volatile bool s_sd_ready;
+static volatile bool s_sd_lost;
+static bool s_sd_probe_started;
+static TickType_t s_sd_probe_tick;
+static unsigned s_sd_probe_failures;
 static bool s_nvs_mode_valid;
 static bool s_nvs_mode;
 
@@ -698,7 +702,24 @@ esp_err_t app_config_save(void)
 
 bool app_config_sd_ready(void)
 {
-    return s_sd_ready;
+    return s_sd_ready && !s_sd_lost;
+}
+
+void app_config_sd_poll(void)
+{
+    if(!s_sd_ready || s_sd_lost) return;
+    TickType_t now = xTaskGetTickCount();
+    if(s_sd_probe_started && now - s_sd_probe_tick < pdMS_TO_TICKS(2000)) return;
+    s_sd_probe_started = true;
+    s_sd_probe_tick = now;
+    sdmmc_card_t *card = bsp_sdcard_get_handle();
+    esp_err_t err = card ? sdmmc_get_status(card) : ESP_ERR_INVALID_STATE;
+    if(err == ESP_OK) { s_sd_probe_failures = 0; return; }
+    /* One transient status failure must not disable a healthy library. */
+    if(++s_sd_probe_failures < 2) return;
+    s_sd_lost = true;
+    s_sd_ready = false;
+    ESP_LOGW(TAG, "SD card unavailable (%s); reinsert and reboot to reload the library", esp_err_to_name(err));
 }
 
 static const char * sd_vendor_name(int mfg_id)
@@ -773,7 +794,7 @@ bool app_config_sd_info(app_config_sd_info_t * out)
 {
     if(out == NULL) return false;
     *out = s_sd_info;
-    return s_sd_info.ready;
+    return app_config_sd_ready() && s_sd_info.ready;
 }
 
 void app_config_sd_info_refresh_idle(void)
@@ -866,6 +887,8 @@ bool app_config_sd_format(void)
 
 bool app_config_sd_ensure(void)
 {
+    /* Cached readers and file handles belong to the original mount. */
+    if(s_sd_lost) return false;
     if(s_sd_ready) return true;
 
     /* The first mount attempt at boot leaves the on-chip SD LDO registered

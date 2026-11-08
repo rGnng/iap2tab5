@@ -56,6 +56,8 @@ static lv_obj_t *g_page=&page,*g_mini=&mini;
 static bool g_page_loading,g_page_wait_frame,g_tab_frame_pending,g_tab_content_frame_pending;
 static bool g_afc_sync_mode,g_ctx_menu_open,g_ui_trace,fail_timer,create_detail;
 static bool g_key_feedback_scope,g_key_feedback_sent;
+static bool blocked;
+static bool ui_library_available(void) { return !blocked; }
 static int silent_dispatches;
 static screen_id_t g_current_screen,g_page_loading_screen,g_ble_return_screen;
 static lv_timer_t *g_page_load_timer,*g_page_detail_timer;
@@ -105,6 +107,7 @@ void reset(void) {
     g_current_screen=SCR_NOW_PLAYING;g_ble_return_screen=g_page_loading_screen=SCR_COUNT;
     g_page_loading=g_page_wait_frame=g_tab_frame_pending=g_tab_content_frame_pending=false;
     g_afc_sync_mode=g_ctx_menu_open=g_ui_trace=fail_timer=create_detail=false;
+    blocked=false;
     g_key_feedback_scope=g_key_feedback_sent=false;silent_dispatches=0;
     g_page_load_timer=g_page_detail_timer=NULL;
     timer=(lv_timer_t){.paused=true};detail=(lv_timer_t){.paused=true};
@@ -112,6 +115,7 @@ void reset(void) {
     for(int i=0;i<SCR_COUNT;i++)g_pages[i]=(page_t){create,enter,same};
 }
 void show(int id) { ui_show_screen((screen_id_t)id); }
+void available(int yes) { blocked=!yes; }
 void frame(void) { ui_tab_refresh_cb(NULL); }
 void run(void) { if(!timer.paused)ui_page_load_cb(&timer); }
 void cancel(void) { ui_page_cancel_load(); }
@@ -129,7 +133,8 @@ int state(int n) {
     case 11:return g_key_feedback_scope;case 12:return g_key_feedback_sent;default:return -1;}
 }
 '''
-        names = ('ui_layout_page_area', 'ui_page_cancel_load', 'ui_page_load_cb',
+        names = ('ui_screen_needs_devices', 'ui_screen_enabled',
+                 'ui_layout_page_area', 'ui_page_cancel_load', 'ui_page_load_cb',
                  'ui_page_defer_key', 'ui_tab_refresh_cb', 'ui_show_screen', 'ui_rebuild_page')
         source = prelude+keys+'\n'+screens+'\n'+limit+'\n'+boundary
         source += '\n'.join(function(ui, n) for n in names)+exports
@@ -228,6 +233,34 @@ int state(int n) {
         self.assertEqual(self.lib.state(3),0)
         self.lib.option(2);self.lib.show(1)
         self.assertEqual(self.lib.state(3),0)
+
+    def test_unavailable_library_tabs_never_enter_or_build(self):
+        for screen in range(1,5):
+            self.lib.reset();self.lib.available(0);self.lib.show(screen)
+            self.assertEqual(self.lib.state(9),0)
+            self.assertEqual(self.lib.entered(screen),0)
+            self.assertEqual(self.lib.built(screen),0)
+            self.assertFalse(self.lib.state(0))
+        self.lib.show(6);self.lib.frame();self.lib.run()
+        self.assertEqual(self.lib.built(6),1)
+        self.lib.show(0)
+        self.assertEqual(self.lib.built(0),1)
+
+    def test_disconnect_during_deferred_load_discards_keys_and_returns_home(self):
+        self.lib.show(1);self.lib.defer(self.key('ENTER'));self.lib.available(0)
+        self.lib.frame();self.lib.run()
+        self.assertEqual(self.lib.state(9),0)
+        self.assertFalse(self.lib.state(0))
+        self.assertEqual(self.lib.built(1),0)
+        self.assertEqual(self.lib.built(0),1)
+        self.assertEqual(self.lib.state(5),0)
+
+    def test_rebuild_after_disconnect_returns_home(self):
+        self.lib.show(1);self.lib.frame();self.lib.run();self.lib.available(0)
+        self.lib.rebuild()
+        self.assertEqual(self.lib.state(9),0)
+        self.assertEqual(self.lib.built(1),1)
+        self.assertEqual(self.lib.built(0),1)
 
     def test_now_playing_opens_directly_without_a_loading_shell(self):
         self.lib.show(1)

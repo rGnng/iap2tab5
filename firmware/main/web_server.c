@@ -1024,6 +1024,7 @@ static esp_err_t status_get(httpd_req_t * req)
         player_get_snapshot(&snap);
         cJSON_AddBoolToObject(root, "starred", snap.starred);
         cJSON_AddBoolToObject(root, "screen_on", ui_screen_is_on());
+        cJSON_AddBoolToObject(root, "library_available", ui_library_available());
         bsp_display_unlock();
     }
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
