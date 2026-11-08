@@ -33,6 +33,7 @@ PRELUDE = r'''
 #define LINK_NORMAL 3
 #define LINK_BUF_SIZE (256*1024)
 #define CSM_BUF_SIZE (192*1024)
+#define MAX_CSM_FRAME 2048
 #define LINK_MAX_PACKET 4096
 #define SESSION_QUEUE_LEN 32
 #define RX_PACKET_BUDGET 16
@@ -45,11 +46,13 @@ PRELUDE = r'''
 #define pdTRUE 1
 #define pdMS_TO_TICKS(x) (x)
 #define ESP_OK 0
+#define ESP_ERR_INVALID_STATE 0x103
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
 #define USB_TRANSFER_STATUS_COMPLETED 0
 static const uint8_t IAP2_MARKER[]={255,85,2,0,238,16};
 typedef uint32_t TickType_t;
+typedef struct { uint8_t *p; size_t len, cap; } pb_t;
 typedef struct { uint32_t generation; uint16_t len; uint8_t session; uint8_t payload[]; } session_packet_t;
 typedef struct { int status, actual_num_bytes, num_bytes; uint8_t data_buffer[64]; } usb_transfer_t;
 static usb_transfer_t *s_in_xfer;
@@ -111,6 +114,7 @@ static int xQueueReceive(int q,void *p,int t){
     memmove(queue,queue+1,--q_count*sizeof(*queue));return 1;
 }
 static void *heap_caps_malloc(size_t n,int cap){(void)cap;return oom?NULL:malloc(n);}
+static void csm_queue(const uint8_t *p,size_t n){assert(n<=sizeof(tx_data));memcpy(tx_data,p,n);tx_len=n;}
 static int64_t esp_timer_get_time(void){micros+=time_step;return micros;}
 static TickType_t xTaskGetTickCount(void){return now_ms;}
 static void artwork_invalidate(void){}
@@ -179,6 +183,8 @@ void enqueue_tx(const uint8_t*p,size_t n){
 }
 int control_try(int done){s_ctrl_inflight=true;ctrl_completion=done;ctrl_held=0;bool ok=ctrl_acquire();if(ok)xSemaphoreGive(s_ctrl_lock);assert(ctrl_held==0);return ok;}
 void lsp(uint8_t*p){size_t len;build_lsp(p,&len);assert(len==19);}
+void initial_power(void){send_power_source_update();}
+int power_request(int connected,int identified){s_connected=connected;s_identified=identified;return iap2_host_request_charging();}
 '''
 
 
@@ -201,10 +207,18 @@ class IAP2LinkTests(unittest.TestCase):
         source = (ROOT/'firmware/main/iap2_host.c').read_text()
         names = ['ctrl_acquire', 'checksum', 'input_report_total', 'rx_store', 'in_done_cb', 'reset_link',
                  'send_ack', 'build_lsp', 'parse_lsp', 'csm_feed', 'session_enqueue',
-                 'session_deliver', 'handle_link_packet', 'process_rx', 'tx_pump']
+                 'session_deliver', 'handle_link_packet', 'process_rx', 'tx_pump',
+                 'pb_raw', 'pb_u16be', 'pb_param', 'pb_u8', 'pb_u16',
+                 'csm_send', 'send_power_source_update']
         a = source.index('static const uint16_t s_in_report_sizes')
         table = source[a:source.index(';', a)+1]
-        harness = PRELUDE + table + '\n' + '\n'.join(function(source,n) for n in names) + DRIVER
+        current = next(line for line in source.splitlines()
+                       if line.startswith('#define IAP2_AVAILABLE_CURRENT_MA '))
+        charging = function(source.replace('\nesp_err_t iap2_host_request_charging(',
+                            '\nstatic esp_err_t iap2_host_request_charging('),
+                            'iap2_host_request_charging').removeprefix('static ')
+        harness = (PRELUDE + current + '\n' + table + '\n' +
+                   '\n'.join(function(source,n) for n in names) + charging + DRIVER)
         cls.harness=harness
         (work/'link.c').write_text(harness)
         subprocess.run([cc, '-std=c11', '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
@@ -217,6 +231,7 @@ class IAP2LinkTests(unittest.TestCase):
             getattr(cls.lib,name).argtypes = [ctypes.c_void_p,ctypes.c_size_t]
         cls.lib.settings.argtypes = [ctypes.c_int,ctypes.c_int]
         cls.lib.tick.argtypes = [ctypes.c_uint32]
+        cls.lib.power_request.argtypes = [ctypes.c_int, ctypes.c_int]
         for name in ('copy_data','copy_tx'):
             getattr(cls.lib,name).argtypes = [ctypes.c_void_p]
             getattr(cls.lib,name).restype = ctypes.c_size_t
@@ -354,6 +369,26 @@ class IAP2LinkTests(unittest.TestCase):
     def test_timed_out_control_buffer_waits_for_transfer_completion(self):
         self.assertEqual(self.lib.control_try(0),0)
         self.assertEqual(self.lib.control_try(1),1)
+
+    def test_initial_and_manual_power_updates_advertise_500ma_and_allow_charging(self):
+        # Decode the wire frame, including both mandatory initial parameters.
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                self.lib.setup()
+                if manual:
+                    self.assertEqual(self.lib.power_request(1,1),0)
+                else:
+                    self.lib.initial_power()
+                frame = self.data('copy_tx')
+                self.assertEqual(struct.unpack('>HHH',frame[:6]),(0x4040,len(frame),0xae03))
+                self.assertEqual(struct.unpack('>HHH',frame[6:12]),(6,0,500))
+                self.assertEqual(struct.unpack('>HHB',frame[12:]),(5,1,1))
+
+    def test_manual_power_update_requires_a_connected_identified_device(self):
+        for connected,identified in ((0,0),(0,1),(1,0)):
+            with self.subTest(connected=connected,identified=identified):
+                self.assertEqual(self.lib.power_request(connected,identified),0x103)
+                self.assertEqual(self.data('copy_tx'),b'')
 
     def test_control_message_reassembles_across_link_packets(self):
         csm=struct.pack('>HHH',0x4040,9006,0x4c04)+bytes(9000)

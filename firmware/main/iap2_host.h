@@ -59,9 +59,8 @@ bool iap2_host_is_identified(void);
 bool iap2_host_is_playing(void);
 const char * iap2_host_status(void);
 
-/* Apple vendor request 0x40/0x40: tell the device how much current it may
- * draw. The Tab5 USB-A switch (MT9700, 5.1k SET) limits at ~1.3 A, so the
- * iPhone/iPod 500 mA class is advertised, not the iPad 1600 mA class. */
+/* Re-send the iAP2 500 mA USB budget with battery charging enabled.
+ * Requires a connected, identified device; sends no USB vendor request. */
 esp_err_t iap2_host_request_charging(void);
 
 /* Sends one consumer-control HID bit: play, pause, next, previous,

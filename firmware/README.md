@@ -332,7 +332,7 @@ accepts single-key commands:
 | `x` | run the embedded MFi P-256 signing self-test |
 | `o` | iAP2 play/pause |
 | `,` / `.` | iAP2 previous / next track |
-| `P` | re-send the Apple USB power-capability vendor request |
+| `P` | re-send the iAP2 500 mA USB current budget after identification |
 | `*` | print the USB-A power switch / IO-expander state |
 | `&` | print the INA226 battery bus voltage/current |
 

@@ -30,6 +30,7 @@ static uint64_t be64(const uint8_t * p);
 #define APPLE_VID        0x05AC
 #define IPOD_PID         0x12AA
 #define IPHONE_PID       0x12A8
+#define IAP2_AVAILABLE_CURRENT_MA 500
 
 #define LINK_START       0xFF5A
 #define CONTROL_SYN      0x80
@@ -102,7 +103,6 @@ static StreamBufferHandle_t s_rx_stream;
 static TaskHandle_t s_task;
 
 static volatile bool s_connected;
-static volatile bool s_charge_request_pending;
 static volatile enum link_state s_state = LINK_IDLE;
 static uint8_t s_sent_psn;
 static uint8_t s_last_recv_psn;
@@ -675,12 +675,6 @@ static void open_device(uint8_t address)
     ESP_LOGI(TAG, "iPod config %u HID if=%u ep_in=0x%02x",
              (unsigned)cfg->bConfigurationValue, s_interface, s_ep_in);
 
-    /* The Apple USB power-capability vendor request must be sent after
-     * enumeration but from a task other than the USB client event task;
-     * blocking the client task here prevents the transfer completion from
-     * being dispatched. iap2_task sends it before the detection marker. */
-    s_charge_request_pending = true;
-
     err = usb_host_transfer_alloc(IN_XFER_SIZE, 0, &s_in_xfer);
     if(err != ESP_OK) {
         ESP_LOGE(TAG, "IN transfer alloc failed: %s", esp_err_to_name(err));
@@ -715,7 +709,6 @@ static void open_device(uint8_t address)
 static void close_device(void)
 {
     s_connected = false;
-    s_charge_request_pending = false;
     s_identified = false;
     s_hid_ready = false;
     s_state = LINK_IDLE;
@@ -1164,16 +1157,18 @@ static void send_power_source_update(void)
     /* PowerSourceUpdate (0xAE03): tell the device how much current the
      * accessory can provide. Without this an iPod touch can keep
      * external_charger=0 / charging_state=0 even though USB-A VBUS is on.
-     * The Tab5 USB-A switch (MT9700, 5.1k SET) limits at ~1.3 A, so declare
-     * 1000 mA. */
+     * Advertise a 500 mA USB budget. The Tab5's fixed ~1.3 A hardware
+     * protection remains separate from this negotiated device limit. */
     uint8_t buf[16];
     pb_t b = { buf, 0, sizeof(buf) };
-    pb_u16(&b, 0, 1000);
+    pb_u16(&b, 0, IAP2_AVAILABLE_CURRENT_MA);
     /* DeviceBatteryShouldChargeIfPowerIsPresent must be true for the
      * device UI to show charging; the first PowerSourceUpdate after
      * identification must contain both parameters. */
     pb_u8(&b, 1, 1);
     csm_send(0xAE03, &b);
+    ESP_LOGI(TAG, "Advertised iPod USB current budget: %u mA",
+             (unsigned)IAP2_AVAILABLE_CURRENT_MA);
 }
 
 static void send_power_updates_request(void)
@@ -2414,11 +2409,6 @@ static void iap2_task(void * arg)
         }
 
         if(!setup_done) {
-            if(s_charge_request_pending) {
-                s_charge_request_pending = false;
-                iap2_host_request_charging();
-            }
-
             uint8_t desc[256];
             esp_err_t derr = ctrl_get_descriptor(0x22, 0, desc, sizeof(desc));
             if((int)derr > 0) {
@@ -2594,11 +2584,11 @@ bool iap2_host_get_state(iap2_state_t * out)
 
 esp_err_t iap2_host_request_charging(void)
 {
-    if(s_dev == NULL || s_ctrl_xfer == NULL) return ESP_ERR_INVALID_STATE;
-    esp_err_t err = ctrl_request(0x40, 0x40, 500, 500, NULL, 0);
-    ESP_LOGI(TAG, "Apple charging request (500/500 mA): %s",
-             esp_err_to_name(err));
-    return err;
+    if(!s_connected || !s_identified) return ESP_ERR_INVALID_STATE;
+    /* The USB vendor request uses an offset from 500 mA: 500/500 would
+     * advertise 1000 mA. Keep charging control on the iAP2 500 mA path. */
+    send_power_source_update();
+    return ESP_OK;
 }
 
 bool iap2_host_is_identified(void)

@@ -126,17 +126,32 @@ because the accessory does not draw power from the device.
 Immediately after identification the firmware sends
 `PowerSourceUpdate (0xAE03)` with:
 
-- param 0 `AvailableCurrentForDevice` = 1000 mA (one of the spec's allowed
-  values; the Tab5 USB-A switch is limited to ~1.3 A)
+- param 0 `AvailableCurrentForDevice` = 500 mA (a supported iAP2 value)
 - param 1 `DeviceBatteryShouldChargeIfPowerIsPresent` = true
 
 The first version declared `PowerProvidingCapability = None` and
 `MaximumCurrentDrawnFromDevice = 20`, so the iPod treated the Tab5 as a
-load, reported `AccessoryPowerMode = Low Power`, and did not charge. It now
-reports `IsExternalChargerConnected = true` and `BatteryChargingState =
-Charging` (`0xAE01` params 4 and 5). The firmware also sends Apple's USB
-power-capability vendor request (0x40/0x40, 500/500 = 1000 mA) after
-enumeration as a fallback for non-iAP2 power negotiation.
+load, reported `AccessoryPowerMode = Low Power`, and did not charge. The iPod
+reports its charger connection and charging state through
+`IsExternalChargerConnected` and `BatteryChargingState` (`0xAE01` params 4
+and 5). The 500 mA budget covers
+both device operation and battery charging; it does not force a constant
+battery charging current. The Tab5 USB-A switch remains fixed at ~1.3 A
+hardware protection, so this is a negotiated limit enforced by the iPod.
+
+The firmware sends no Apple USB power-capability vendor request: the former
+0x40/0x40 request with 500/500 arguments advertised 1000 mA, because those
+arguments are offsets from 500 mA. Serial `P` now re-sends the same 500 mA
+iAP2 update after identification. Confirm the iPod's power response and
+actual USB current on hardware when validating this lower budget.
+
+The 2026-11-08 OTA test confirmed that the iPod touch returned
+`PowerUpdate` parameter 0 = 500 and `IsExternalChargerConnected = true`.
+Its battery was at 100%, with `BatteryChargingState = Charged` (2).
+Play/pause worked in both directions and the original playback state was
+restored. The full library sync completed with 34,594 items; the link had
+no header, payload, sequence, overflow, or HID errors.
+This verifies the negotiated budget, without measuring physical USB current.
 
 Verified on the connected iPod:
 
