@@ -52,6 +52,7 @@ app_config_t g_app_config = {
     .menubar_left = true,
     .touch_enabled = true,
     .np_bg_mode = 2,
+    .fast_scroll_pages = 2,
     .brightness = 70,
     .usb_mode = 0,
     .debug_log = false,
@@ -474,6 +475,7 @@ static void set_defaults(void)
     g_app_config.menubar_left = true;
     g_app_config.touch_enabled = true;
     g_app_config.np_bg_mode = 2;
+    g_app_config.fast_scroll_pages = 2;
     g_app_config.brightness = 70;
     g_app_config.screen_off_minutes = 0;
     g_app_config.usb_mode = 0;
@@ -552,6 +554,9 @@ static void load_from_json(const char * text)
     item = cJSON_GetObjectItemCaseSensitive(root, "brightness");
     if(cJSON_IsNumber(item))
         g_app_config.brightness = (uint8_t)screen_brightness_normalize(item->valueint);
+    item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_pages");
+    if(cJSON_IsNumber(item) && item->valueint >= 0 && item->valueint <= 5)
+        g_app_config.fast_scroll_pages = (uint8_t)item->valueint;
     item = cJSON_GetObjectItemCaseSensitive(root, "screen_off_minutes");
     if(cJSON_IsNumber(item) && item->valuedouble == item->valueint &&
        (item->valueint == 0 || item->valueint == 30 || item->valueint == 60)) {
@@ -661,6 +666,7 @@ esp_err_t app_config_save(void)
     cJSON_AddBoolToObject(root, "menubar_left", g_app_config.menubar_left);
     cJSON_AddBoolToObject(root, "touch_enabled", g_app_config.touch_enabled);
     cJSON_AddNumberToObject(root, "np_bg_mode", g_app_config.np_bg_mode);
+    cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddNumberToObject(root, "usb_mode", g_app_config.usb_mode);

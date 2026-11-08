@@ -22,7 +22,7 @@ class TopRightState(ctypes.Structure):
 class KnobState(ctypes.Structure):
     _fields_ = [('down', ctypes.c_bool), ('turned', ctypes.c_bool)]
 
-class PlayState(ctypes.Structure):
+class BackState(ctypes.Structure):
     _fields_ = [('down', ctypes.c_bool)]
 
 
@@ -77,14 +77,14 @@ class D100HProtocolTests(unittest.TestCase):
         cls.lib.ulanzi_top_right_update.restype = ctypes.c_int
         cls.lib.ulanzi_top_right_deadline.argtypes = [ctypes.POINTER(TopRightState)]
         cls.lib.ulanzi_top_right_deadline.restype = ctypes.c_int64
-        cls.lib.ulanzi_back_update.argtypes = [
+        cls.lib.ulanzi_play_update.argtypes = [
             ctypes.POINTER(TopRightState), ctypes.c_int, ctypes.c_int64]
-        cls.lib.ulanzi_back_update.restype = ctypes.c_int
-        cls.lib.ulanzi_back_deadline.argtypes = [ctypes.POINTER(TopRightState)]
-        cls.lib.ulanzi_back_deadline.restype = ctypes.c_int64
-        cls.lib.ulanzi_play_update.argtypes = [ctypes.POINTER(PlayState),ctypes.c_bool]
-        cls.lib.ulanzi_play_update.restype = ctypes.c_bool
-        cls.lib.ulanzi_play_cancel.argtypes = [ctypes.POINTER(PlayState)]
+        cls.lib.ulanzi_play_update.restype = ctypes.c_int
+        cls.lib.ulanzi_play_deadline.argtypes = [ctypes.POINTER(TopRightState)]
+        cls.lib.ulanzi_play_deadline.restype = ctypes.c_int64
+        cls.lib.ulanzi_back_update.argtypes = [ctypes.POINTER(BackState),ctypes.c_bool]
+        cls.lib.ulanzi_back_update.restype = ctypes.c_bool
+        cls.lib.ulanzi_back_cancel.argtypes = [ctypes.POINTER(BackState)]
 
     def gesture(self, state, event, now_us):
         return self.lib.ulanzi_top_right_update(ctypes.byref(state), event, now_us)
@@ -158,58 +158,58 @@ class D100HProtocolTests(unittest.TestCase):
         self.assertEqual(self.gesture(state, UP, 9000001), NONE)
         self.assertFalse(state.down)
 
-    def test_back_tap_only_on_release(self):
+    def test_play_tap_only_on_release(self):
         state = TopRightState()
-        update = lambda event,t:self.lib.ulanzi_back_update(ctypes.byref(state),event,t)
+        update = lambda event,t:self.lib.ulanzi_play_update(ctypes.byref(state),event,t)
         self.assertEqual(update(UP,0),0)
         self.assertEqual(update(DOWN,0),0)
-        self.assertEqual(self.lib.ulanzi_back_deadline(ctypes.byref(state)),2000000)
+        self.assertEqual(self.lib.ulanzi_play_deadline(ctypes.byref(state)),2000000)
         self.assertEqual(update(UP,1999999),1)
         self.assertEqual(update(POLL,3000000),0)
         self.assertEqual(update(UP,3000001),0)
 
-    def test_back_hold_fires_once_at_two_seconds_without_release(self):
+    def test_play_hold_fires_once_at_two_seconds_without_release(self):
         state = TopRightState()
-        update = lambda event,t:self.lib.ulanzi_back_update(ctypes.byref(state),event,t)
+        update = lambda event,t:self.lib.ulanzi_play_update(ctypes.byref(state),event,t)
         self.assertEqual(update(DOWN,1000000),0)
         self.assertEqual(update(DOWN,2900000),0)
         self.assertEqual(update(POLL,2999999),0)
         self.assertEqual(update(POLL,3000000),2)
-        self.assertEqual(self.lib.ulanzi_back_deadline(ctypes.byref(state)),0)
+        self.assertEqual(self.lib.ulanzi_play_deadline(ctypes.byref(state)),0)
         self.assertEqual(update(DOWN,4000000),0)
         self.assertEqual(update(POLL,9000000),0)
         self.assertEqual(update(UP,9000001),0)
         self.assertFalse(state.down)
 
-    def test_back_delayed_release_and_next_hold(self):
+    def test_play_delayed_release_and_next_hold(self):
         state = TopRightState()
         for start in (0,4000000):
-            self.lib.ulanzi_back_update(ctypes.byref(state),DOWN,start)
-            self.assertEqual(self.lib.ulanzi_back_update(ctypes.byref(state),UP,start+2000000),2)
-            self.assertEqual(self.lib.ulanzi_back_update(ctypes.byref(state),POLL,start+3000000),0)
+            self.lib.ulanzi_play_update(ctypes.byref(state),DOWN,start)
+            self.assertEqual(self.lib.ulanzi_play_update(ctypes.byref(state),UP,start+2000000),2)
+            self.assertEqual(self.lib.ulanzi_play_update(ctypes.byref(state),POLL,start+3000000),0)
 
-    def test_back_cancel_keeps_input_sources_separate(self):
+    def test_play_cancel_keeps_input_sources_separate(self):
         usb,ble = TopRightState(),TopRightState()
-        for state in (usb,ble):self.lib.ulanzi_back_update(ctypes.byref(state),DOWN,0)
-        self.lib.ulanzi_back_update(ctypes.byref(usb),CANCEL,1000000)
-        self.assertEqual(self.lib.ulanzi_back_update(ctypes.byref(usb),POLL,3000000),0)
-        self.assertEqual(self.lib.ulanzi_back_update(ctypes.byref(usb),UP,3000000),0)
-        self.assertEqual(self.lib.ulanzi_back_update(ctypes.byref(ble),POLL,2000000),2)
+        for state in (usb,ble):self.lib.ulanzi_play_update(ctypes.byref(state),DOWN,0)
+        self.lib.ulanzi_play_update(ctypes.byref(usb),CANCEL,1000000)
+        self.assertEqual(self.lib.ulanzi_play_update(ctypes.byref(usb),POLL,3000000),0)
+        self.assertEqual(self.lib.ulanzi_play_update(ctypes.byref(usb),UP,3000000),0)
+        self.assertEqual(self.lib.ulanzi_play_update(ctypes.byref(ble),POLL,2000000),2)
 
-    def test_play_fires_only_on_matching_release(self):
-        state = PlayState()
-        self.assertFalse(self.lib.ulanzi_play_update(ctypes.byref(state),False))
-        for _ in range(5):self.assertFalse(self.lib.ulanzi_play_update(ctypes.byref(state),True))
-        self.assertTrue(self.lib.ulanzi_play_update(ctypes.byref(state),False))
-        self.assertFalse(self.lib.ulanzi_play_update(ctypes.byref(state),False))
+    def test_back_fires_only_on_matching_release(self):
+        state = BackState()
+        self.assertFalse(self.lib.ulanzi_back_update(ctypes.byref(state),False))
+        for _ in range(5):self.assertFalse(self.lib.ulanzi_back_update(ctypes.byref(state),True))
+        self.assertTrue(self.lib.ulanzi_back_update(ctypes.byref(state),False))
+        self.assertFalse(self.lib.ulanzi_back_update(ctypes.byref(state),False))
 
-    def test_play_disconnect_cancels_pending_release(self):
-        state = PlayState()
-        self.lib.ulanzi_play_update(ctypes.byref(state),True)
-        self.lib.ulanzi_play_cancel(ctypes.byref(state))
-        self.assertFalse(self.lib.ulanzi_play_update(ctypes.byref(state),False))
+    def test_back_disconnect_cancels_pending_release(self):
+        state = BackState()
+        self.lib.ulanzi_back_update(ctypes.byref(state),True)
+        self.lib.ulanzi_back_cancel(ctypes.byref(state))
+        self.assertFalse(self.lib.ulanzi_back_update(ctypes.byref(state),False))
 
-    def test_back_and_play_bypass_stateless_mapping(self):
+    def test_play_and_back_bypass_stateless_mapping(self):
         for control in (1,2):
             for down in (False,True):
                 key = ctypes.c_int(-1)

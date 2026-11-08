@@ -51,6 +51,9 @@ void ui_handle_key(ui_key_t key);
  * fast spin updates the final selection once instead of queueing one frame
  * per detent. */
 void ui_handle_key_repeat(ui_key_t key, int count);
+/* Same-direction physical burst timestamps, expressed in the LVGL tick clock.
+ * Arrival times keep scroll speed independent of UI rendering delays. */
+void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint32_t last_ms);
 
 /** Jump directly to a screen by zero-based index (simulator/debug only). */
 void ui_select_screen(int index);
@@ -90,6 +93,7 @@ typedef struct {
     int menubar_left;
     int touch_enabled;
     int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
+    int fast_scroll_pages; /* 0 = off; 1..5 pages/1200 ms; default 2 */
     int screen_off_minutes; /* 0 = Off (disabled), 30, 60 */
     int brightness;        /* 1..100; a requested 0 falls back to 5 */
     int usb_mode;          /* 0 = USB-A HS, 2 = USB-A HS + USB-C FS */
@@ -133,6 +137,7 @@ typedef enum {
     UI_FEEDBACK_CLICK = 0,
     UI_FEEDBACK_ACTIVATE,
     UI_FEEDBACK_BACK,
+    UI_FEEDBACK_FAST_SCROLL,
 } ui_feedback_t;
 
 /** Optional short UI sound hook implemented by the firmware. */

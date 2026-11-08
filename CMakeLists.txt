@@ -47,6 +47,7 @@ endif()
 # -----------------------------------------------------------------------------
 set(UI_SOURCES
     app/backend/screen_idle.c
+    app/backend/fast_scroll.c
     app/backend/cover_gradient.c
     app/backend/cover_gradient_math.c
     app/backend/mock_player.c
@@ -138,6 +139,17 @@ if(IAP2TAB5_BUILD_UI_TESTS)
     foreach(theme RANGE 0 2)
         add_test(NAME now_playing_updates_theme_${theme} COMMAND now_playing_update_test ${theme})
     endforeach()
+    add_executable(navigation_test tests/navigation_test.c
+        third_party/cjson/cJSON.c ${NP_TEST_SOURCES})
+    target_include_directories(navigation_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(navigation_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
+    target_link_libraries(navigation_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
+    foreach(theme RANGE 0 2)
+        add_test(NAME navigation_theme_${theme} COMMAND navigation_test ${theme})
+    endforeach()
+
 endif()
 
 # Convenience: `cmake --build build --target run`

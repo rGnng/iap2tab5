@@ -171,44 +171,44 @@ ulanzi_top_right_action_t ulanzi_top_right_update(ulanzi_top_right_t * state,
     return action;
 }
 
-int64_t ulanzi_back_deadline(const ulanzi_back_t * state)
+int64_t ulanzi_play_deadline(const ulanzi_play_t * state)
 {
     return state->down && !state->fired
-        ? state->pressed_us + (int64_t)ULANZI_BACK_HOLD_MS * 1000 : 0;
+        ? state->pressed_us + (int64_t)ULANZI_PLAY_HOLD_MS * 1000 : 0;
 }
 
-ulanzi_back_action_t ulanzi_back_update(ulanzi_back_t * state,
-    ulanzi_back_event_t event, int64_t now_us)
+ulanzi_play_action_t ulanzi_play_update(ulanzi_play_t * state,
+    ulanzi_play_event_t event, int64_t now_us)
 {
-    if(event == ULANZI_BACK_CANCEL) {
-        *state = (ulanzi_back_t){0};
-        return ULANZI_BACK_NONE;
+    if(event == ULANZI_PLAY_CANCEL) {
+        *state = (ulanzi_play_t){0};
+        return ULANZI_PLAY_NONE;
     }
-    if(event == ULANZI_BACK_DOWN) {
-        if(!state->down) *state = (ulanzi_back_t){.down = true, .pressed_us = now_us};
-        return ULANZI_BACK_NONE;
+    if(event == ULANZI_PLAY_DOWN) {
+        if(!state->down) *state = (ulanzi_play_t){.down = true, .pressed_us = now_us};
+        return ULANZI_PLAY_NONE;
     }
-    if(!state->down) return ULANZI_BACK_NONE;
-    ulanzi_back_action_t action = ULANZI_BACK_NONE;
+    if(!state->down) return ULANZI_PLAY_NONE;
+    ulanzi_play_action_t action = ULANZI_PLAY_NONE;
     if(!state->fired) {
-        if(now_us >= ulanzi_back_deadline(state)) {
+        if(now_us >= ulanzi_play_deadline(state)) {
             state->fired = true;
-            action = ULANZI_BACK_SCREEN_OFF;
+            action = ULANZI_PLAY_SCREEN_OFF;
         }
-        else if(event == ULANZI_BACK_UP) action = ULANZI_BACK_TAP;
+        else if(event == ULANZI_PLAY_UP) action = ULANZI_PLAY_TAP;
     }
-    if(event == ULANZI_BACK_UP) state->down = false;
+    if(event == ULANZI_PLAY_UP) state->down = false;
     return action;
 }
 
-bool ulanzi_play_update(ulanzi_play_t * state, bool down)
+bool ulanzi_back_update(ulanzi_back_t * state, bool down)
 {
     bool click = !down && state->down;
     state->down = down;
     return click;
 }
 
-void ulanzi_play_cancel(ulanzi_play_t * state)
+void ulanzi_back_cancel(ulanzi_back_t * state)
 {
     state->down = false;
 }
@@ -244,8 +244,8 @@ bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key)
     if(key == NULL || !down) return false;
 
     switch(id) {
-        case 0x01: return false; /* stateful Back / screen-off gesture */
-        case 0x02: return false; /* Play/Pause on release */
+        case 0x01: return false; /* Back on release */
+        case 0x02: return false; /* stateful Play/Pause / screen-off gesture */
         /* 0x03 top-right is press-duration sensitive: the caller decides
          * between UI_KEY_CONTEXT (short) and UI_KEY_STAR (long). */
         case 0x03: return false;

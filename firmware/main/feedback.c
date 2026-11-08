@@ -21,6 +21,7 @@ static const char * TAG = "feedback";
 typedef struct {
     uint16_t frequency;
     uint16_t duration_ms;
+    bool double_tone;
 } tone_request_t;
 
 static esp_codec_dev_handle_t s_codec;
@@ -83,6 +84,7 @@ static void feedback_task(void * arg)
         if(xQueueReceive(s_queue, &request, portMAX_DELAY) != pdTRUE) continue;
         if(!s_enabled || s_volume == 0) continue;
         write_tone(request.frequency, request.duration_ms);
+        if(request.double_tone) write_tone(1760, 22);
     }
 }
 
@@ -133,8 +135,13 @@ void feedback_play(feedback_t type)
 {
     if(!s_enabled || s_volume == 0 || s_queue == NULL) return;
 
-    tone_request_t request;
+    tone_request_t request = {0};
     switch(type) {
+        case FEEDBACK_FAST_SCROLL:
+            request.frequency = 1175;
+            request.duration_ms = 22;
+            request.double_tone = true;
+            break;
         case FEEDBACK_ACTIVATE:
             request.frequency = 880;
             request.duration_ms = 45;

@@ -53,33 +53,33 @@ int64_t ulanzi_top_right_deadline(const ulanzi_top_right_t * state);
 ulanzi_top_right_action_t ulanzi_top_right_update(ulanzi_top_right_t * state,
     ulanzi_top_right_event_t event, int64_t now_us);
 
-/* Top-left: tap Back on release; hold two seconds to blank the screen.
- * A fired hold remains latched until release, which emits no Back action. */
-#define ULANZI_BACK_HOLD_MS 2000
+/* Top-middle: tap Play/Pause on release; hold two seconds to blank the screen.
+ * A fired hold remains latched until release, which emits no Play/Pause action. */
+#define ULANZI_PLAY_HOLD_MS 2000
 typedef struct {
     bool down;
     bool fired;
     int64_t pressed_us;
-} ulanzi_back_t;
+} ulanzi_play_t;
 typedef enum {
-    ULANZI_BACK_DOWN,
-    ULANZI_BACK_UP,
-    ULANZI_BACK_POLL,
-    ULANZI_BACK_CANCEL,
-} ulanzi_back_event_t;
+    ULANZI_PLAY_DOWN,
+    ULANZI_PLAY_UP,
+    ULANZI_PLAY_POLL,
+    ULANZI_PLAY_CANCEL,
+} ulanzi_play_event_t;
 typedef enum {
-    ULANZI_BACK_NONE,
-    ULANZI_BACK_TAP,
-    ULANZI_BACK_SCREEN_OFF,
-} ulanzi_back_action_t;
-int64_t ulanzi_back_deadline(const ulanzi_back_t * state);
-ulanzi_back_action_t ulanzi_back_update(ulanzi_back_t * state,
-    ulanzi_back_event_t event, int64_t now_us);
+    ULANZI_PLAY_NONE,
+    ULANZI_PLAY_TAP,
+    ULANZI_PLAY_SCREEN_OFF,
+} ulanzi_play_action_t;
+int64_t ulanzi_play_deadline(const ulanzi_play_t * state);
+ulanzi_play_action_t ulanzi_play_update(ulanzi_play_t * state,
+    ulanzi_play_event_t event, int64_t now_us);
 
-/* Top-middle Play/Pause acts on release. A press alone has no action. */
-typedef struct { bool down; } ulanzi_play_t;
-bool ulanzi_play_update(ulanzi_play_t * state, bool down);
-void ulanzi_play_cancel(ulanzi_play_t * state);
+/* Top-left Back acts on release. A press alone has no action. */
+typedef struct { bool down; } ulanzi_back_t;
+bool ulanzi_back_update(ulanzi_back_t * state, bool down);
+void ulanzi_back_cancel(ulanzi_back_t * state);
 
 /* Knob press/held-turn gesture (IDs 0x07, 0x0B, 0x0C). A plain click emits
  * Enter on release; any held turn cancels that click and changes volume.

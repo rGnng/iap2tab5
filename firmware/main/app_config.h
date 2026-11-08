@@ -30,6 +30,7 @@ typedef struct {
     bool touch_enabled;
     uint8_t np_bg_mode;
     uint8_t brightness;        /* 1..100; a requested 0 falls back to 5 */
+    uint8_t fast_scroll_pages; /* activation pages/1200 ms; 0 off, default 2 */
     uint8_t screen_off_minutes; /* 0 = disabled (default), 30, 60 */
     uint8_t usb_mode;
     uint8_t theme;              /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */

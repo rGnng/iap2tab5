@@ -174,6 +174,7 @@ live in `../docs/sd/`. Two files are used:
   "np_bg_mode": 2,
   "brightness": 70,
   "screen_off_minutes": 0,
+  "fast_scroll_pages": 2,
   "usb_mode": 0,
   "charge_enabled": true,
   "qc_high": false
@@ -183,6 +184,8 @@ live in `../docs/sd/`. Two files are used:
 - `screen_flip`: `0` or `180` (landscape upside down)
 - `wifi_mode`: `0` station, `1` open AP
 - `np_bg_mode`: `0` theme, `1` blurred cover, `2` cover gradient
+- `fast_scroll_pages`: `0` off, `1`–`5` physical pages per 1200 ms to enter fast
+  scroll (default `2`). Once active, each notch moves one visible page.
 - `screen_off_minutes`: `0` disabled (default), `30` or `60`. Only paused/stopped
   playback with no input counts as idle. Hold the menubar clock for two seconds
   to blank immediately; the first touch/key wakes without performing its action.
@@ -245,8 +248,8 @@ Useful endpoints:
 | `POST /api/loglevel?tag=usb&level=4` | change a log tag level at runtime |
 | `POST /api/key?k=enter` | named navigation/media action; legacy serial aliases also work |
 | `POST /api/key?k=screenoff` / `k=wake` | blank/wake the display without changing saved brightness |
-| `POST /api/keystate?k=back&down=1\|0` | D100H Back press/release; hold 2 seconds for Screen Off |
-| `POST /api/keystate?k=play&down=1\|0` | D100H Play/Pause press/release; action fires on release |
+| `POST /api/keystate?k=back&down=1\|0` | D100H Back press/release; action fires on release |
+| `POST /api/keystate?k=play&down=1\|0` | D100H Play/Pause on short release; hold 2 seconds for Screen Off |
 | `POST /api/keystate?k=cancel` | cancel web keypad holds without emitting a click |
 | `POST /api/sync` | same incremental library/artwork sync worker as the AFC screen |
 | `GET /api/screenshot.bmp` | 1280x720 24-bit BMP snapshot |

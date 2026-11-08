@@ -59,8 +59,8 @@ static QueueHandle_t s_device_events;
 static QueueHandle_t s_key_events;
 static ulanzi_top_right_t s_top_right[D100H_INPUT_COUNT];
 static ulanzi_knob_t s_knob[D100H_INPUT_COUNT];
-static ulanzi_back_t s_back[D100H_INPUT_COUNT];
 static ulanzi_play_t s_play[D100H_INPUT_COUNT];
+static ulanzi_back_t s_back[D100H_INPUT_COUNT];
 static uint16_t s_button_down[D100H_INPUT_COUNT];
 static uint16_t s_wake_consumed[D100H_INPUT_COUNT];
 
@@ -435,19 +435,19 @@ static uint16_t gesture_button_bit(const key_event_t * evt)
     return 0;
 }
 
-static void dispatch_back(d100h_input_source_t source,
-                          ulanzi_back_event_t event, int64_t now_us)
+static void dispatch_play(d100h_input_source_t source,
+                          ulanzi_play_event_t event, int64_t now_us)
 {
-    ulanzi_back_action_t action = ulanzi_back_update(&s_back[source], event, now_us);
-    if(action == ULANZI_BACK_NONE) return;
-    ESP_LOGI(TAG, "D100H back source=%d action=%s", (int)source,
-             action == ULANZI_BACK_SCREEN_OFF ? "screen_off" : "back");
+    ulanzi_play_action_t action = ulanzi_play_update(&s_play[source], event, now_us);
+    if(action == ULANZI_PLAY_NONE) return;
+    ESP_LOGI(TAG, "D100H play source=%d action=%s", (int)source,
+             action == ULANZI_PLAY_SCREEN_OFF ? "screen_off" : "play_pause");
     if(bsp_display_lock(1000)) {
-        if(action == ULANZI_BACK_SCREEN_OFF) {
-            ui_play_key_feedback(UI_KEY_BACK);
+        if(action == ULANZI_PLAY_SCREEN_OFF) {
+            ui_play_key_feedback(UI_KEY_7);
             ui_screen_off();
         }
-        else if(ui_screen_is_on()) ui_handle_key(UI_KEY_BACK);
+        else if(ui_screen_is_on()) ui_handle_key(UI_KEY_7);
         bsp_display_unlock();
     }
 }
@@ -474,7 +474,7 @@ static void dispatch_key_event(const key_event_t * evt)
     uint16_t bit = gesture_button_bit(evt);
     if(bit) {
         if(evt->down) {
-            /* Repeated down reports from the held Back key must not wake
+            /* Repeated down reports from the held Play/Pause key must not wake
              * the screen immediately after its long-press switched it off. */
             if(s_button_down[evt->source] & bit) return;
             s_button_down[evt->source] |= bit;
@@ -498,23 +498,23 @@ static void dispatch_key_event(const key_event_t * evt)
             for(int i = 0; i < D100H_INPUT_COUNT; i++) {
                 s_wake_consumed[i] |= s_button_down[i];
                 ulanzi_knob_cancel(&s_knob[i]);
-                ulanzi_play_cancel(&s_play[i]);
-                dispatch_back((d100h_input_source_t)i, ULANZI_BACK_CANCEL, evt->time_us);
+                ulanzi_back_cancel(&s_back[i]);
+                dispatch_play((d100h_input_source_t)i, ULANZI_PLAY_CANCEL, evt->time_us);
                 dispatch_top_right((d100h_input_source_t)i, ULANZI_TOP_RIGHT_CANCEL, evt->time_us);
             }
             return;
         }
     }
     if(evt->kind == KEY_EVENT_ACTIVITY) return;
-    if(evt->kind == KEY_EVENT_BACK) {
-        dispatch_back(evt->source, evt->down ? ULANZI_BACK_DOWN : ULANZI_BACK_UP, evt->time_us);
+    if(evt->kind == KEY_EVENT_PLAY) {
+        dispatch_play(evt->source, evt->down ? ULANZI_PLAY_DOWN : ULANZI_PLAY_UP, evt->time_us);
         return;
     }
-    if(evt->kind == KEY_EVENT_PLAY) {
-        if(ulanzi_play_update(&s_play[evt->source], evt->down) && bsp_display_lock(1000)) {
+    if(evt->kind == KEY_EVENT_BACK) {
+        if(ulanzi_back_update(&s_back[evt->source], evt->down) && bsp_display_lock(1000)) {
             if(ui_screen_is_on()) {
-                ESP_LOGI(TAG, "D100H play source=%d action=play_pause", (int)evt->source);
-                ui_handle_key(UI_KEY_7);
+                ESP_LOGI(TAG, "D100H back source=%d action=back", (int)evt->source);
+                ui_handle_key(UI_KEY_BACK);
             }
             bsp_display_unlock();
         }
@@ -536,8 +536,8 @@ static void dispatch_key_event(const key_event_t * evt)
         if(evt->kind == KEY_EVENT_GESTURE_CANCEL) {
             s_button_down[evt->source] = s_wake_consumed[evt->source] = 0;
             ulanzi_knob_cancel(&s_knob[evt->source]);
-            ulanzi_play_cancel(&s_play[evt->source]);
-            dispatch_back(evt->source, ULANZI_BACK_CANCEL, evt->time_us);
+            ulanzi_back_cancel(&s_back[evt->source]);
+            dispatch_play(evt->source, ULANZI_PLAY_CANCEL, evt->time_us);
         }
         dispatch_top_right(evt->source,
             evt->kind == KEY_EVENT_GESTURE_CANCEL ? ULANZI_TOP_RIGHT_CANCEL
@@ -581,17 +581,22 @@ static void dispatch_key_event(const key_event_t * evt)
         /* Coalesce a rotary burst.  A fast spin otherwise queues one
          * list refresh per detent, so the UI keeps moving after the knob
          * has stopped. */
+        int64_t last_arrival_us = evt->time_us;
         for(int i = 0; i < 63; i++) {
             key_event_t next;
             if(xQueuePeek(s_key_events, &next, 0) != pdTRUE) break;
             if(next.kind != KEY_EVENT_KEY || !next.down) break;
-            if(next.key != UI_KEY_UP && next.key != UI_KEY_DOWN) break;
+            if(next.key != key || next.source != evt->source) break;
             xQueueReceive(s_key_events, &next, 0);
             delta += next.key == UI_KEY_UP ? -1 : 1;
+            last_arrival_us = next.time_us;
         }
         if(delta != 0 && bsp_display_lock(1000)) {
-            ui_handle_key_repeat(delta < 0 ? UI_KEY_UP : UI_KEY_DOWN,
-                                 delta < 0 ? -delta : delta);
+            uint32_t tick = lv_tick_get();
+            int64_t now_us = esp_timer_get_time();
+            ui_handle_key_repeat_timed(key, delta < 0 ? -delta : delta,
+                tick - (uint32_t)((now_us - evt->time_us) / 1000),
+                tick - (uint32_t)((now_us - last_arrival_us) / 1000));
             bsp_display_unlock();
         }
         return;
@@ -616,7 +621,7 @@ static void key_dispatch_task(void * arg)
                 : s_hold_start_us + (int64_t)HOLD_MS * 1000;
         }
         for(int i = 0; i < D100H_INPUT_COUNT; i++) {
-            int64_t back_deadline = ulanzi_back_deadline(&s_back[i]);
+            int64_t back_deadline = ulanzi_play_deadline(&s_play[i]);
             if(back_deadline && (!deadline || back_deadline < deadline)) deadline = back_deadline;
             int64_t top_right_deadline = ulanzi_top_right_deadline(&s_top_right[i]);
             if(top_right_deadline && (!deadline || top_right_deadline < deadline)) {
@@ -644,7 +649,7 @@ static void key_dispatch_task(void * arg)
         int64_t gesture_now = xQueuePeek(s_key_events, &next, 0) == pdTRUE
             ? next.time_us : now_us;
         for(int i = 0; i < D100H_INPUT_COUNT; i++) {
-            dispatch_back((d100h_input_source_t)i, ULANZI_BACK_POLL, gesture_now);
+            dispatch_play((d100h_input_source_t)i, ULANZI_PLAY_POLL, gesture_now);
             dispatch_top_right((d100h_input_source_t)i,
                                ULANZI_TOP_RIGHT_POLL, gesture_now);
         }

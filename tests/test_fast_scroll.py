@@ -1,0 +1,84 @@
+"""Exercise production scroll speed policy against physical detents and time."""
+import ctypes as C
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+class State(C.Structure):
+    _fields_ = [('ticks', C.c_uint32 * 128), ('last_ms', C.c_uint32),
+                ('head', C.c_uint), ('count', C.c_uint), ('direction', C.c_int),
+                ('rows', C.c_int), ('pages', C.c_int), ('active', C.c_bool)]
+
+class FastScrollTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        lib = Path(cls.tmp.name) / 'scroll.so'
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-shared',
+                        '-fPIC', str(ROOT / 'app/backend/fast_scroll.c'), '-o', str(lib)], check=True)
+        cls.lib = C.CDLL(str(lib))
+        cls.lib.fast_scroll_feed.argtypes = [C.POINTER(State), C.c_uint32,
+            C.c_int, C.c_int, C.c_int, C.c_int, C.POINTER(C.c_bool)]
+        cls.lib.fast_scroll_feed.restype = C.c_int
+        cls.lib.fast_scroll_expire.argtypes = [C.POINTER(State), C.c_uint32]
+        cls.lib.fast_scroll_expire.restype = C.c_bool
+
+    def setUp(self): self.s = State()
+    def feed(self, now, count=1, rows=8, pages=2, direction=1):
+        entered = C.c_bool()
+        steps = self.lib.fast_scroll_feed(C.byref(self.s), now, direction,
+            count, rows, pages, C.byref(entered))
+        return steps, entered.value
+
+    def test_each_threshold_uses_physical_notches_then_one_page_per_notch(self):
+        for pages in range(1, 6):
+            self.s = State()
+            for i in range(pages * 8 - 1): self.assertEqual(self.feed(i*20,pages=pages),(1,False))
+            self.assertEqual(self.feed(pages*8*20,pages=pages),(8,True))
+            self.assertEqual(self.feed(pages*8*20+20,pages=pages),(8,False))
+
+    def test_slow_and_sparse_input_never_accelerates(self):
+        for gap in (160, 250, 500, 1200):
+            self.s = State()
+            for i in range(100): self.assertEqual(self.feed(i*gap),(1,False))
+
+    def test_window_excludes_old_notches(self):
+        self.assertEqual(self.feed(0,15),(15,False))
+        self.assertEqual(self.feed(1200),(1,False))
+        self.assertFalse(self.s.active)
+
+    def test_page_jumps_do_not_feed_back_into_the_threshold(self):
+        self.feed(0,16)
+        for i in range(1,20):self.assertEqual(self.feed(i*20),(8,False))
+        self.assertLessEqual(self.s.count,35)
+
+    def test_reversal_and_pause_restore_single_row_precision(self):
+        self.feed(0,16)
+        self.assertEqual(self.feed(20,direction=-1),(1,False))
+        self.feed(40,16)
+        self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),190))
+        self.assertEqual(self.feed(200),(1,False))
+
+    def test_off_invalid_or_single_row_contexts_never_accelerate(self):
+        for pages,rows in [(0,8),(-1,8),(6,8),(2,1),(2,0)]:
+            self.feed(0,16)
+            self.assertEqual(self.feed(10,40,pages=pages,rows=rows),(40,False))
+            self.assertFalse(self.s.active)
+
+    def test_changing_page_size_or_threshold_discards_old_velocity(self):
+        self.feed(0,15)
+        self.assertEqual(self.feed(10,rows=10),(1,False))
+        self.assertEqual(self.feed(20,pages=3),(1,False))
+        self.assertEqual(self.s.count,1)
+
+    def test_uint32_clock_wrap_keeps_thresholds_and_pause_correct(self):
+        start = 2**32-500
+        for i in range(15):self.assertEqual(self.feed((start+i*40) % 2**32),(1,False))
+        self.assertEqual(self.feed((start+600) % 2**32),(8,True))
+        self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),(start+750) % 2**32))
+
+if __name__ == '__main__': unittest.main()

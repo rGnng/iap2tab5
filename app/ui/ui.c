@@ -6,6 +6,7 @@
 #include "plug_art.h"
 #include "player.h"
 #include "screen_idle.h"
+#include "fast_scroll.h"
 #include "screen_brightness.h"
 #include "cover_gradient.h"
 #include "ble_remote.h"
@@ -13,6 +14,7 @@
 
 #include "lvgl.h"
 #include "src/widgets/label/lv_label_private.h"
+#include "src/draw/lv_draw_private.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 
 /* TinyTTF is enabled in lv_conf.h. Some ESP-IDF component builds do not
@@ -270,6 +272,7 @@ static ui_system_config_t g_system_config = {
     .sound_mode = 2,
     .volume = 65,
     .np_bg_mode = 2,
+    .fast_scroll_pages = 2,
     .wifi_status = "WiFi off",
     .wifi_ip = "--",
 };
@@ -654,57 +657,42 @@ static void enable_event_bubble(lv_obj_t * obj)
 #define MARQUEE_HOLD_MS  1000
 #define MARQUEE_BACK_MS  400
 
-static lv_color_t text_fade_bg(lv_obj_t * obj)
-{
-    for(lv_obj_t * p = lv_obj_get_parent(obj); p != NULL; p = lv_obj_get_parent(p)) {
-        if(lv_obj_get_style_bg_opa(p, 0) >= LV_OPA_COVER) {
-            return lv_obj_get_style_bg_color(p, 0);
-        }
-    }
-    return lv_color_hex(COL_MAIN_BG);
-}
-
-static void text_fade_draw_cb(lv_event_t * e)
-{
-    lv_obj_t * obj = lv_event_get_target_obj(e);
-    lv_point_t size;
-    lv_text_get_size(&size, lv_label_get_text(obj),
-                     lv_obj_get_style_text_font(obj, 0), 0, 0,
-                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    lv_area_t area;
-    lv_obj_get_coords(obj, &area);
-    int box_w = lv_area_get_width(&area);
-    if(size.x <= box_w) return;
-
-    lv_color_t bg = text_fade_bg(obj);
-    lv_draw_rect_dsc_t dsc;
-    lv_draw_rect_dsc_init(&dsc);
-    dsc.bg_opa = LV_OPA_COVER;
-    dsc.bg_grad.dir = LV_GRAD_DIR_HOR;
-    dsc.bg_grad.stops_count = 2;
-    dsc.bg_grad.stops[0].color = bg;
-    dsc.bg_grad.stops[0].opa = LV_OPA_TRANSP;
-    dsc.bg_grad.stops[0].frac = 0;
-    dsc.bg_grad.stops[1].color = bg;
-    dsc.bg_grad.stops[1].opa = LV_OPA_COVER;
-    dsc.bg_grad.stops[1].frac = 255;
-
-    lv_area_t right = area;
-    right.x1 = area.x2 - TEXT_FADE_W + 1;
-    lv_draw_rect(lv_event_get_layer(e), &dsc, &right);
-
-}
-
+/* Apply alpha to glyphs, never paint the background: gradients and translucent
+ * selections must remain visible through the fading edge. Only the 16-pixel
+ * strip needs extra drawing; no full-width intermediate bitmap is allocated. */
 static void text_fade_cb(lv_event_t * e)
 {
-    if(lv_event_get_code(e) == LV_EVENT_DRAW_POST) text_fade_draw_cb(e);
+    lv_obj_t * obj = lv_event_get_target_obj(e);
+    lv_draw_task_t * task = lv_event_get_draw_task(e);
+    if(lv_draw_task_get_type(task) != LV_DRAW_TASK_TYPE_LABEL) return;
+    lv_area_t bounds;
+    lv_obj_get_content_coords(obj, &bounds);
+    if(((lv_label_t *)obj)->text_size.x <= lv_area_get_width(&bounds)) return;
+    int width = LV_MIN(TEXT_FADE_W, lv_area_get_width(&bounds));
+    if(width < 2) return;
+    int edge = bounds.x2 - width + 1;
+    lv_area_t original = task->clip_area;
+    if(original.x2 < edge) return;
+    lv_draw_label_dsc_t dsc = *(lv_draw_label_dsc_t *)lv_draw_task_get_draw_dsc(task);
+    lv_layer_t * layer = task->target_layer;
+    lv_area_t saved = layer->_clip_area;
+    task->clip_area.x2 = edge - 1;
+    for(int x = LV_MAX(edge, original.x1); x < bounds.x2 && x <= original.x2; x++) {
+        layer->_clip_area = original;
+        layer->_clip_area.x1 = layer->_clip_area.x2 = x;
+        dsc.opa = (uint32_t)((lv_draw_label_dsc_t *)task->draw_dsc)->opa *
+                  (bounds.x2 - x) / (width - 1);
+        /* LVGL defers dispatch and suppresses nested draw-task events here. */
+        lv_draw_label(layer, &dsc, &task->area);
+    }
+    layer->_clip_area = saved;
 }
 
-/* List text: no wrapping, cut-off end fades out on the right. */
 static void ui_text_fade(lv_obj_t * label)
 {
     lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
-    lv_obj_add_event_cb(label, text_fade_cb, LV_EVENT_DRAW_POST, NULL);
+    lv_obj_add_flag(label, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    lv_obj_add_event_cb(label, text_fade_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
 }
 
 /* Secondary columns: no wrapping, hard cut at the column edge. */
@@ -2346,6 +2334,7 @@ void ui_set_system_config(const ui_system_config_t * cfg)
     snprintf(ip, sizeof(ip), "%s", g_system_config.wifi_ip);
 
     g_system_config = *cfg;
+    if(cfg->fast_scroll_pages < 0 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
     g_system_config.brightness = screen_brightness_normalize(cfg->brightness);
 
     if(cfg->wifi_status[0] == '\0') {
@@ -2961,7 +2950,7 @@ static void ui_dispatch_key(ui_key_t key)
     }
 }
 
-void ui_handle_key(ui_key_t key)
+static void ui_handle_key_single(ui_key_t key)
 {
     if(ui_user_activity()) return;
     /* Page and modal handlers can consume Enter/Back before the generic
@@ -7344,6 +7333,7 @@ enum {
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
     SETTING_SCREEN,
+    SETTING_FAST_SCROLL,
     SETTING_USB,
     SETTING_BOOT,
     SETTING_ABOUT,
@@ -7366,6 +7356,7 @@ static lv_obj_t * settings_detail_theme_gray_check;
 static lv_obj_t * settings_detail_theme_aqua_check;
 static lv_obj_t * settings_detail_theme_win95_check;
 static lv_obj_t * settings_screen_off_checks[3];
+static lv_obj_t * settings_fast_scroll_checks[6];
 static lv_obj_t * settings_brightness_checks[3];
 static const int settings_brightness_values[] = {5, 45, 100};
 static const int settings_idle_minutes[] = {30, 60, 0};
@@ -7424,6 +7415,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(cfg == NULL) return;
 
     g_system_config = *cfg;
+    if(cfg->fast_scroll_pages < 0 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
     screen_idle_configure(&g_screen_idle, cfg->screen_off_minutes, lv_tick_get());
     if(g_system_config.sound_mode < 0) g_system_config.sound_mode = 0;
     if(g_system_config.sound_mode > 2) g_system_config.sound_mode = 2;
@@ -7462,6 +7454,7 @@ static const char * const settings_names[SETTING_COUNT] = {
     "Theme",
     "Now Playing Background",
     "Screen",
+    "Fast Scroll",
     "USB Options",
     "Boot Screen",
     "About",
@@ -7470,6 +7463,7 @@ static const char * const settings_names[SETTING_COUNT] = {
 
 static int settings_initial_focus(int index)
 {
+    if(index == SETTING_FAST_SCROLL) return g_system_config.fast_scroll_pages;
     if(index == SETTING_SCREEN) {
         int nearest = 0;
         for(int i = 1; i < 3; i++) {
@@ -8204,6 +8198,22 @@ static void settings_theme_touch_cb(lv_event_t * event)
     settings_theme_action(lv_event_get_user_data(event));
 }
 
+static void settings_fast_scroll_action(void * user)
+{
+    int pages = (int)(intptr_t)user;
+    if(pages < 0 || pages > 5) return;
+    g_system_config.fast_scroll_pages = pages;
+    for(int i = 0; i < 6; i++)
+        if(settings_fast_scroll_checks[i]) lv_label_set_text(settings_fast_scroll_checks[i],
+            i == pages ? ICON_CHECK : "");
+    settings_system_changed();
+}
+
+static void settings_fast_scroll_touch_cb(lv_event_t * event)
+{
+    settings_fast_scroll_action(lv_event_get_user_data(event));
+}
+
 static void settings_screen_off_action(void * user)
 {
     int index = (int)(intptr_t)user;
@@ -8588,6 +8598,7 @@ static void settings_np_bg_touch_cb(lv_event_t * event)
 
 static void settings_render_detail(lv_obj_t * parent, bool interactive)
 {
+    memset(settings_fast_scroll_checks, 0, sizeof(settings_fast_scroll_checks));
     if(parent == NULL) return;
     lv_obj_clean(parent);
 
@@ -8884,6 +8895,17 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             }
             break;
         }
+        case SETTING_FAST_SCROLL: {
+            static const char * const labels[] = {"Off", "1 Page", "2 Pages", "3 Pages", "4 Pages", "5 Pages"};
+            for(int i = 0; i < 6; i++) {
+                lv_obj_t * row = settings_make_choice_row(parent, labels[i],
+                    g_system_config.fast_scroll_pages == i, &settings_fast_scroll_checks[i]);
+                if(interactive) focus_add_clickable(row, settings_fast_scroll_action,
+                    NULL, (void *)(intptr_t)i, true);
+                else touch_add_clickable(row, settings_fast_scroll_touch_cb, (void *)(intptr_t)i);
+            }
+            break;
+        }
         case SETTING_SCREEN: {
             static const char * const brightness_labels[] = {"Low", "Mid", "High"};
             settings_section(parent, "Brightness");
@@ -8995,8 +9017,11 @@ static void settings_schedule_detail(void)
  * When a page is left or rebuilt before that timer fires, the callback would
  * otherwise touch widgets that lv_obj_clean() has already deleted.  Pause
  * every page timer and drop its dangling content pointer before teardown. */
+static void ui_fast_scroll_reset(void);
+
 static void ui_page_teardown(void)
 {
+    ui_fast_scroll_reset();
     ui_page_cancel_load();
     np_gradient_detach();
     if(np_queue_fill_timer) lv_timer_pause(np_queue_fill_timer);
@@ -9011,6 +9036,8 @@ static void ui_page_teardown(void)
     albums_detail_dirty = false;
     albums_right_content = NULL;
 
+    if(artists_left_list) artists_left_scroll_y = lv_obj_get_scroll_y(artists_left_list);
+    artists_left_list = NULL;
     if(artists_detail_timer) lv_timer_pause(artists_detail_timer);
     artists_detail_dirty = false;
     artists_right_content = NULL;
@@ -9522,7 +9549,7 @@ static void ui_afc_sync_build(lv_obj_t * screen)
     focus_select(0);
 }
 
-void ui_handle_key_repeat(ui_key_t key, int count)
+static void ui_handle_key_repeat_raw(ui_key_t key, int count)
 {
     if(count <= 0) return;
     if(ui_user_activity()) return;
@@ -9531,7 +9558,7 @@ void ui_handle_key_repeat(ui_key_t key, int count)
         return;
     }
     if(count == 1) {
-        ui_handle_key(key);
+        ui_handle_key_single(key);
         return;
     }
 
@@ -9542,7 +9569,7 @@ void ui_handle_key_repeat(ui_key_t key, int count)
         /* The time editor uses Up/Down as value adjustment, not focus
          * movement.  Preserve one adjust per detent. */
         if(g_current_screen == SCR_SETTINGS && settings_time_editing) {
-            for(int i = 0; i < count; i++) ui_handle_key(key);
+            for(int i = 0; i < count; i++) ui_handle_key_single(key);
             return;
         }
 
@@ -9564,8 +9591,138 @@ void ui_handle_key_repeat(ui_key_t key, int count)
     }
 
     for(int i = 0; i < count; i++) {
-        ui_handle_key(key);
+        ui_handle_key_single(key);
     }
+}
+
+static fast_scroll_t g_fast_scroll;
+static lv_obj_t * g_fast_context;
+static lv_obj_t * g_fast_marker;
+static lv_timer_t * g_fast_timer;
+
+static void ui_fast_scroll_reset(void)
+{
+    fast_scroll_reset(&g_fast_scroll);
+    g_fast_context = NULL;
+    if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+    if(g_fast_timer) lv_timer_pause(g_fast_timer);
+}
+
+/* Only vertical list navigation accelerates. Value editors, transport buttons,
+ * modal menus, touch swipes, and volume adjustments retain their normal steps. */
+static int ui_fast_scroll_rows(lv_obj_t **context)
+{
+    *context = NULL;
+    if(g_afc_sync_mode || g_ctx_menu_open || g_page_loading || g_edit_mode ||
+       (g_current_screen == SCR_SETTINGS && settings_time_editing)) return 0;
+    int height = 0;
+    if(g_current_screen == SCR_ALBUMS && !albums_detail_open) {
+        *context = albums_left_list; height = ALBUMS_ROW_H;
+    }
+    else if(g_current_screen == SCR_ARTISTS && !artists_detail_open) {
+        *context = artists_left_list; height = ARTISTS_ROW_H;
+    }
+    else if(g_current_screen == SCR_SONGS) {
+        *context = songs_list; height = SONGS_ROW_H;
+    }
+    else if(g_focus_index >= 0 && g_focus_index < g_focus_count) {
+        lv_obj_t * row = g_focus[g_focus_index].obj;
+        height = lv_obj_get_height(row);
+        for(lv_obj_t * p = lv_obj_get_parent(row); p; p = lv_obj_get_parent(p)) {
+            if(lv_obj_has_flag(p, LV_OBJ_FLAG_SCROLLABLE) &&
+               lv_obj_get_style_flex_flow(p, 0) == LV_FLEX_FLOW_COLUMN) { *context = p; break; }
+        }
+    }
+    return *context && height > 0 ? lv_obj_get_content_height(*context) / height : 0;
+}
+
+static void ui_fast_marker_update(lv_timer_t * timer)
+{
+    LV_UNUSED(timer);
+    if(fast_scroll_expire(&g_fast_scroll, lv_tick_get()) || !g_fast_scroll.active || !ui_screen_is_on()) {
+        ui_fast_scroll_reset(); return;
+    }
+    lv_obj_t * row = NULL;
+    if(g_current_screen == SCR_ALBUMS && !albums_detail_open) {
+        for(int i = 0; i < ALBUMS_POOL; i++)
+            if(albums_row_indices[i] == albums_selected) row = albums_rows[i];
+    }
+    else if(g_current_screen == SCR_ARTISTS && !artists_detail_open) {
+        for(int i = 0; i < ARTISTS_POOL; i++)
+            if(artists_row_indices[i] == artists_selected) row = artists_rows[i];
+    }
+    else if(g_current_screen == SCR_SONGS) {
+        for(int i = 0; i < SONGS_POOL; i++)
+            if(songs_row_indices[i] == songs_selected) row = songs_rows[i];
+    }
+    else if(g_focus_index >= 0 && g_focus_index < g_focus_count) row = g_focus[g_focus_index].obj;
+    if(!row || !g_fast_context) { ui_fast_scroll_reset(); return; }
+    lv_area_t bounds, viewport;
+    lv_obj_get_coords(row, &bounds); lv_obj_get_content_coords(g_fast_context, &viewport);
+    bounds.x1 = LV_MAX(bounds.x1, viewport.x1); bounds.x2 = LV_MIN(bounds.x2, viewport.x2);
+    bounds.y1 = LV_MAX(bounds.y1, viewport.y1); bounds.y2 = LV_MIN(bounds.y2, viewport.y2);
+    if(bounds.x1 > bounds.x2 || bounds.y1 > bounds.y2) { ui_fast_scroll_reset(); return; }
+    if(!g_fast_marker) {
+        g_fast_marker = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(g_fast_marker);
+        lv_obj_remove_flag(g_fast_marker, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(g_fast_marker, 3, 0);
+        lv_obj_set_style_border_side(g_fast_marker, LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT, 0);
+    }
+    /* Twin rails distinguish page jumps without changing row geometry. The
+     * selection foreground stays legible even on Windows 95's navy cursor. */
+    lv_obj_set_style_border_color(g_fast_marker, lv_color_hex(g_theme->on_selection), 0);
+    lv_obj_set_pos(g_fast_marker, bounds.x2 - 11, bounds.y1 + 8);
+    lv_obj_set_size(g_fast_marker, 8, LV_MAX(8, lv_area_get_height(&bounds) - 16));
+    lv_obj_set_hidden(g_fast_marker, false);
+}
+
+void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint32_t last_ms)
+{
+    if(count <= 0) return;
+    if(ui_user_activity()) { ui_fast_scroll_reset(); return; }
+    if(key != UI_KEY_UP && key != UI_KEY_DOWN) {
+        ui_fast_scroll_reset(); ui_handle_key_repeat_raw(key, count); return;
+    }
+    lv_obj_t * context;
+    int rows = ui_fast_scroll_rows(&context);
+    if(context != g_fast_context) ui_fast_scroll_reset();
+    g_fast_context = context;
+    bool entered = false;
+    int steps = 0;
+    /* Preserve physical arrival times through coalescing and a busy renderer.
+     * Interpolate a same-direction burst; never measure the enlarged jumps. */
+    for(int i = 0; i < count; i++) {
+        uint32_t tick = count > 1 ? first_ms +
+            (uint32_t)((uint64_t)(last_ms - first_ms) * i / (count - 1)) : last_ms;
+        bool just_entered;
+        steps += fast_scroll_feed(&g_fast_scroll, tick, key == UI_KEY_UP ? -1 : 1,
+            1, rows, g_system_config.fast_scroll_pages, &just_entered);
+        entered |= just_entered;
+    }
+    if(entered) ui_feedback_emit(UI_FEEDBACK_FAST_SCROLL, true);
+    ui_handle_key_repeat_raw(key, steps);
+    if(g_fast_scroll.active) {
+        if(!g_fast_timer) g_fast_timer = lv_timer_create(ui_fast_marker_update, 40, NULL);
+        if(g_fast_timer) { lv_timer_reset(g_fast_timer); lv_timer_resume(g_fast_timer); }
+        ui_fast_marker_update(NULL);
+    }
+    else {
+        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+        if(g_fast_timer) lv_timer_pause(g_fast_timer);
+    }
+}
+
+void ui_handle_key_repeat(ui_key_t key, int count)
+{
+    uint32_t now = lv_tick_get();
+    ui_handle_key_repeat_timed(key, count, now, now);
+}
+
+void ui_handle_key(ui_key_t key)
+{
+    if(key == UI_KEY_UP || key == UI_KEY_DOWN) ui_handle_key_repeat(key, 1);
+    else { ui_fast_scroll_reset(); ui_handle_key_single(key); }
 }
 
 /* Marquee target for the current page: the selected row's name (or the

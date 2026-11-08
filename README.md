@@ -134,8 +134,9 @@ Settings remains accessible. Reconnect the iPod to resume browsing. After
 removing and reinserting the SD card, reboot to reload the cached library.
 
 The D100H supports tap-to-skip and hold-to-seek on its previous/next controls.
-Its top-left Back key acts on release; holding it for two seconds turns off
-the screen. The top-middle Play/Pause key also acts on release. A press that
+Its top-left Back key acts on release. The top-middle Play/Pause key acts on
+short release; holding it for two seconds turns off the screen without toggling
+playback. A press that
 wakes the screen is consumed through release, without navigating or playing.
 Its top-right key opens the context menu on a tap and toggles Star on a hold.
 Hold the knob down and turn it to adjust iPod volume: clockwise raises it,
@@ -143,6 +144,13 @@ counter-clockwise lowers it. A plain knob click activates on release;
 releasing after a held turn does not activate the selected item. This works
 over USB and BLE.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
+
+**Settings → Fast Scroll** selects the activation speed: Off or 1–5 pages per
+1200 ms (default: 2 Pages). A quick spin switches to one visible page per notch,
+with a short two-tone cue and twin contrasting rails on the cursor. Pausing or
+reversing immediately restores normal single-row precision. Speed uses physical
+notches rather than the amplified page jumps; touch scrolling stays unchanged.
+
 
 **Settings → Screen** groups **Brightness** presets (**Low**, **Mid**, **High**)
 and an **Idle Timer** with **30 min**, **1 hour**, and **Off**

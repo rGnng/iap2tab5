@@ -29,6 +29,7 @@ idf_component_register(
         "lvgl_ppa_idf_compat.c"
         "../../app/backend/mock_player.c"
         "../../app/backend/screen_idle.c"
+    "../../app/backend/fast_scroll.c"
         "../../app/backend/cover_gradient.c"
         "../../app/backend/cover_gradient_math.c"
         "../../app/backend/ble_remote.c"

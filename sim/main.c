@@ -370,7 +370,7 @@ int main(int argc, char ** argv)
     SDL_AddEventWatch(sdl_key_watch, NULL);
 
     ui_system_config_t settings = {.theme = theme, .touch_enabled = 1,
-        .volume = 65, .brightness = 70, .menubar_left = 1, .sort_desc = 1, .np_bg_mode = 2,
+        .volume = 65, .brightness = 70, .menubar_left = 1, .sort_desc = 1, .np_bg_mode = 2, .fast_scroll_pages = 2,
         .sound_enabled = true, .sound_mode = 2, .wifi_status = "WiFi off", .wifi_ip = "--"};
     ui_apply_saved_settings(&settings);
     ui_set_afc_sync_mode(sim_afc_state != NULL);
