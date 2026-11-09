@@ -63,7 +63,7 @@ uint64_t bench_checksum(void) { return checksum; }
         subprocess.run(['cc', '-std=c11', '-O2', '-shared', '-fPIC',
                         '-I', str(ROOT), '-I', str(ROOT / 'third_party/cjson'),
                         f'-DMOCK_ASSET_DIR="{path}"', str(path / 'index.c'),
-                        str(ROOT / 'third_party/cjson/cJSON.c'), '-lm',
+                        str(ROOT / 'third_party/cjson/cJSON.c'), str(ROOT / 'app/backend/media_index.c'), '-lm',
                         '-o', str(path / 'index.so')], check=True, capture_output=True)
         cls.lib = ctypes.CDLL(str(path / 'index.so'))
         cls.lib.add.argtypes = [ctypes.c_uint64, ctypes.c_uint64]

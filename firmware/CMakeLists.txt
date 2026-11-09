@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-option(IAP2TAB5_FULL_LIBRARY_SYNC "Subscribe to experimental full iAP2 library updates" OFF)
+option(IAP2TAB5_FULL_LIBRARY_SYNC "Subscribe to live iAP2 library updates" ON)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

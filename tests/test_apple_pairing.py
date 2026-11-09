@@ -72,6 +72,66 @@ int get_rounds(void){return rounds;}
 const char *get_message(void){return message;}
 '''
 
+class PairRequestTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which('cc'):
+            raise unittest.SkipTest('C compiler required')
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        work = Path(cls.tmp.name)
+        source = (ROOT / 'firmware/main/lockdown_client.c').read_text()
+        request = function(source.replace('\nesp_err_t lockdown_client_request_pair(',
+                                          '\nstatic esp_err_t lockdown_client_request_pair('),
+                           'lockdown_client_request_pair').removeprefix('static ')
+        prelude = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_ERR_INVALID_STATE -1
+#define portMAX_DELAY 0
+static void *s_pair_lock;
+static bool usb_ready, afc_ready, iap2_mode, s_art_active, s_pair_requested;
+static struct { bool busy,trusted; char message[96]; } s_pair_status;
+static int locked;
+static bool usbmux_host_is_ready(void) { return usb_ready; }
+static bool afc_client_is_ready(void) { return afc_ready; }
+static bool app_config_iap2_mode(void) { return iap2_mode; }
+static void xSemaphoreTake(void *p,int timeout) { (void)p;(void)timeout;assert(!locked);locked=1; }
+static void xSemaphoreGive(void *p) { (void)p;assert(locked);locked=0; }
+'''
+        driver = r'''
+int run(int scenario) {
+    s_pair_lock=(void*)1;usb_ready=true;afc_ready=iap2_mode=s_art_active=s_pair_requested=false;
+    s_pair_status.busy=s_pair_status.trusted=false;locked=0;
+    switch(scenario) {
+    case 1:afc_ready=true;break;case 2:s_pair_status.trusted=true;break;
+    case 3:s_pair_status.busy=true;break;case 4:usb_ready=false;break;
+    case 5:iap2_mode=true;break;case 6:s_art_active=true;break;case 7:s_pair_lock=NULL;break;
+    }
+    int result=lockdown_client_request_pair();assert(!locked);return result;
+}
+int requested(void) { return s_pair_requested; }
+'''
+        (work / 'request.c').write_text(prelude + request + driver)
+        subprocess.run(['cc', '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
+                        '-fsanitize=undefined', str(work / 'request.c'),
+                        '-o', str(work / 'request.so')], check=True)
+        cls.lib = ctypes.CDLL(str(work / 'request.so'))
+
+    def test_new_untrusted_device_can_request_pairing(self):
+        self.assertEqual(self.lib.run(0), 0)
+        self.assertTrue(self.lib.requested())
+
+    def test_trusted_connected_or_unavailable_device_cannot_restart_pairing(self):
+        for scenario in range(1, 8):
+            with self.subTest(scenario=scenario):
+                self.assertNotEqual(self.lib.run(scenario), 0)
+                self.assertFalse(self.lib.requested())
+
+
 class AppleTrustTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

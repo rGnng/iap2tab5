@@ -32,6 +32,7 @@ typedef struct {
     uint32_t duration_sec;
     uint16_t track_no;
     uint16_t year;
+    uint16_t disc_no;
 } player_track_t;
 
 #define PLAYER_REAL_COVER_BASE 1000
@@ -48,6 +49,7 @@ typedef struct {
     uint32_t date_added; /* AFC Unix timestamp, 0 when unknown */
     char cover[192];     /* LVGL path, e.g. A:/.../covers/000.png */
     uint16_t cover_index; /* index into the packed raw thumbnail files */
+    bool afc_synced;     /* metadata membership; independent of cached artwork */
 } player_album_t;
 
 typedef struct {
@@ -116,12 +118,42 @@ bool player_artwork_remote(uint64_t album_id, char * out, size_t out_len);
 bool player_album_get(int index, player_album_t *out);
 
 /* Album list order: 0 = added date, 1 = name, 2 = year.  Sorting is applied
- * in place; album IDs and track associations stay stable. */
+ * in place; album IDs and track associations stay stable. On hardware,
+ * albums with tracks absent from AFC metadata come first, with the selected
+ * sort applied within both groups, independently of thumbnail availability. */
 void player_sort_albums(int field, bool desc);
+/* Independent Songs view order: 0 = date added, 1 = name, 2 = year.
+ * Sort offsets rather than track records so playback IDs and memberships stay stable. */
+void player_sort_songs(int field, bool desc);
+int player_song_index(uint64_t track_pid);
 
 /* iAP2 media library update: remember when an album PID was first seen.
  * Used as the local fallback order for albums without an AFC date. */
 void player_note_iap2_album(uint64_t album_pid);
+uint64_t player_legacy_album_pid(uint32_t slot);
+/* Media item property numbers follow the iAP2 MediaItem property group. */
+typedef struct {
+    uint64_t pid, album_pid, artist_pid, album_artist_pid;
+    uint32_t fields, duration_ms;
+    uint16_t track_no, year, disc_no;
+    char title[96], album[80], artist[64], album_artist[64];
+} player_media_item_t;
+void player_library_select(const char *library_id);
+void player_library_update(const player_media_item_t *item);
+void player_library_delete(uint64_t track_pid);
+void player_library_reset(void);
+void player_library_complete(void);
+void player_library_complete_revision(const char *revision);
+bool player_library_cached_revision(const char *library_id, char *out, size_t size);
+void player_library_refresh_afc(void);
+/* Drain bounded updates on the UI thread; return true when rows changed. */
+bool player_library_poll(void);
+uint32_t player_library_revision(void);
+bool player_library_album_pid(uint64_t track_pid, uint64_t *album_pid);
+typedef struct { uint32_t albums, tracks, pending_albums, revision; } player_library_status_t;
+void player_library_status(player_library_status_t *out);
+/* A verified legacy upload supersedes the live snapshot until its reboot. */
+void player_library_discard_snapshot(void);
 
 int player_artist_count(void);
 bool player_artist_get(int index, player_artist_t *out);

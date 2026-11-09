@@ -26,10 +26,12 @@ typedef struct {
     bool clock_12h;
     uint8_t sort_field;
     bool sort_desc;
+    uint8_t song_sort_field;
+    bool song_sort_desc;
     bool menubar_left;
     bool touch_enabled;
     uint8_t np_bg_mode;
-    uint8_t brightness;        /* 1..100; a requested 0 falls back to 5 */
+    uint8_t brightness;        /* 1..100; a requested 0 falls back to Low (45) */
     bool fast_scroll_enabled; /* default true; preserves threshold when disabled */
     uint8_t fast_scroll_pages; /* activation pages per trigger window; 1..5, default 2 */
     uint16_t fast_scroll_trigger_window_ms; /* 550 (default), 800, 1200 */

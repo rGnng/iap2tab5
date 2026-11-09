@@ -699,6 +699,10 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddBoolToObject(root, "sound_enabled", g_app_config.sound_enabled);
     cJSON_AddNumberToObject(root, "sound_mode", g_app_config.sound_mode);
     cJSON_AddNumberToObject(root, "theme", g_app_config.theme);
+    cJSON_AddNumberToObject(root,"sort_field",g_app_config.sort_field);
+    cJSON_AddBoolToObject(root,"sort_desc",g_app_config.sort_desc);
+    cJSON_AddNumberToObject(root,"song_sort_field",g_app_config.song_sort_field);
+    cJSON_AddBoolToObject(root,"song_sort_desc",g_app_config.song_sort_desc);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
@@ -799,6 +803,25 @@ static esp_err_t config_post(httpd_req_t * req)
         g_app_config.theme = (uint8_t)item->valueint;
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "screen_flip");
+    const char *sort_keys[]={"sort_field","song_sort_field"};
+    for(unsigned i=0;i<2;i++)
+    {
+        const cJSON *sort=cJSON_GetObjectItemCaseSensitive(root,sort_keys[i]);
+        if(sort && (!cJSON_IsNumber(sort) || sort->valuedouble!=sort->valueint ||
+                    sort->valueint<0 || sort->valueint>2))
+        {
+            cJSON_Delete(root);
+            return httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"invalid sort field");
+        }
+    }
+    const cJSON *album_sort=cJSON_GetObjectItemCaseSensitive(root,"sort_field");
+    if(album_sort) g_app_config.sort_field=(uint8_t)album_sort->valueint;
+    const cJSON *song_sort=cJSON_GetObjectItemCaseSensitive(root,"song_sort_field");
+    if(song_sort) g_app_config.song_sort_field=(uint8_t)song_sort->valueint;
+    const cJSON *album_desc=cJSON_GetObjectItemCaseSensitive(root,"sort_desc");
+    if(cJSON_IsBool(album_desc)) g_app_config.sort_desc=cJSON_IsTrue(album_desc);
+    const cJSON *song_desc=cJSON_GetObjectItemCaseSensitive(root,"song_sort_desc");
+    if(cJSON_IsBool(song_desc)) g_app_config.song_sort_desc=cJSON_IsTrue(song_desc);
     if(cJSON_IsNumber(item)) {
         g_app_config.screen_flip = (item->valueint == 180) ? 180 : 0;
     }
@@ -1270,6 +1293,16 @@ static esp_err_t status_get(httpd_req_t * req)
         cJSON_AddBoolToObject(root, "starred", snap.starred);
         cJSON_AddBoolToObject(root, "screen_on", ui_screen_is_on());
         cJSON_AddBoolToObject(root, "library_available", ui_library_available());
+        player_library_status_t library;
+        player_library_status(&library);
+        cJSON *catalog=cJSON_AddObjectToObject(root,"catalog");
+        cJSON_AddNumberToObject(catalog,"albums",library.albums);
+        cJSON_AddNumberToObject(catalog,"tracks",library.tracks);
+        cJSON_AddNumberToObject(catalog,"afc_pending_albums",library.pending_albums);
+        cJSON_AddNumberToObject(catalog,"revision",library.revision);
+        player_album_t first_album;
+        if(player_album_get(0,&first_album))
+            cJSON_AddStringToObject(catalog,"first_album_title",first_album.title);
         bsp_display_unlock();
     }
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
@@ -1425,6 +1458,7 @@ static esp_err_t library_post(httpd_req_t * req)
     }
 
     httpd_resp_set_type(req, "text/plain");
+    player_library_discard_snapshot();
     httpd_resp_sendstr(req, "library OK, rebooting");
     vTaskDelay(pdMS_TO_TICKS(800));
     web_server_reboot();
@@ -1466,7 +1500,7 @@ static esp_err_t trust_post(httpd_req_t * req)
 {
     esp_err_t err = lockdown_client_request_pair();
     if(err != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-        "Connect a device in AFC mode and wait for any sync to finish.");
+        "Pairing unavailable: the device may already be trusted, or pairing/sync is busy. Use AFC mode with a device that needs trust.");
     return httpd_resp_sendstr(req, "Pairing started. Unlock the device and tap Trust.");
 }
 

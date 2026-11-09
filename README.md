@@ -133,6 +133,24 @@ either is unavailable. Disconnecting during browsing returns to Now Playing;
 Settings remains accessible. Reconnect the iPod to resume browsing. After
 removing and reinserting the SD card, reboot to reload the cached library.
 
+Albums and tracks received over iAP2 appear immediately, including music added
+since the last AFC sync. Albums with tracks not yet matched to AFC metadata
+appear first. The selected date, name or year order applies within each group.
+Undated albums use a saved discovery sequence; reconnecting preserves that
+order, and newly discovered tracks make their album recent.
+
+AFC Sync refreshes dates from the device database and its committed WAL changes.
+The newest track date is the album's added date. While playing, iAP2 artwork
+also supplies a 54×54 thumbnail saved under the library UUID and album PID.
+Having a thumbnail does not mark an album as AFC synced; a later AFC sync adds
+its dates and reuses the image. Known changed AFC artwork tokens refresh it.
+The old numeric thumbnail cache migrates without deleting existing images.
+
+**Settings → Sort Order** has separate **Albums: Sort By**, **Albums: Order**,
+**Songs: Sort By**, and **Songs: Order** controls. Each list offers **Date Added**,
+**Name**, or **Year**, with **Ascending** or **Descending** order. Both default
+to **Date Added / Descending**, and their independent choices are saved to SD.
+
 The D100H supports tap-to-skip and hold-to-seek on its previous/next controls.
 Its top-left Back key acts on release. The top-middle Play/Pause key acts on
 short release; holding it for two seconds turns off the screen without toggling
@@ -176,7 +194,7 @@ Screen off and wake also play a short low and high tone respectively when
 Key Feedback is enabled.
 
 
-**Settings → Screen** groups **Brightness** presets (**Low**, **Mid**, **High**)
+**Settings → Screen** groups **Brightness** presets (**Low 45%**, **Mid 55%**, **High 100%**)
 and an **Idle Timer** with **30 min**, **1 hour**, and **Off**
 (the default). Both section labels are inset and non-selectable.
 A brightness setting of zero falls back to Low to keep the screen visible.
@@ -184,6 +202,17 @@ The idle timer runs only while playback is paused or stopped; touch, keyboard,
 or keypad input restarts it. Hold the clock area for two seconds to turn off
 the screen immediately, including during playback. The first touch or key
 wakes the screen without activating a control. USB, playback and Wi-Fi keep running.
+
+The clock strip also shows 32 px notification icons with fade transitions.
+A spinning Bootstrap arrow-repeat stays visible throughout an iAP2 library
+transfer. Bluetooth connection changes briefly show
+`andrsrxn:bluetooth-connecting` or `andrsrxn:bluetooth-x`, once per change.
+The newest event takes priority; when it ends, the previous status returns
+if it is still active. For example, Bluetooth connecting during a library
+transfer briefly replaces the spinner, then the spinner returns until sync
+finishes. The time returns when no notifications remain. Turning Bluetooth
+off or deleting the last pairing cancels its notification. The two-second
+screen-off hold works while either the time or an icon is displayed.
 
 **Cover gradient** is the default Now Playing background, configurable in
 **Settings → Now Playing Background**. It uses colors from the
@@ -716,7 +745,8 @@ changes; hardware timing, USB behavior, and BLE still need a Tab5.
 The optional LVGL integration tests feed pointer input through the production
 Albums UI. They check dragging over artwork, titles, artists, and row padding
 in both directions, plus tapping to open an album, across all three themes.
-They also check the screen timer, two-second clock hold and wake-only input:
+They also check the screen timer, two-second clock hold, wake-only input,
+notification fades and rotation, and status cleanup across theme rebuilds:
 
 ```bash
 cmake -S . -B build -DIAP2TAB5_BUILD_UI_TESTS=ON
@@ -739,6 +769,7 @@ their sources. Run them from the repository root:
 | `python3 tools/gen_mock_library.py` | Rebuild the deterministic mock library, covers, and thumbnails | Pillow |
 | `python3 tools/gen_web_ui.py` | Embed `assets/web/index.html` in `firmware/main/web_index.h` | Python 3 |
 | `python3 tools/gen_plug_art.py` | Embed the no-device illustration | Pillow |
+| `python3 tools/gen_notification_icons.py` | Render the notification SVGs as 32 px alpha images | CairoSVG 2.8.2, Pillow 12.0.0 |
 | `./tools/gen_icons.sh` | Generate Bootstrap/custom SVG icon font subsets | Node/npm (`lv_font_conv`), Python `fonttools` |
 | `./tools/gen_inter_fonts.sh` | Generate proportional and tabular Inter fonts | Node/npm and Python `fonttools` |
 | `./tools/gen_boot_font.sh` | Generate the VT323 boot font | Node/npm |

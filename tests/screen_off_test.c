@@ -135,9 +135,9 @@ int main(int argc, char **argv)
           !lv_obj_is_clickable(lv_obj_get_parent(label(lv_screen_active(),"Idle Timer"))),"Inset headings must not be clickable");
     /* Initial focus is the nearest preset (Mid for an existing 70%). */
     ui_handle_key(UI_KEY_UP); ui_handle_key(UI_KEY_ENTER);
-    check(saved_brightness==5 && checked("Low") && !checked("Mid"),"Low must select and persist 5%");
+    check(saved_brightness==45 && checked("Low") && !checked("Mid"),"Low must select and persist 45%");
     ui_handle_key(UI_KEY_DOWN); ui_handle_key(UI_KEY_ENTER);
-    check(saved_brightness==45 && checked("Mid") && !checked("Low"),"Mid must select and persist 45%");
+    check(saved_brightness==55 && checked("Mid") && !checked("Low"),"Mid must select and persist 55%");
     ui_handle_key(UI_KEY_DOWN); ui_handle_key(UI_KEY_ENTER);
     check(saved_brightness==100 && checked("High"),"High must select and persist 100%");
     ui_handle_key(UI_KEY_DOWN); ui_handle_key(UI_KEY_ENTER);
@@ -147,7 +147,7 @@ int main(int argc, char **argv)
     check(saved_minutes==60,"1 hour choice must persist");
     ui_handle_key(UI_KEY_DOWN); ui_handle_key(UI_KEY_ENTER);
     check(saved_minutes==0,"Off choice must persist");
-    tap_label("Mid"); check(saved_brightness==45 && checked("Mid"),"Touch must apply the same brightness presets");
+    tap_label("Mid"); check(saved_brightness==55 && checked("Mid"),"Touch must apply the same brightness presets");
     /* A web brightness update must survive a later idle timer change. */
     cfg.brightness=17; ui_set_system_config(&cfg); pump(600);
     check(!checked("Low") && !checked("Mid") && !checked("High"),"Custom external brightness must not falsely check a preset");
@@ -156,7 +156,7 @@ int main(int argc, char **argv)
     cfg.brightness=0; ui_set_system_config(&cfg); pump(600);
     check(checked("Low"),"A zero brightness setting must bounce to Low");
     tap_label("1 hour");
-    check(saved_minutes==60 && saved_brightness==5,"Zero brightness must persist as 5%, not blank the screen");
+    check(saved_minutes==60 && saved_brightness==45,"Zero brightness must persist as Low (45%), not blank the screen");
     tap_label("Off");
     ui_select_screen(0); pump(300);
 

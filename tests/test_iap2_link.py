@@ -14,6 +14,7 @@ PRELUDE = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,6 +83,7 @@ static char s_title[128],s_artist[128],s_album[128];
 static uint64_t s_track_key;
 static char s_library_id[128],s_library_sub_id[128],s_library_revision[128];
 static bool s_library_subscribed,s_library_resynced;
+static atomic_bool s_library_syncing;
 static int s_library_items;
 static iap2_link_stats_t s_stats;
 static uint8_t stream[128*1024];

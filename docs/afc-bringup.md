@@ -63,6 +63,13 @@ record as `/spiffs/pair.plist.bak`; that backup is also used if a reboot
 interrupts replacement. Records contain private keys and must stay out of Git.
 Code-only OTA preserves SPIFFS; a full flash can overwrite it.
 
+Reconnecting the same device reuses the saved TLS certificates and host
+identifiers. A different device needs its own Trust approval and pairing
+record. The current firmware stores one active record, with the previous
+record retained as a replacement-recovery backup; it does not automatically
+select records by device ID. Pairing a different device therefore replaces
+the active record. The embedded iAP2/MFi identity is separate and is reused.
+
 ## Sync screen
 
 The square layout follows Gray, Aqua, and Windows 95. A narrow left column
@@ -70,6 +77,9 @@ shows one Device state, **Pair / Trust**, and SD usage, with **Exit** below it.
 Pairing instructions appear only when needed. The wider right area contains
 library counts and sync progress; the redundant USB/trust/file-access checklist
 has been removed.
+
+**Pair / Trust** is disabled once trust is approved or AFC is connected. It
+remains available for an attached device that still needs trust approval.
 
 - **Sync:** refreshes the database snapshot and incrementally caches missing
   album art. There is one sync action; no separate Quick/Full choice.
@@ -80,7 +90,8 @@ has been removed.
   tracks or albums.
 - Sync requires AFC access and an SD card. Pairing, repeat sync, and leaving AFC
   are disabled while an operation runs. Results stay visible when sync finishes;
-  **Exit** restarts in iAP2 mode. Failed database copies stop the job.
+  focus moves to **Exit** once at completion, and **Exit** restarts in iAP2 mode.
+  Failed database copies stop the job.
 
 ## mbedTLS patch
 
@@ -180,10 +191,68 @@ Research and implementation:
   is never published as an available original.
 - Both [P4 hardware JPEG](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32p4/api-reference/peripherals/jpeg.html)
   and TJpgDec support baseline JPEG. A marker probe identifies progressive
-  originals without three full-file decoder attempts on every sync. These
-  files remain on SD and are reported as unsupported, not counted as cached.
+  originals without three full-file decoder attempts on every sync.
+  Progressive files use the managed libjpeg-turbo software decoder, with scaled
+  scanline output sampled into RGB565. Existing originals are retried from SD.
+  AFC mode skips the optional whole-pack PSRAM preload to leave room for
+  progressive coefficient buffers. Corrupt/truncated images never become valid.
 - The thumbnail pack is preallocated with aligned bulk writes. Per-run logs
   report reused covers and aggregate read/decode/write time.
+
+### Album identity, dates and live updates
+
+The catalog is scoped to the full library UUID, with unsigned 64-bit album and
+track persistent IDs. `library.bin` remains the legacy import source;
+`catalog.bin` stores live metadata, per-track discovery batches and observation
+times, using checksummed snapshots and a recoverable backup. `catalog.rev`
+binds the saved iAP2 revision to the snapshot checksum, so subsequent boots can
+request incremental updates. iAP2 updates are
+queued to the UI thread; reset reconciles existing IDs before pruning unseen
+tracks at completion. Reconnects preserve discovery order.
+
+After copying SQL/WAL/SHM, Sync reads the database through an immutable SQLite
+VFS that verifies WAL checksums and overlays only committed frames. It writes
+`afc_index.bin` before fetching covers. Dates use the Apple-to-Unix epoch offset;
+the album date is its newest track date. A track missing from this index keeps
+its album in the first, AFC-pending group, even when a thumbnail is available.
+Within that group, Date Added uses the newest newly discovered track batch.
+The index also supplies album years and authoritative disc/track numbers;
+the previous index format loads with those optional fields unset until Sync.
+
+`thumbs.map` maps album PIDs to stable `thumbs.bin` slots, including the AFC
+artwork version. Legacy slots and their numeric original filenames remain in
+place. Album growth appends slots instead of rebuilding the pack. The artwork
+worker pins library/album identity at transfer Setup and saves a thumbnail on
+successful playback cover decoding. First AFC import binds its artwork version
+and reuses that image; subsequent known version changes trigger replacement.
+Thumbnail readers and writers share a lock and update any PSRAM preload.
+Replacements write a new slot before publishing the PID map, preserving the
+old image across an interrupted update.
+
+Progressive JPEG coefficient buffers are bounded by available PSRAM. Larger
+covers spill coefficients to temporary files on SD; the decoder removes them
+on success or error, and boot cleanup recovers space after an interrupted
+decode. The fallback also handles CMYK covers.
+
+`GET /api/status` includes `catalog` counts and `afc_pending_albums`, separately
+from thumbnail counts and AFC job progress. Arbitrary album artwork requests
+over iAP2 are not implemented: playback supplies individual covers and AFC
+supplies bulk artwork.
+
+### Catalog and cover recovery validation (2026-11-09)
+
+The connected iPod's refreshed database contained **2,109 albums / 20,829
+tracks**. The initial live iAP2 reconciliation reached the same counts and
+saved its revision. AFC recovered the formerly unsupported JPEGs and the
+recently added albums' covers: **2,103 available covers cached, zero failures**.
+Existing cache slots were retained throughout.
+
+The first iAP2 subscription from revision zero included roughly seven minutes
+of deletion history before item metadata arrived. Once its snapshot is saved,
+subsequent subscriptions use that snapshot's revision.
+The reconnect test subscribed at 15.083 s after boot and completed at 15.137 s:
+three small update messages, zero item groups, unchanged catalog counts, and
+no deletion-history replay.
 
 ### Device measurements (2026-11-08)
 

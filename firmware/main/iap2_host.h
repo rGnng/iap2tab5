@@ -27,11 +27,13 @@ void iap2_host_link_stats(iap2_link_stats_t * out);
 typedef struct {
     bool connected;
     bool identified;
+    bool library_syncing;    /* Library request/update pending its completion. */
     uint8_t play_status;      /* 0 stopped, 1 playing, 2 paused */
     char title[128];
     char artist[128];
     char album[128];
     uint64_t track_key;       /* iAP2 persistent media item ID */
+    uint64_t album_pid;
     char device_name[64];
     uint32_t elapsed_ms;
     uint32_t duration_ms;

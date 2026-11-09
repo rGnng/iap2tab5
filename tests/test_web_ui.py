@@ -134,6 +134,20 @@ class WebUITests(unittest.TestCase):
         self.page.wait_for_function('document.getElementById("charge_state").textContent==="Unavailable"')
         self.assertFalse(self.errors)
 
+    def test_afc_trust_button_disables_after_approval_and_allows_new_device(self):
+        self.status.update(iap2_mode=False, apple_trusted=True, apple_pair_busy=False)
+        self.open()
+        self.assertTrue(self.page.locator('#btn_trust').is_disabled())
+        self.status['apple_trusted'] = False
+        self.page.evaluate('refresh()')
+        self.page.wait_for_function('!document.getElementById("btn_trust").disabled')
+        self.page.locator('#btn_trust').click()
+        self.assertTrue(any(path == 'trust' for path, _ in self.writes))
+        self.status['apple_pair_busy'] = True
+        self.page.evaluate('refresh()')
+        self.page.wait_for_function('document.getElementById("btn_trust").disabled')
+        self.assertFalse(self.errors)
+
     def test_unsaved_settings_survive_polling_and_screen_off_saves(self):
         self.open()
         self.page.locator('#screen_off_minutes').select_option('60')
@@ -154,14 +168,14 @@ class WebUITests(unittest.TestCase):
         for event in ('input', 'change'):
             self.page.locator('#brightness').evaluate(
                 "(el,type) => { el.value='0'; el.dispatchEvent(new Event(type,{bubbles:true})); }", event)
-            self.assertEqual(self.page.locator('#brightness').input_value(), '5')
-            self.assertEqual(self.page.locator('#bri_v').inner_text(), '5')
+            self.assertEqual(self.page.locator('#brightness').input_value(), '45')
+            self.assertEqual(self.page.locator('#bri_v').inner_text(), '45')
         self.page.locator('#volume').evaluate(
             "el => { el.value='0'; el.dispatchEvent(new Event('input',{bubbles:true})); }")
         self.page.get_by_role('button', name='Save', exact=True).click()
         self.page.wait_for_function('!dirty.brightness && !dirty.volume')
-        self.assertEqual(json.loads(self.writes[-1][1]), {'volume': 0, 'brightness': 5})
-        self.assertEqual(self.config['brightness'], 5)
+        self.assertEqual(json.loads(self.writes[-1][1]), {'volume': 0, 'brightness': 45})
+        self.assertEqual(self.config['brightness'], 45)
 
     def test_named_controls_and_mobile_layout(self):
         self.open()

@@ -2,6 +2,7 @@
 #include "theme.h"
 
 #include "icons.h"
+#include "notification_icons.h"
 #include "fonts/inter_fonts.h"
 #include "plug_art.h"
 #include "player.h"
@@ -32,6 +33,7 @@ lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size,
 #include <time.h>
 
 #ifdef ESP_PLATFORM
+#include "thumb_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -147,6 +149,9 @@ enum {
 };
 static int g_sort_field = SORT_FIELD_ADD_DATE;
 static bool g_sort_desc = true;
+static int g_song_sort_field = SORT_FIELD_ADD_DATE;
+static bool g_song_sort_desc = true;
+static bool g_album_sort_dirty, g_song_sort_dirty;
 
 static uint8_t * jp_font_data;
 
@@ -255,6 +260,7 @@ typedef struct {
 
 static void enable_event_bubble(lv_obj_t * obj);
 static void settings_update_system_labels(void);
+static void settings_update_sort_labels(void);
 static void ui_page_teardown(void);
 static bool ui_apply_theme(void);
 static void ui_feedback_emit(ui_feedback_t type, bool from_key);
@@ -274,6 +280,8 @@ static ui_system_config_t g_system_config = {
     .sound_enabled = true,
     .sound_mode = 2,
     .volume = 65,
+    .sort_desc = 1,
+    .song_sort_desc = 1,
     .np_bg_mode = 2,
     .fast_scroll_enabled = true,
     .fast_scroll_pages = 2,
@@ -1319,6 +1327,10 @@ static void thumb_pack_load_task(void * p)
 
 void ui_set_thumb_pack_path(const char * path, int album_count)
 {
+#ifdef ESP_PLATFORM
+    /* Hardware reads the shared, mutable PID cache through its locked API. */
+    (void)path; (void)album_count; return;
+#endif
     s_thumb_pack_ready = false;
     s_thumb_pack_count = 0;
     if(s_thumb_pack_file != NULL) {
@@ -1383,6 +1395,9 @@ static char s_artwork_dir[64] = "/sdcard/covers";
 
 static bool real_thumb_read(uint16_t id, uint8_t * dst)
 {
+#ifdef ESP_PLATFORM
+    return thumb_cache_read(id, dst);
+#endif
     const size_t one = (size_t)REAL_THUMB_SIZE * REAL_THUMB_SIZE * 2;
     if(id == 0) return false;
 
@@ -1593,6 +1608,10 @@ static const void * thumb_for_album_cached(const player_album_t * album)
 
 static bool album_thumb_missing(const player_album_t * album)
 {
+#ifdef ESP_PLATFORM
+    return album->cover_index <= PLAYER_REAL_COVER_BASE ||
+           !thumb_cache_has(album->cover_index - PLAYER_REAL_COVER_BASE);
+#endif
     if(album->cover_index < PLAYER_REAL_COVER_BASE) return album->cover[0] == '\0';
     uint32_t id = album->cover_index - PLAYER_REAL_COVER_BASE;
     if(id == 0) return true;
@@ -1938,6 +1957,31 @@ static uint32_t g_mini_art_rev;
 static uint32_t g_mini_rev = 0xffffffffu;
 static uint32_t g_mini_elapsed = 0xffffffffu;
 static lv_obj_t * g_status_time;
+static lv_obj_t * g_status_icon;
+static bool g_library_syncing;
+typedef enum {
+    STATUS_CLOCK = 0,
+    STATUS_LIBRARY_SYNC,
+    STATUS_BLUETOOTH_CONNECTED,
+    STATUS_BLUETOOTH_DISCONNECTED,
+    STATUS_COUNT,
+} status_content_t;
+typedef enum { STATUS_HOLD, STATUS_FADE_OUT, STATUS_FADE_IN } status_phase_t;
+static status_content_t g_status_content, g_status_target, g_status_bluetooth_state;
+typedef struct {
+    bool active;
+    uint32_t order;
+    uint32_t started;
+} status_event_t;
+static status_event_t g_status_events[STATUS_COUNT];
+static uint32_t g_status_order;
+static status_phase_t g_status_phase;
+static uint32_t g_status_since;
+static lv_opa_t g_status_fade_from;
+static lv_timer_t * g_status_timer;
+#define STATUS_FADE_MS 180u
+#define STATUS_ICON_MS 2000u
+#define STATUS_TRANSIENT_MS (STATUS_ICON_MS + 2u * STATUS_FADE_MS)
 static bool g_clock_12h;
 static int g_clock_offset_min;
 static lv_obj_t * g_menubar;
@@ -2335,6 +2379,137 @@ static void ui_layout_page_area(void)
     if(show_mini && !g_page_loading) ui_mini_update();
 }
 
+void ui_set_library_syncing(bool syncing)
+{
+    g_library_syncing = syncing;
+}
+
+static void status_area_opacity(lv_opa_t opacity)
+{
+    if(lv_obj_get_style_opa(g_status_time, 0) == opacity) return;
+    lv_obj_set_style_opa(g_status_time, opacity, 0);
+    lv_obj_set_style_opa(g_status_icon, opacity, 0);
+}
+
+static void status_area_show(status_content_t content)
+{
+    g_status_content = content;
+    lv_obj_set_hidden(g_status_time, content != STATUS_CLOCK);
+    lv_obj_set_hidden(g_status_icon, content == STATUS_CLOCK);
+    if(content == STATUS_CLOCK) return;
+    const lv_image_dsc_t * image = &notification_arrow_repeat;
+    if(content == STATUS_BLUETOOTH_CONNECTED) image = &notification_bluetooth_connecting;
+    else if(content == STATUS_BLUETOOTH_DISCONNECTED) image = &notification_bluetooth_x;
+    lv_image_set_src(g_status_icon, image);
+    lv_image_set_rotation(g_status_icon, 0);
+    lv_obj_center(g_status_icon);
+}
+
+static void status_area_event_start(status_content_t content, uint32_t now)
+{
+    g_status_events[content] = (status_event_t){
+        .active = true, .order = ++g_status_order, .started = now,
+    };
+}
+
+static status_content_t status_area_latest(uint32_t now)
+{
+    status_content_t latest = STATUS_CLOCK;
+    for(status_content_t i = STATUS_LIBRARY_SYNC; i < STATUS_COUNT; i++) {
+        status_event_t * event = &g_status_events[i];
+        if(!event->active) continue;
+        /* Bluetooth changes are brief events; syncing remains active until
+         * the backend reports completion. Expire obscured events too, so a
+         * completed notification cannot reappear behind a newer one. */
+        if(i != STATUS_LIBRARY_SYNC && now - event->started >= STATUS_TRANSIENT_MS) {
+            event->active = false;
+            continue;
+        }
+        if(latest == STATUS_CLOCK || (int32_t)(event->order - g_status_events[latest].order) > 0) {
+            latest = i;
+        }
+    }
+    return latest;
+}
+
+static void status_area_tick(lv_timer_t * timer)
+{
+    LV_UNUSED(timer);
+    uint32_t now = lv_tick_get();
+    g_status_target = status_area_latest(now);
+    if(g_status_target != g_status_content && g_status_phase != STATUS_FADE_OUT) {
+        g_status_phase = STATUS_FADE_OUT;
+        g_status_since = now;
+        g_status_fade_from = lv_obj_get_style_opa(g_status_time, 0);
+    }
+    uint32_t elapsed = LV_MIN(now - g_status_since, STATUS_FADE_MS);
+    if(g_status_phase == STATUS_FADE_OUT) {
+        status_area_opacity(g_status_fade_from * (STATUS_FADE_MS - elapsed) / STATUS_FADE_MS);
+        if(elapsed == STATUS_FADE_MS) {
+            status_area_show(g_status_target);
+            g_status_phase = STATUS_FADE_IN;
+            g_status_since = now;
+        }
+    }
+    else if(g_status_phase == STATUS_FADE_IN) {
+        status_area_opacity(LV_OPA_COVER * elapsed / STATUS_FADE_MS);
+        if(elapsed == STATUS_FADE_MS) {
+            g_status_phase = STATUS_HOLD;
+            g_status_since = now;
+        }
+    }
+    /* Rotate only the visible 32 px image. An asleep screen needs no animation. */
+    if(g_status_content == STATUS_LIBRARY_SYNC && ui_screen_is_on()) {
+        lv_image_set_rotation(g_status_icon, (now % 1200u) * 3600u / 1200u);
+    }
+}
+
+static void status_area_update(void)
+{
+    uint32_t now = lv_tick_get();
+    if(g_library_syncing && !g_status_events[STATUS_LIBRARY_SYNC].active) {
+        status_area_event_start(STATUS_LIBRARY_SYNC, now);
+    }
+    else if(!g_library_syncing) g_status_events[STATUS_LIBRARY_SYNC].active = false;
+
+    ble_remote_state_t state;
+    ble_remote_status(&state, NULL, 0);
+    status_content_t bluetooth = STATUS_CLOCK;
+    if(ble_remote_enabled()) {
+        if(state == BLE_REMOTE_CONNECTED) bluetooth = STATUS_BLUETOOTH_CONNECTED;
+        else if(ble_remote_paired_count() > 0) bluetooth = STATUS_BLUETOOTH_DISCONNECTED;
+    }
+    if(bluetooth != g_status_bluetooth_state) {
+        g_status_bluetooth_state = bluetooth;
+        g_status_events[STATUS_BLUETOOTH_CONNECTED].active = false;
+        g_status_events[STATUS_BLUETOOTH_DISCONNECTED].active = false;
+        if(bluetooth != STATUS_CLOCK) status_area_event_start(bluetooth, now);
+    }
+    /* The most recent event wins. Once it ends, the newest remaining active
+     * status returns; only an empty set returns the strip to the clock. */
+    g_status_target = status_area_latest(now);
+    if(g_status_timer) {
+        if(g_status_target == STATUS_CLOCK && g_status_content == STATUS_CLOCK && g_status_phase == STATUS_HOLD) {
+            lv_timer_pause(g_status_timer);
+        }
+        else lv_timer_resume(g_status_timer);
+    }
+}
+
+/* Images use the same live foreground as the clock, including touch feedback
+ * and the artwork-derived Now Playing background. */
+static void status_area_update_color(void)
+{
+    lv_obj_set_style_image_recolor(g_status_icon,
+                                   lv_obj_get_style_text_color(g_status_time, 0), 0);
+}
+
+static void status_area_color_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    status_area_update_color();
+}
+
 static void build_menubar(lv_obj_t * parent)
 {
     if(g_clock_hold_timer) lv_timer_pause(g_clock_hold_timer);
@@ -2352,7 +2527,7 @@ static void build_menubar(lv_obj_t * parent)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(g_menubar, false);
 
-    /* Time sits above the menu icons, in a 72 px strip. */
+    /* Clock and notifications share the 72 px strip and its screen-off hold. */
     lv_obj_t * time_area = lv_obj_create(g_menubar);
     lv_obj_set_size(time_area, LV_PCT(100), MENUBAR_TIME_H);
     lv_obj_set_style_pad_hor(time_area, 6, 0);
@@ -2361,9 +2536,6 @@ static void build_menubar(lv_obj_t * parent)
     lv_obj_set_style_radius(time_area, 0, 0);
     lv_obj_set_style_border_width(time_area, 0, 0);
     lv_obj_set_style_pad_all(time_area, 0, 0);
-    lv_obj_set_flex_flow(time_area, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(time_area, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(time_area, false);
     lv_obj_set_clickable(time_area, true);
     lv_obj_add_event_cb(time_area, clock_touch_cb, LV_EVENT_PRESSED, NULL);
@@ -2375,6 +2547,19 @@ static void build_menubar(lv_obj_t * parent)
     lv_obj_set_clickable(g_status_time, false);
     lv_obj_set_width(g_status_time, LV_PCT(100));
     lv_obj_set_style_text_align(g_status_time, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(g_status_time);
+    g_status_icon = lv_image_create(time_area);
+    lv_obj_set_clickable(g_status_icon, false);
+    lv_obj_set_scrollable(g_status_icon, false);
+    lv_obj_set_style_image_recolor_opa(g_status_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_image_recolor(g_status_icon, lv_color_hex(COL_MENU_TOP_FG), 0);
+    lv_obj_set_hidden(g_status_icon, true);
+    lv_obj_add_event_cb(g_status_time, status_area_color_cb, LV_EVENT_STATE_CHANGED, NULL);
+    g_status_content = g_status_target = STATUS_CLOCK;
+    g_status_phase = STATUS_HOLD;
+    g_status_since = lv_tick_get();
+    if(!g_status_timer) g_status_timer = lv_timer_create(status_area_tick, 33, NULL);
+    if(g_status_timer) lv_timer_pause(g_status_timer);
     ui_touch_pressed_bind(time_area);
 
     /* Menu icons sit in the flexible middle area. */
@@ -2456,6 +2641,16 @@ bool ui_menubar_left(void)
 void ui_set_system_config(const ui_system_config_t * cfg)
 {
     if(cfg == NULL) return;
+    int album_field=cfg->sort_field>=0 && cfg->sort_field<SORT_FIELD_COUNT ? cfg->sort_field : 0;
+    int song_field=cfg->song_sort_field>=0 && cfg->song_sort_field<SORT_FIELD_COUNT ? cfg->song_sort_field : 0;
+    if(g_sort_field!=album_field || g_sort_desc!=(cfg->sort_desc!=0))
+    {
+        g_sort_field=album_field;g_sort_desc=cfg->sort_desc!=0;g_album_sort_dirty=true;
+    }
+    if(g_song_sort_field!=song_field || g_song_sort_desc!=(cfg->song_sort_desc!=0))
+    {
+        g_song_sort_field=song_field;g_song_sort_desc=cfg->song_sort_desc!=0;g_song_sort_dirty=true;
+    }
     if(cfg->screen_off_minutes != g_system_config.screen_off_minutes) {
         screen_idle_configure(&g_screen_idle, cfg->screen_off_minutes, lv_tick_get());
     }
@@ -2478,6 +2673,7 @@ void ui_set_system_config(const ui_system_config_t * cfg)
     if(cfg->wifi_ip[0] == '\0') {
         snprintf(g_system_config.wifi_ip, sizeof(g_system_config.wifi_ip), "%s", ip);
     }
+    if(g_album_sort_dirty || g_song_sort_dirty) settings_update_sort_labels();
 }
 
 void ui_set_system_config_changed_cb(void (*cb)(const ui_system_config_t * cfg))
@@ -2578,6 +2774,7 @@ static void update_clock(void)
 }
 
 static void settings_time_blink_tick(void);
+static void ui_library_tick_cb(lv_timer_t *timer);
 
 static void ui_tick_cb(lv_timer_t * timer)
 {
@@ -2590,6 +2787,7 @@ static void ui_tick_cb(lv_timer_t * timer)
 
     update_clock();
     if(g_ui_trace) perf_t1 = perf_now();
+    status_area_update();
     if(g_dev_state_dirty) {
         g_dev_state_dirty = false;
         bool blocked = ui_device_blocked();
@@ -3570,6 +3768,7 @@ static void np_gradient_visibility(bool visible)
     lv_obj_set_style_bg_opa(clock, visible ? LV_OPA_30 : LV_OPA_COVER, LV_STATE_USER_2);
     lv_obj_set_style_text_color(g_status_time,
         lv_color_hex(visible ? COL_TEXT : COL_MENU_TOP_FG), 0);
+    status_area_update_color();
     if(g_theme->id == UI_THEME_WINDOWS_95) {
         if(visible) lv_obj_remove_event_cb(clock, theme_bevel_draw);
         else lv_obj_add_event_cb(clock, theme_bevel_draw, LV_EVENT_DRAW_POST, NULL);
@@ -4271,6 +4470,7 @@ static int albums_first_for_top(int top)
 #define ALBUM_TRACK_LIST_H (ALBUM_TRACK_ROWS * ALBUM_TRACK_ROW_H)
 
 static int albums_selected;
+static bool albums_visited;
 static bool albums_detail_open;
 static lv_obj_t * albums_right_content;
 static lv_obj_t * albums_left_list;
@@ -4412,7 +4612,7 @@ static void albums_fill_row(int slot, int index)
         lv_obj_set_hidden(row, false);
         lv_obj_set_pos(row, 0, albums_row_top(index));
         lv_obj_set_user_data(row, (void *)(intptr_t)index);
-        lv_label_set_text(albums_row_titles[slot], album.title);
+        lv_label_set_text(albums_row_titles[slot], album.title[0] ? album.title : "Unknown Album");
         lv_label_set_text(albums_row_artists[slot], album.artist);
         lv_obj_set_style_bg_color(albums_row_covers[slot],
                                   lv_color_hex(album.color ? album.color : COL_PANEL), 0);
@@ -4949,7 +5149,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
     lv_obj_set_flex_align(title_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollable(title_row, false);
-    lv_obj_t * title = make_label(title_row, album.title, FONT_DETAIL_TITLE,
+    lv_obj_t * title = make_label(title_row, album.title[0] ? album.title : "Unknown Album", FONT_DETAIL_TITLE,
                                   COL_TEXT);
     lv_obj_set_width(title, 0);
     lv_obj_set_height(title, 34);
@@ -5063,6 +5263,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
 
 static void albums_create(lv_obj_t * parent)
 {
+    albums_visited=true;
     albums_shuffle_icon = NULL;
     albums_play_focus = -1;
     albums_detail_title = NULL;
@@ -5781,7 +5982,7 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
         lv_obj_t * header = make_row(album_list, ARTIST_ALBUM_HEADER_H);
         make_cover(header, thumb_for_album(&album, 34), album.color, 34);
 
-        lv_obj_t * album_title = make_label(header, album.title, FONT_H2, COL_TEXT);
+        lv_obj_t * album_title = make_label(header, album.title[0] ? album.title : "Unknown Album", FONT_H2, COL_TEXT);
         lv_obj_set_width(album_title, 0);
         lv_obj_set_flex_grow(album_title, 1);
         lv_obj_set_height(album_title, 34);
@@ -6358,6 +6559,8 @@ static bool context_menu_key(ui_key_t key)
 #define SONGS_POOL         12
 
 static int songs_selected;
+static uint64_t songs_selected_pid;
+static bool songs_visited;
 static lv_obj_t * songs_list;
 static counter_t songs_counter;
 static lv_obj_t * songs_rows[SONGS_POOL];
@@ -6605,6 +6808,8 @@ static void songs_select(int index)
     if(index < 0) index = 0;
     if(index >= count) index = count - 1;
     songs_selected = index;
+    player_track_t selected;
+    if(player_song_get(index,&selected)) songs_selected_pid=selected.id;
     songs_update_count();
     songs_scroll_to_selected();
     perf_log_us("songs_select", perf_t0);
@@ -6637,6 +6842,8 @@ static void songs_row_click_cb(lv_event_t * event)
     lv_obj_t * row = lv_event_get_current_target(event);
     int index = (int)(intptr_t)lv_obj_get_user_data(row);
     songs_selected = index;
+    player_track_t selected;
+    if(player_song_get(index,&selected)) songs_selected_pid=selected.id;
     songs_update_count();
     ui_call_async(songs_activate_async, NULL);
 }
@@ -6684,6 +6891,12 @@ static void songs_same_key(void)
 
 static void songs_create(lv_obj_t * parent)
 {
+    player_sort_songs(g_song_sort_field,g_song_sort_desc);
+    int selected=songs_visited ? player_song_index(songs_selected_pid) : 0;
+    songs_selected=selected>=0 ? selected : 0;
+    player_track_t track;
+    songs_selected_pid=player_song_get(songs_selected,&track) ? track.id : 0;
+    songs_visited=true;
     songs_counter.group = NULL;
     lv_obj_t * panel = make_panel(parent);
     lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
@@ -7474,6 +7687,7 @@ enum {
     SETTING_BOOT,
     SETTING_ABOUT,
     SETTING_DATETIME,
+    SETTING_SORT_ORDER,
     SETTING_COUNT,
 };
 
@@ -7501,7 +7715,7 @@ static lv_obj_t * settings_fast_scroll_checks[5];
 static lv_obj_t * settings_fast_hold_checks[4];
 static const int settings_fast_hold_values[] = {150,300,500,1500};
 static lv_obj_t * settings_brightness_checks[3];
-static const int settings_brightness_values[] = {5, 45, 100};
+static const int settings_brightness_values[] = {45, 55, 100};
 static const int settings_idle_minutes[] = {30, 60, 0};
 static lv_obj_t * settings_time_ampm_value;
 static lv_obj_t * settings_time_ampm_column;
@@ -7536,6 +7750,8 @@ static lv_obj_t * settings_detail_touch_value;
 static lv_obj_t * settings_detail_menubar_value;
 static lv_obj_t * settings_detail_sort_value;
 static lv_obj_t * settings_detail_order_value;
+static lv_obj_t * settings_detail_song_sort_value;
+static lv_obj_t * settings_detail_song_order_value;
 static lv_obj_t * settings_detail_np_bg_theme_check;
 static lv_obj_t * settings_detail_np_bg_mesh_check;
 static lv_obj_t * settings_detail_screen_value;
@@ -7583,6 +7799,8 @@ static void settings_clear_detail_widgets(void)
     settings_detail_menubar_value = NULL;
     settings_detail_sort_value = NULL;
     settings_detail_order_value = NULL;
+    settings_detail_song_sort_value = NULL;
+    settings_detail_song_order_value = NULL;
     settings_detail_np_bg_theme_check = NULL;
     settings_detail_np_bg_mesh_check = NULL;
     settings_detail_screen_value = NULL;
@@ -7619,6 +7837,9 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
         g_sort_field = cfg->sort_field;
     }
     g_sort_desc = cfg->sort_desc != 0;
+    g_song_sort_field=cfg->song_sort_field>=0 && cfg->song_sort_field<SORT_FIELD_COUNT ? cfg->song_sort_field : 0;
+    g_song_sort_desc=cfg->song_sort_desc!=0;
+    g_album_sort_dirty=g_song_sort_dirty=true;
     if(cfg->np_bg_mode >= NP_BG_THEME && cfg->np_bg_mode <= NP_BG_COVER_GRADIENT) {
         g_np_bg_mode = (np_bg_mode_t)cfg->np_bg_mode;
     }
@@ -7652,6 +7873,7 @@ static const char * const settings_names[SETTING_COUNT] = {
     "Boot Screen",
     "About",
     "Clock",
+    "Sort Order",
 };
 
 static int settings_initial_focus(int index)
@@ -7851,6 +8073,8 @@ static void settings_system_changed(void)
     g_system_config.clock_12h = g_clock_12h ? 1 : 0;
     g_system_config.sort_field = g_sort_field;
     g_system_config.sort_desc = g_sort_desc ? 1 : 0;
+    g_system_config.song_sort_field = g_song_sort_field;
+    g_system_config.song_sort_desc = g_song_sort_desc ? 1 : 0;
     g_system_config.menubar_left = ui_menubar_left() ? 1 : 0;
     g_system_config.touch_enabled = ui_touch_enabled() ? 1 : 0;
     g_system_config.np_bg_mode = (int)g_np_bg_mode;
@@ -7958,18 +8182,30 @@ static void settings_np_bg_action(void * user)
     settings_system_changed();
 }
 
-static const char * settings_sort_field_text(void)
+static const char * settings_sort_field_name(int field)
 {
-    switch(g_sort_field) {
+    switch(field) {
         case SORT_FIELD_NAME: return "Name";
         case SORT_FIELD_YEAR: return "Year";
-        default: return "Add date";
+        default: return "Date Added";
     }
+}
+static const char *settings_sort_field_text(void)
+{
+    return settings_sort_field_name(g_sort_field);
+}
+static const char *settings_song_sort_field_text(void)
+{
+    return settings_sort_field_name(g_song_sort_field);
+}
+static const char *settings_song_sort_order_text(void)
+{
+    return g_song_sort_desc ? "Descending" : "Ascending";
 }
 
 static const char * settings_sort_order_text(void)
 {
-    return g_sort_desc ? "Desc" : "Asc";
+    return g_sort_desc ? "Descending" : "Ascending";
 }
 
 static void settings_update_sort_labels(void)
@@ -7982,6 +8218,52 @@ static void settings_update_sort_labels(void)
         lv_label_set_text(settings_detail_order_value,
                           settings_sort_order_text());
     }
+    if(settings_detail_song_sort_value)
+        lv_label_set_text(settings_detail_song_sort_value,settings_song_sort_field_text());
+    if(settings_detail_song_order_value)
+        lv_label_set_text(settings_detail_song_order_value,settings_song_sort_order_text());
+}
+
+static void settings_sort_field_action(void * user)
+{
+    if((intptr_t)user==1)
+    {
+        g_song_sort_field=(g_song_sort_field+1)%SORT_FIELD_COUNT;
+        g_song_sort_dirty=true;
+    }
+    else
+    {
+        g_sort_field = (g_sort_field + 1) % SORT_FIELD_COUNT;
+        g_album_sort_dirty=true;
+    }
+    settings_update_sort_labels();
+    settings_system_changed();
+}
+
+static void settings_sort_order_action(void * user)
+{
+    if((intptr_t)user==1)
+    {
+        g_song_sort_desc=!g_song_sort_desc;
+        g_song_sort_dirty=true;
+    }
+    else
+    {
+        g_sort_desc = !g_sort_desc;
+        g_album_sort_dirty=true;
+    }
+    settings_update_sort_labels();
+    settings_system_changed();
+}
+
+static void settings_sort_field_touch_cb(lv_event_t * event)
+{
+    settings_sort_field_action(lv_event_get_user_data(event));
+}
+
+static void settings_sort_order_touch_cb(lv_event_t * event)
+{
+    settings_sort_order_action(lv_event_get_user_data(event));
 }
 
 static void settings_time_format_action(void * user)
@@ -9126,6 +9408,33 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             }
             break;
         }
+        case SETTING_SORT_ORDER: {
+            lv_obj_t *field = settings_make_value_row(parent, "Albums: Sort By",
+                settings_sort_field_text(), COL_ACCENT, SETTINGS_ROW_H,
+                FONT_H2, FONT_H2, &settings_detail_sort_value);
+            lv_obj_t *order = settings_make_value_row(parent, "Albums: Order",
+                settings_sort_order_text(), COL_ACCENT, SETTINGS_ROW_H,
+                FONT_H2, FONT_H2, &settings_detail_order_value);
+            lv_obj_t *song_field = settings_make_value_row(parent,"Songs: Sort By",
+                settings_song_sort_field_text(),COL_ACCENT,SETTINGS_ROW_H,
+                FONT_H2,FONT_H2,&settings_detail_song_sort_value);
+            lv_obj_t *song_order = settings_make_value_row(parent,"Songs: Order",
+                settings_song_sort_order_text(),COL_ACCENT,SETTINGS_ROW_H,
+                FONT_H2,FONT_H2,&settings_detail_song_order_value);
+            if(interactive) {
+                focus_add_clickable(field, settings_sort_field_action, NULL, NULL, true);
+                focus_add_clickable(order, settings_sort_order_action, NULL, NULL, true);
+                focus_add_clickable(song_field,settings_sort_field_action,NULL,(void*)(intptr_t)1,true);
+                focus_add_clickable(song_order,settings_sort_order_action,NULL,(void*)(intptr_t)1,true);
+            }
+            else {
+                touch_add_clickable(field, settings_sort_field_touch_cb, NULL);
+                touch_add_clickable(order, settings_sort_order_touch_cb, NULL);
+                touch_add_clickable(song_field,settings_sort_field_touch_cb,(void*)(intptr_t)1);
+                touch_add_clickable(song_order,settings_sort_order_touch_cb,(void*)(intptr_t)1);
+            }
+            break;
+        }
         case SETTING_FAST_SCROLL: {
             lv_obj_t *enabled = settings_make_value_row(parent, "Fast Scroll",
                 g_system_config.fast_scroll_enabled ? "Enabled" : "Disabled",
@@ -9592,6 +9901,7 @@ static lv_obj_t * afc_metrics[3];
 static lv_obj_t * afc_progress_title, * afc_progress_detail, * afc_progress_album;
 static lv_obj_t * afc_progress_bar, * afc_pct_label;
 static lv_obj_t * afc_buttons[4];
+static bool afc_job_finished_seen;
 
 static void afc_set_text(lv_obj_t * label, const char * text)
 {
@@ -9674,10 +9984,21 @@ static void afc_sync_update(void)
     char text[160], used[24], total[24];
     bool busy = st.job_active || st.pair_busy;
     afc_button_enabled(UI_AFC_ACTION_PAIR,
-                       st.available && st.usb_connected && !busy);
+                       st.available && st.usb_connected &&
+                       !st.connected && !st.pair_trusted && !busy);
     afc_button_enabled(UI_AFC_ACTION_SYNC,
                        st.connected && st.sd_ready && !busy);
     afc_button_enabled(UI_AFC_ACTION_IPOD_MODE, !busy);
+    if(!st.job_finished) afc_job_finished_seen = false;
+    else if(!busy && !afc_job_finished_seen) {
+        for(int i = 0; i < g_focus_count; i++) {
+            if(g_focus[i].obj == afc_buttons[UI_AFC_ACTION_IPOD_MODE]) {
+                focus_select(i);
+                break;
+            }
+        }
+        afc_job_finished_seen = true;
+    }
 
     afc_set_text(afc_connection, st.connected ? "Connected" :
                  st.pair_busy ? "Pairing..." :
@@ -9752,6 +10073,7 @@ static void afc_sync_tick_cb(lv_timer_t * timer)
 static void ui_afc_sync_build(lv_obj_t * screen)
 {
     memset(afc_buttons, 0, sizeof(afc_buttons));
+    afc_job_finished_seen = false;
     lv_obj_t * root = afc_box(screen, 0, 0, SCREEN_W, SCREEN_H, COL_BG);
     afc_text(root, "Library Sync", FONT_H1, COL_TEXT, 32, 28, 700);
     lv_obj_t * badge = afc_box(root, 1128, 36, 120, 36, COL_PANEL_ALT);
@@ -9797,8 +10119,8 @@ static void ui_afc_sync_build(lv_obj_t * screen)
              COL_MUTED, 24, 260, 816);
 
     afc_sync_button(root, "Exit", UI_AFC_ACTION_IPOD_MODE, 32, 642, 328);
-    afc_sync_update();
     focus_select(0);
+    afc_sync_update();
 }
 
 static void ui_handle_key_repeat_raw(ui_key_t key, int count)
@@ -10157,8 +10479,76 @@ static bool ui_apply_theme(void)
 /* -------------------------------------------------------------------------
  * Public entry point
  * ------------------------------------------------------------------------- */
+static void ui_library_tick_cb(lv_timer_t *timer)
+{
+    LV_UNUSED(timer);
+    player_album_t selected;
+    uint64_t selected_id = albums_visited && player_album_get(albums_selected, &selected) ? selected.id : 0;
+    uint64_t focused_track = 0;
+    focus_activate_fn activate = NULL;
+    void *focus_user = NULL;
+    int previous_album_index = albums_selected;
+    if(g_current_screen==SCR_ALBUMS) {
+        albums_save_position();
+        if(g_focus_index>=0 && g_focus_index<g_focus_count) {
+            focus_item_t *focus=&g_focus[g_focus_index];
+            activate=focus->activate; focus_user=focus->user;
+            if(activate==albums_track_action && selected_id) {
+                player_track_t track;
+                if(player_album_track_get(selected_id,(int)(intptr_t)focus_user,&track)) focused_track=track.id;
+            }
+        }
+    }
+    bool library_changed=player_library_poll();
+    bool album_order_changed=library_changed || g_album_sort_dirty;
+    bool song_order_changed=library_changed || g_song_sort_dirty;
+    if(!library_changed && !g_album_sort_dirty && !g_song_sort_dirty) return;
+    g_album_sort_dirty=g_song_sort_dirty=false;
+    if(album_order_changed) player_sort_albums(g_sort_field, g_sort_desc);
+    if(selected_id && album_order_changed) {
+        for(int i=0;i<player_album_count();i++) {
+            player_album_t album;
+            if(player_album_get(i,&album) && album.id==selected_id) { albums_selected=i;break; }
+        }
+    }
+    if(song_order_changed && g_current_screen==SCR_SONGS)
+    {
+        player_sort_songs(g_song_sort_field,g_song_sort_desc);
+        int selected=player_song_index(songs_selected_pid);
+        songs_selected=selected>=0 ? selected : 0;
+        player_track_t song;
+        songs_selected_pid=player_song_get(songs_selected,&song) ? song.id : 0;
+    }
+    if(albums_visited && previous_album_index>=0)
+    {
+        albums_left_scroll_y+=(albums_selected-previous_album_index)*ALBUMS_STRIDE;
+        if(albums_left_scroll_y<0) albums_left_scroll_y=0;
+    }
+    for(unsigned i=0;i<COVER_CACHE_SLOTS;i++) {
+        if(cover_cache[i].id) lv_image_cache_drop(&cover_cache[i].dsc);
+        cover_cache[i].id=0;
+    }
+    mini_thumb_slot.id=detail_thumb_slot.id=0;
+    bool rebuild=library_changed ||
+        (g_current_screen==SCR_ALBUMS && album_order_changed) ||
+        (g_current_screen==SCR_SONGS && song_order_changed);
+    if(rebuild && !g_afc_sync_mode && !g_page_loading && ui_screen_needs_devices(g_current_screen)) {
+        ui_rebuild_page();
+        if(g_current_screen==SCR_ALBUMS && activate) for(int i=0;i<g_focus_count;i++) {
+            if(g_focus[i].activate!=activate) continue;
+            if(focused_track && activate==albums_track_action) {
+                player_track_t track;
+                if(!player_album_track_get(selected_id,(int)(intptr_t)g_focus[i].user,&track) || track.id!=focused_track) continue;
+            } else if(g_focus[i].user!=focus_user) continue;
+            focus_select(i);break;
+        }
+    }
+}
+
 void ui_init(void)
 {
+    albums_visited=false;
+    songs_visited=false;songs_selected_pid=0;
     player_init();
     player_sort_albums(g_sort_field, g_sort_desc);
     g_device_available = player_device_available();
@@ -10190,6 +10580,7 @@ void ui_init(void)
     lv_obj_set_scrollable(g_screen_mask, false);
     lv_obj_set_hidden(g_screen_mask, true);
     lv_timer_create(screen_idle_tick, 1000, NULL);
+    lv_timer_create(ui_library_tick_cb, 32, NULL);
 
     if(g_afc_sync_mode) {
         ui_afc_sync_build(screen);

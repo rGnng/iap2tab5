@@ -15,6 +15,8 @@
 #include "app_config.h"
 #include "player.h"
 #include "thumb_cache.h"
+#include "jpeg_thumbnail.h"
+#include "media_index.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "driver/jpeg_decode.h"
@@ -145,18 +147,32 @@ static void cache_slow_log_add(uint64_t id, const char * album,
     fclose(f);
 }
 
+static media_index_t s_afc_index;
+static const media_index_album_t *afc_album_slot(uint64_t slot)
+{
+    return media_index_album(&s_afc_index,thumb_cache_pid((uint32_t)slot));
+}
+static bool afc_artwork_remote(uint64_t slot,char *out,size_t size)
+{
+    const media_index_album_t *a=afc_album_slot(slot);
+    if(!a || !a->remote[0]) return false;
+    snprintf(out,size,"%s",a->remote);return true;
+}
+static esp_err_t afc_write_thumb(uint32_t slot,const uint8_t *data)
+{
+    const media_index_album_t *a=afc_album_slot(slot);
+    esp_err_t result=a && thumb_cache_has(slot)
+        ? thumb_cache_replace(a->pid,a->artwork_version,data)
+        : thumb_cache_write(slot,data);
+    if(result==ESP_OK && a && thumb_cache_pid(slot)==a->pid) thumb_cache_version(slot,a->artwork_version);
+    return result;
+}
 static void artwork_set_current(uint64_t id)
 {
     s_art_current = id;
-    player_album_t album;
-    if(player_album_get((int)id - 1, &album)) {
-        snprintf(s_art_album, sizeof(s_art_album), "%s", album.title);
-        snprintf(s_art_artist, sizeof(s_art_artist), "%s", album.artist);
-    }
-    else {
-        s_art_album[0] = '\0';
-        s_art_artist[0] = '\0';
-    }
+    const media_index_album_t *album=afc_album_slot(id);
+    snprintf(s_art_album,sizeof(s_art_album),"%s",album?album->title:"");
+    snprintf(s_art_artist,sizeof(s_art_artist),"%s",album?album->artist:"");
 }
 
 static SemaphoreHandle_t s_pair_lock;
@@ -185,10 +201,14 @@ void lockdown_client_pair_status(lockdown_pair_status_t * out)
 
 esp_err_t lockdown_client_request_pair(void)
 {
-    if(!s_pair_lock || !usbmux_host_is_ready() || app_config_iap2_mode() || s_art_active)
+    if(!s_pair_lock || !usbmux_host_is_ready() || app_config_iap2_mode() ||
+       s_art_active || afc_client_is_ready())
         return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_pair_lock, portMAX_DELAY);
-    if(s_pair_status.busy) { xSemaphoreGive(s_pair_lock); return ESP_ERR_INVALID_STATE; }
+    if(s_pair_status.busy || s_pair_status.trusted) {
+        xSemaphoreGive(s_pair_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     s_pair_status.busy = true;
     snprintf(s_pair_status.message, sizeof(s_pair_status.message), "Preparing trust...");
     s_pair_requested = true;
@@ -1784,11 +1804,7 @@ static bool make_art_cache(const char * src, const char * thumb_dst,
     const char * ext = strrchr(src, '.');
     bool is_jpeg = ext != NULL && (strcasecmp(ext, ".jpg") == 0 ||
                                    strcasecmp(ext, ".jpeg") == 0);
-    if(is_jpeg && jpeg_file_is_progressive(src)) {
-        art_set_info(0, 0, "progressive-jpeg");
-        ESP_LOGW(TAG, "art %s: progressive JPEG unsupported", src);
-        return false;
-    }
+    bool progressive = is_jpeg && jpeg_file_is_progressive(src);
 
     const size_t thumb_size = (size_t)ART_THUMB_SIZE * ART_THUMB_SIZE * 2;
     const size_t cover_size = (size_t)ART_COVER_SIZE * ART_COVER_SIZE * 2;
@@ -1813,7 +1829,13 @@ static bool make_art_cache(const char * src, const char * thumb_dst,
 
     bool decoded = false;
     int target = cover_dst != NULL ? ART_COVER_SIZE : ART_THUMB_SIZE;
-    if(is_jpeg) {
+    if(progressive) {
+        decoded = jpeg_thumbnail_decode(src, s_art_buf, ART_THUMB_SIZE);
+        if(decoded && cover_dst != NULL)
+            decoded = jpeg_thumbnail_decode(src, s_cover_buf, ART_COVER_SIZE);
+        art_set_info(0, 0, "software-jpeg");
+    }
+    else if(is_jpeg) {
         if(cover_dst == NULL) {
             /* Thumbnail-only AFC sync: decode just enough pixels for the
              * 54x54 list thumbnail (usually 1/8 scale) instead of asking the
@@ -1830,6 +1852,14 @@ static bool make_art_cache(const char * src, const char * thumb_dst,
                                                target);
             }
         }
+    }
+    if(!decoded && is_jpeg && !progressive) {
+        /* Some valid baseline sampling layouts are unsupported by both fast
+         * decoders. Use the same bounded software path before LVGL retries. */
+        decoded = jpeg_thumbnail_decode(src, s_art_buf, ART_THUMB_SIZE);
+        if(decoded && cover_dst != NULL)
+            decoded = jpeg_thumbnail_decode(src, s_cover_buf, ART_COVER_SIZE);
+        if(decoded) art_set_info(0, 0, "software-jpeg");
     }
     if(!decoded) {
         decoded = art_decode_sampled(lv_src, s_art_buf,
@@ -1892,7 +1922,8 @@ static bool artwork_cache_ready(uint64_t id)
 {
     /* AFC owns only the packed 54x54 list/artist thumbnail. The 360x360 Now
      * Playing cover comes through the iAP2 artwork channel. */
-    return thumb_cache_has((uint32_t)id);
+    const media_index_album_t *a=afc_album_slot(id);
+    return thumb_cache_matches((uint32_t)id,a?a->artwork_version:0);
 }
 
 static const char * artwork_ext_mem(const uint8_t * data, size_t len)
@@ -1972,7 +2003,7 @@ static bool artwork_stream_one(uint64_t id)
     if(thumb_cache_original(id)) return true;
 
     char remote[160];
-    if(!player_artwork_remote(id, remote, sizeof(remote))) return false;
+    if(!afc_artwork_remote(id, remote, sizeof(remote))) return false;
 
     uint8_t * data = NULL;
     size_t len = 0;
@@ -2009,7 +2040,7 @@ static bool artwork_stream_one(uint64_t id)
                 (int)(((uint64_t)esp_timer_get_time() - t0) / 1000);
             if(decoded) {
                 t0 = (uint64_t)esp_timer_get_time();
-                ok = thumb_cache_write((uint32_t)id, s_art_buf) == ESP_OK;
+                ok = afc_write_thumb((uint32_t)id, s_art_buf) == ESP_OK;
                 s_last_write_ms =
                     (int)(((uint64_t)esp_timer_get_time() - t0) / 1000);
             }
@@ -2073,7 +2104,7 @@ static bool artwork_convert_one(uint64_t id)
         ESP_LOGW(TAG, "artwork %llu: cache failed", (unsigned long long)id);
         return false;
     }
-    if(thumb_cache_write((uint32_t)id, s_art_buf) != ESP_OK) {
+    if(afc_write_thumb((uint32_t)id, s_art_buf) != ESP_OK) {
         ESP_LOGW(TAG, "artwork %llu: pack write failed", (unsigned long long)id);
         return false;
     }
@@ -2096,13 +2127,8 @@ esp_err_t lockdown_client_sync_artwork(void)
     mkdir(artwork_dir(), 0777);
     cache_slow_log_begin(true);
 
-    int total = player_album_count();
+    int total = 0;
     int planned = 0;
-    for(uint64_t id = 1; id <= (uint64_t)total; id++) {
-        char remote[160];
-        if(!player_artwork_remote(id, remote, sizeof(remote))) continue;
-        planned++;
-    }
 
     uint64_t sd_total = 0, sd_free = 0;
     esp_vfs_fat_info("/sdcard", &sd_total, &sd_free);
@@ -2139,6 +2165,33 @@ esp_err_t lockdown_client_sync_artwork(void)
         set_status("AFC ready");
     }
 
+    char import_error[160],index_path[192];
+    if(!media_index_import(&s_afc_index,"/sdcard/AFC/MLDB.SQL","/sdcard/AFC/MLDB.WAL",
+                           app_config_library_id(),import_error,sizeof(import_error))) {
+        ESP_LOGE(TAG,"AFC metadata import failed: %s",import_error);
+        s_art_active=false;s_art_failed=1;set_status("%s",import_error);return ESP_FAIL;
+    }
+    snprintf(index_path,sizeof(index_path),"%s/afc_index.bin",app_config_library_dir());
+    if(!media_index_save(&s_afc_index,index_path)) {
+        s_art_active=false;s_art_failed=1;set_status("AFC metadata save failed");return ESP_FAIL;
+    }
+    player_library_refresh_afc();total=s_afc_index.album_count;
+    ESP_LOGI(TAG,"AFC index refreshed: %u albums, %u tracks",(unsigned)s_afc_index.album_count,(unsigned)s_afc_index.track_count);
+    free(s_afc_index.tracks);s_afc_index.tracks=NULL;s_afc_index.track_count=0;
+    for(uint32_t i=0;i<s_afc_index.album_count;i++) {
+        const media_index_album_t *a=&s_afc_index.albums[i];
+        if(!a->remote[0]) continue;
+        uint32_t slot=thumb_cache_slot(a->pid,true);
+        if(!slot) { s_art_active=false;set_status("Thumbnail index is full");return ESP_FAIL; }
+        planned++;
+        if(thumb_cache_has(slot) && !thumb_cache_matches(slot,a->artwork_version)) {
+            static const char *extensions[]={"jpg","jpeg","png","wbp","webp","gif"};
+            for(unsigned e=0;e<sizeof(extensions)/sizeof(extensions[0]);e++) {
+                char old[192];snprintf(old,sizeof(old),"%s/%u.%s",artwork_dir(),(unsigned)slot,extensions[e]);remove(old);
+            }
+        }
+    }
+
     /* Read/decode/write missing covers in one pass; reuse existing slots. */
     s_art_phase = 2;
     s_art_total = planned;
@@ -2155,9 +2208,10 @@ esp_err_t lockdown_client_sync_artwork(void)
 
     uint64_t read_ms = 0, decode_ms = 0, write_ms = 0, read_bytes = 0;
     int reused = 0;
-    for(uint64_t id = 1; id <= (uint64_t)total; id++) {
+    for(uint32_t i = 0; i < s_afc_index.album_count; i++) {
+        uint64_t id = thumb_cache_slot(s_afc_index.albums[i].pid,false);
         char remote[160];
-        if(!player_artwork_remote(id, remote, sizeof(remote))) continue;
+        if(!afc_artwork_remote(id, remote, sizeof(remote))) continue;
 
         artwork_set_current(id);
         attempted++;
@@ -2199,9 +2253,10 @@ esp_err_t lockdown_client_sync_artwork(void)
     s_art_attempted = 0;
     s_art_copied = 0;
     s_art_failed = 0;
-    for(uint64_t id = 1; id <= (uint64_t)total; id++) {
+    for(uint32_t i = 0; i < s_afc_index.album_count; i++) {
+        uint64_t id = thumb_cache_slot(s_afc_index.albums[i].pid,false);
         char remote[160];
-        if(!player_artwork_remote(id, remote, sizeof(remote))) continue;
+        if(!afc_artwork_remote(id, remote, sizeof(remote))) continue;
 
         artwork_set_current(id);
         attempted++;
@@ -2233,11 +2288,12 @@ esp_err_t lockdown_client_sync_artwork(void)
     }
 
     thumb_cache_sync();
+    player_library_refresh_afc();
     s_art_active = false;
     ESP_LOGI(TAG, "artwork sync done: %d cached, %d failed (attempted %d)",
              copied, failed, attempted);
     set_status("artwork %d cached, %d failed", copied, failed);
-    return copied > 0 ? ESP_OK : ESP_FAIL;
+    return copied > 0 || planned == 0 ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t lockdown_client_sync_artwork_id(int album_id)
@@ -2255,13 +2311,22 @@ esp_err_t lockdown_client_sync_artwork_id(int album_id)
     }
     mkdir(artwork_dir(), 0777);
 
+    if(!s_afc_index.library_id[0]) {
+        char path[192];snprintf(path,sizeof(path),"%s/afc_index.bin",app_config_library_dir());
+        if(!media_index_load(&s_afc_index,path,app_config_library_id())) return ESP_ERR_NOT_FOUND;
+        free(s_afc_index.tracks);s_afc_index.tracks=NULL;s_afc_index.track_count=0;
+    }
+    player_album_t album;
+    if(!player_album_get(album_id-1,&album)) return ESP_ERR_NOT_FOUND;
+    uint32_t slot=thumb_cache_slot(album.album_pid,true);
+    if(!slot) return ESP_ERR_NO_MEM;
     ESP_LOGI(TAG, "artwork sync id=%d", album_id);
-    artwork_set_current((uint64_t)album_id);
+    artwork_set_current(slot);
     thumb_cache_scan(artwork_dir(), (uint32_t)player_album_count());
     uint64_t t0 = (uint64_t)esp_timer_get_time();
-    bool ok = artwork_stream_one((uint64_t)album_id);
-    if(ok && !artwork_cache_ready((uint64_t)album_id)) {
-        ok = artwork_convert_one((uint64_t)album_id);
+    bool ok = artwork_stream_one(slot);
+    if(ok && !artwork_cache_ready(slot)) {
+        ok = artwork_convert_one(slot);
     }
     uint64_t elapsed_ms = ((uint64_t)esp_timer_get_time() - t0) / 1000;
     if(!ok || elapsed_ms >= SLOW_ALBUM_MS) {

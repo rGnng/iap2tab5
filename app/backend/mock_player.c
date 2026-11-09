@@ -1,4 +1,7 @@
 #include "player.h"
+#include "media_index.h"
+#include "store_util.h"
+#include <time.h>
 
 #include "cJSON.h"
 
@@ -7,10 +10,14 @@
 #include "afc_client.h"
 #include "app_config.h"
 #include "star_store.h"
+#include "thumb_cache.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "iap2_host.h"
 static const char * TAG = "player";
 #endif
@@ -42,6 +49,12 @@ static const char * TAG = "player";
 
 static MOCK_LARGE_BSS player_track_t tracks[MAX_TRACKS];
 static int track_count;
+static MOCK_LARGE_BSS uint16_t song_order[MAX_TRACKS];
+static MOCK_LARGE_BSS uint32_t song_sort_dates[MAX_TRACKS];
+static MOCK_LARGE_BSS uint16_t song_sort_years[MAX_TRACKS];
+static bool song_order_ready;
+static int song_order_count, song_sort_field;
+static bool song_sort_desc = true;
 
 static MOCK_LARGE_BSS player_album_t albums[MAX_ALBUMS];
 static int album_count;
@@ -79,6 +92,10 @@ static player_change_cb_t change_callback;
 static bool real_library;
 static MOCK_LARGE_BSS char artwork_remote[MAX_ALBUMS][128];
 static int artwork_count;
+static MOCK_LARGE_BSS uint64_t legacy_album_pids[MAX_ALBUMS];
+uint64_t player_legacy_album_pid(uint32_t slot) {
+    return slot && slot<=MAX_ALBUMS ? legacy_album_pids[slot-1] : 0;
+}
 
 /* iAP2 album first-seen order.  The AFC date is authoritative when present;
  * this map only provides the local fallback for albums missing that date. */
@@ -98,7 +115,9 @@ static int64_t album_seen_dirty_since_us;
 
 static int album_sort_field;
 static bool album_sort_desc = true;
-
+static bool live_album_ready;
+static void live_take(void);
+static void live_give(void);
 #if defined(ESP_PLATFORM)
 static SemaphoreHandle_t album_seen_lock;
 
@@ -160,7 +179,10 @@ static bool album_seen_insert_unlocked(uint64_t pid, uint32_t seq)
     uint32_t slot = album_seen_hash(pid);
     for(uint32_t i = 0; i < ALBUM_SEEN_SLOTS; i++) {
         album_seen_t * entry = &album_seen[slot];
-        if(entry->pid == pid) return false;
+        if(entry->pid == pid) {
+            if(seq <= entry->seq) return false;
+            entry->seq = seq; return true;
+        }
         if(entry->pid == 0) {
             entry->pid = pid;
             entry->seq = seq;
@@ -171,15 +193,23 @@ static bool album_seen_insert_unlocked(uint64_t pid, uint32_t seq)
     return false;
 }
 
+static bool album_artwork_pending(const player_album_t *album)
+{
+    return real_library && !album->afc_synced;
+}
+
 static int album_compare(const void * va, const void * vb)
 {
     const player_album_t * a = va;
     const player_album_t * b = vb;
     int cmp = 0;
+    bool a_pending = album_artwork_pending(a);
+    bool b_pending = album_artwork_pending(b);
+    if(a_pending != b_pending) return a_pending ? -1 : 1;
 
     if(album_sort_field == 0) {
-        uint32_t ad = a->date_added;
-        uint32_t bd = b->date_added;
+        uint32_t ad = a_pending ? 0 : a->date_added;
+        uint32_t bd = b_pending ? 0 : b->date_added;
         if(ad == 0 || bd == 0) {
             if(ad == 0 && bd == 0) {
                 uint32_t as = album_seen_seq_unlocked(a->album_pid);
@@ -219,12 +249,15 @@ static int album_compare(const void * va, const void * vb)
 
 void player_sort_albums(int field, bool desc)
 {
-    if(album_count <= 1) return;
+    live_take();
+    if(album_count <= 1) { live_give(); return; }
     album_seen_lock_take();
     album_sort_field = field;
     album_sort_desc = desc;
+    live_album_ready = false;
     qsort(albums, (size_t)album_count, sizeof(albums[0]), album_compare);
     album_seen_lock_give();
+    live_give();
 }
 
 void player_note_iap2_album(uint64_t album_pid)
@@ -295,7 +328,7 @@ static void album_seen_load(void)
         if(rec.seq > max_seq) max_seq = rec.seq;
     }
     fclose(f);
-    album_seen_next_seq = max_seq + 1;
+    if(album_seen_next_seq <= max_seq) album_seen_next_seq = max_seq + 1;
     album_seen_batch_seq = 0;
     album_seen_dirty = false;
     ESP_LOGI(TAG, "album seen order loaded (%u entries)",
@@ -386,6 +419,7 @@ static uint64_t iap2_track_id(const iap2_state_t * state)
 
 static uint64_t iap2_album_id(const iap2_state_t * state)
 {
+    if(state->album_pid) return state->album_pid;
     if(state->album[0] == '\0') return 0;
 
     uint64_t title_match = 0;
@@ -430,10 +464,12 @@ static void iap2_snapshot(player_snapshot_t * out, const iap2_state_t * state)
     static char star_title[128];
     static char star_album[96];
     static int star_idx = -1;
-    if(state->track_key != star_key ||
+    static uint32_t star_catalog_revision;
+    if(star_catalog_revision != player_library_revision() || state->track_key != star_key ||
        strcmp(star_title, state->title) != 0 ||
        strcmp(star_album, state->album) != 0) {
         star_key = state->track_key;
+        star_catalog_revision = player_library_revision();
         snprintf(star_title, sizeof(star_title), "%s", state->title);
         snprintf(star_album, sizeof(star_album), "%s", state->album);
         star_idx = state->track_key != 0
@@ -489,6 +525,7 @@ static uint32_t track_id_hash(uint64_t id)
 
 static void track_id_index_build(void)
 {
+    song_order_ready = false;
     memset(track_id_slots, 0, sizeof(track_id_slots));
     for(int i = 0; i < track_count; i++) {
         uint32_t slot = track_id_hash(tracks[i].id);
@@ -566,6 +603,12 @@ static int membership_compare(const void * a, const void * b, bool by_artist)
     uint16_t ia = *(const uint16_t *)a, ib = *(const uint16_t *)b;
     uint64_t pa = membership_id(ia, by_artist), pb = membership_id(ib, by_artist);
     if(pa != pb) return pa < pb ? -1 : 1;
+    if(!by_artist && real_library && tracks[ia].disc_no && tracks[ib].disc_no) {
+        if(tracks[ia].disc_no!=tracks[ib].disc_no)
+            return tracks[ia].disc_no<tracks[ib].disc_no?-1:1;
+        if(tracks[ia].track_no!=tracks[ib].track_no)
+            return tracks[ia].track_no<tracks[ib].track_no?-1:1;
+    }
     return (ia > ib) - (ia < ib);
 }
 
@@ -647,6 +690,14 @@ static int device_queue_count;
 
 static int ids_album_from(uint64_t album_id, int from, uint64_t * out, int max)
 {
+    if(membership_index_ready) {
+        int first=membership_bound(album_track_order,album_id,false,false);
+        int last=membership_bound(album_track_order,album_id,false,true);
+        int n=0;
+        for(int i=first+from;i>=first && i<last && n<max;i++)
+            out[n++]=tracks[album_track_order[i]].id;
+        return n;
+    }
     int n = 0;
     int seen = 0;
     for(int i = 0; i < track_count && n < max; i++) {
@@ -947,6 +998,8 @@ static bool load_library_bin(const char * path)
         a->color = w.color;
         a->cover_index = (uint16_t)w.cover_index;
         a->date_added = w.date_added;
+        a->afc_synced = true;
+        if(w.id && w.id<=MAX_ALBUMS) legacy_album_pids[w.id-1]=w.album_pid;
         copy_str(a->title, sizeof(a->title), w.title);
         copy_str(a->artist, sizeof(a->artist), w.artist);
     }
@@ -1188,6 +1241,8 @@ static void load_library(void)
 #endif
 }
 
+#include "live_catalog.inc"
+
 void player_init(void)
 {
     track_id_index_ready = false;
@@ -1222,7 +1277,9 @@ void player_init(void)
     album_seen_dirty = false;
     album_seen_dirty_since_us = 0;
 
+    memset(legacy_album_pids,0,sizeof(legacy_album_pids));
     load_library();
+    live_init();
 #if defined(ESP_PLATFORM)
     int64_t index_start = esp_timer_get_time();
 #endif
@@ -1266,7 +1323,8 @@ void player_tick(void)
     /* iAP2 pushes state from the host task; AFC has no playback at all.
      * The UI tick is still a good place to flush the compact iAP2 album
      * seen-order sidecar without blocking the USB task. */
-    album_seen_save(false);
+    /* The live snapshot persists discovery and last_seen with the catalog. */
+    (void)album_seen_save;
     return;
 #else
     if(status != PLAYER_PLAYING || queue_count <= 0) return;
@@ -1392,8 +1450,12 @@ bool player_artwork_remote(uint64_t album_id, char * out, size_t out_len)
 #if defined(ESP_PLATFORM)
     if(!player_device_available()) return false;
 #endif
-    if(album_id < 1 || album_id > (uint64_t)album_count) return false;
-    const char * remote = artwork_remote[album_id - 1];
+    const media_index_album_t *indexed = media_index_album(&live_afc,album_id);
+    if(indexed && indexed->remote[0]) { copy_str(out,out_len,indexed->remote);return true; }
+    uint32_t legacy_slot = 0;
+    for(uint32_t i=0;i<MAX_ALBUMS;i++) if(legacy_album_pids[i]==album_id) { legacy_slot=i+1;break; }
+    if(!legacy_slot) return false;
+    const char * remote = artwork_remote[legacy_slot - 1];
     if(remote[0] == '\0') return false;
     copy_str(out, out_len, remote);
     return true;
@@ -1451,7 +1513,7 @@ bool player_song_get(int index, player_track_t * out)
     if(!player_device_available()) return false;
 #endif
     if(index < 0 || index >= track_count || out == NULL) return false;
-    *out = tracks[index];
+    *out = tracks[song_order_ready && song_order_count==track_count ? song_order[index] : index];
     return true;
 }
 
@@ -1960,11 +2022,12 @@ void player_play_song(uint64_t track_id)
     }
     return;
 #endif
-    int pos = track_index_by_id(track_id);
+    int pos = player_song_index(track_id);
     if(pos < 0) return;
     int n = track_count < PLAY_IDS_MAX ? track_count : PLAY_IDS_MAX;
     for(int k = 0; k < n; k++) {
-        play_ids[k] = tracks[(pos + k) % track_count].id;
+        int index = (pos + k) % track_count;
+        play_ids[k] = tracks[song_order_ready ? song_order[index] : index].id;
     }
     play_ids_start(n, false);
 }

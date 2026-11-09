@@ -28,6 +28,7 @@
 #include "lockdown_client.h"
 #include "afc_client.h"
 #include "thumb_cache.h"
+#include "jpeg_thumbnail.h"
 #include "usb_host_core.h"
 #include "iap2_host.h"
 #include "web_server.h"
@@ -447,6 +448,8 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.clock_12h = cfg->clock_12h != 0;
     g_app_config.sort_field = (uint8_t)cfg->sort_field;
     g_app_config.sort_desc = cfg->sort_desc != 0;
+    g_app_config.song_sort_field = (uint8_t)cfg->song_sort_field;
+    g_app_config.song_sort_desc = cfg->song_sort_desc != 0;
     g_app_config.menubar_left = cfg->menubar_left != 0;
     g_app_config.touch_enabled = cfg->touch_enabled != 0;
     g_app_config.np_bg_mode = (uint8_t)cfg->np_bg_mode;
@@ -505,6 +508,8 @@ static void fill_ui_config(ui_system_config_t * cfg)
     cfg->clock_12h = g_app_config.clock_12h ? 1 : 0;
     cfg->sort_field = g_app_config.sort_field;
     cfg->sort_desc = g_app_config.sort_desc ? 1 : 0;
+    cfg->song_sort_field = g_app_config.song_sort_field;
+    cfg->song_sort_desc = g_app_config.song_sort_desc ? 1 : 0;
     cfg->menubar_left = g_app_config.menubar_left ? 1 : 0;
     cfg->touch_enabled = g_app_config.touch_enabled ? 1 : 0;
     cfg->np_bg_mode = g_app_config.np_bg_mode;
@@ -772,12 +777,14 @@ void app_main(void)
     /* Fail closed from the first frame, before USB identification finishes. */
     ui_set_device_state(g_app_config.iap2_mode, false, app_config_sd_ready());
     ui_init();
-    if(player_library_album_count() > 0) {
+    if(app_config_sd_ready()) {
+        jpeg_thumbnail_cleanup();
         thumb_cache_open((uint32_t)player_library_album_count());
         char pack[160];
         snprintf(pack, sizeof(pack), "%s/thumbs.bin",
                  app_config_library_dir());
         ui_set_thumb_pack_path(pack, player_library_album_count());
+        if(g_app_config.iap2_mode) thumb_cache_preload();
     }
     lv_indev_t * touch = bsp_display_get_input_dev();
     if(touch != NULL) ui_attach_touch(touch);
@@ -850,13 +857,19 @@ void app_main(void)
         app_config_sd_poll();
         {
             bool present = false;
+            bool library_syncing = false;
+            bool library_state_valid = !g_app_config.iap2_mode;
             iap2_state_t state;
             if(g_app_config.iap2_mode && iap2_host_get_state(&state)) {
                 present = state.identified;
+                library_syncing = state.library_syncing;
+                library_state_valid = true;
             }
             if(bsp_display_lock(1000)) {
                 ui_set_device_state(g_app_config.iap2_mode != 0, present,
                                     app_config_sd_ready());
+                /* A busy snapshot lock does not mean an active sync ended. */
+                if(library_state_valid) ui_set_library_syncing(library_syncing);
                 bsp_display_unlock();
             }
         }

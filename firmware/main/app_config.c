@@ -50,6 +50,8 @@ app_config_t g_app_config = {
     .clock_12h = false,
     .sort_field = 0,
     .sort_desc = true,
+    .song_sort_field = 0,
+    .song_sort_desc = true,
     .menubar_left = true,
     .touch_enabled = true,
     .np_bg_mode = 2,
@@ -476,6 +478,8 @@ static void set_defaults(void)
     g_app_config.clock_12h = false;
     g_app_config.sort_field = 0;
     g_app_config.sort_desc = true;
+    g_app_config.song_sort_field = 0;
+    g_app_config.song_sort_desc = true;
     g_app_config.menubar_left = true;
     g_app_config.touch_enabled = true;
     g_app_config.np_bg_mode = 2;
@@ -549,6 +553,11 @@ static void load_from_json(const char * text)
     if(cJSON_IsNumber(item)) g_app_config.sort_field = (uint8_t)item->valueint;
     item = cJSON_GetObjectItemCaseSensitive(root, "sort_desc");
     if(cJSON_IsBool(item)) g_app_config.sort_desc = cJSON_IsTrue(item);
+    item = cJSON_GetObjectItemCaseSensitive(root, "song_sort_field");
+    if(cJSON_IsNumber(item) && item->valueint>=0 && item->valueint<=2)
+        g_app_config.song_sort_field = (uint8_t)item->valueint;
+    item = cJSON_GetObjectItemCaseSensitive(root, "song_sort_desc");
+    if(cJSON_IsBool(item)) g_app_config.song_sort_desc = cJSON_IsTrue(item);
     item = cJSON_GetObjectItemCaseSensitive(root, "menubar_left");
     if(cJSON_IsBool(item)) g_app_config.menubar_left = cJSON_IsTrue(item);
     item = cJSON_GetObjectItemCaseSensitive(root, "touch_enabled");
@@ -683,6 +692,8 @@ esp_err_t app_config_save(void)
     cJSON_AddBoolToObject(root, "clock_12h", g_app_config.clock_12h);
     cJSON_AddNumberToObject(root, "sort_field", g_app_config.sort_field);
     cJSON_AddBoolToObject(root, "sort_desc", g_app_config.sort_desc);
+    cJSON_AddNumberToObject(root, "song_sort_field", g_app_config.song_sort_field);
+    cJSON_AddBoolToObject(root, "song_sort_desc", g_app_config.song_sort_desc);
     cJSON_AddBoolToObject(root, "menubar_left", g_app_config.menubar_left);
     cJSON_AddBoolToObject(root, "touch_enabled", g_app_config.touch_enabled);
     cJSON_AddNumberToObject(root, "np_bg_mode", g_app_config.np_bg_mode);

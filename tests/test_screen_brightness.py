@@ -28,7 +28,7 @@ class ScreenBrightnessTests(unittest.TestCase):
 
     def test_zero_and_negative_settings_recover_to_low(self):
         for value in (0, -1, -100, -(2**31)):
-            self.assertEqual(self.lib.normalize(value), 5)
+            self.assertEqual(self.lib.normalize(value), 45)
 
     def test_custom_positive_levels_and_presets_are_preserved(self):
         for value in range(1, 101):

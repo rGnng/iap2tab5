@@ -19,7 +19,7 @@ function setVal(id,v) {
   if ($(id).type === 'checkbox') $(id).checked = !!v; else $(id).value = v;
 }
 function markConfigDirty(id) {
-  if (id==='brightness' && +value(id)<=0) { $('brightness').value=5; $('bri_v').textContent=5; }
+  if (id==='brightness' && +value(id)<=0) { $('brightness').value=45; $('bri_v').textContent=45; }
   dirty[id] = true;
 }
 configFields.concat(['charge_en','qc_high']).forEach(function (id) {
@@ -67,7 +67,7 @@ function render(s,c,p) {
   setVal('charge_en',c.charge_enabled); setVal('qc_high',c.qc_high ? 1 : 0);
   var sync=s.afc_sync || {}, busy=!!sync.active || !!s.apple_pair_busy;
   $('btn_sync').disabled=s.iap2_mode || !s.apple_trusted || !s.sd_ready || busy;
-  $('btn_trust').disabled=s.iap2_mode || busy;
+  $('btn_trust').disabled=s.iap2_mode || s.apple_trusted || busy;
   $('btn_mode').disabled=busy; $('btn_mode').textContent=s.iap2_mode ? 'Enter Library Sync' : 'Exit';
   $('library_rows').innerHTML=T.row('Mode',s.iap2_mode ? 'Player' : 'Library Sync')+T.row('Device',s.iap2_mode ? s.iap2 : s.lockdown);
   $('sync_hint').textContent=sync.active ? 'Syncing · '+(sync.cached || 0)+' covers cached · '+(sync.attempted || 0)+' / '+(sync.total || 0)+' checked' :

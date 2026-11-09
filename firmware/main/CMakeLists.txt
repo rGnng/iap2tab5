@@ -19,6 +19,9 @@ idf_component_register(
         "usbmux_host.c"
         "lockdown_client.c"
         "scaled_tjpgd.c"
+        "jpeg_thumbnail.c"
+        "jpeg_backing_store.c"
+        "afc_sqlite.c"
         "apple_pairing.c"
         "afc_client.c"
         "thumb_cache.c"
@@ -28,6 +31,7 @@ idf_component_register(
         "iap2_host.c"
         "lvgl_ppa_idf_compat.c"
         "../../app/backend/mock_player.c"
+        "../../app/backend/media_index.c"
         "../../app/backend/screen_idle.c"
     "../../app/backend/fast_scroll.c"
         "../../app/backend/cover_gradient.c"
@@ -58,6 +62,8 @@ idf_component_register(
         esp_event
         nvs_flash
         mbedtls
+        sqlite3
+        espressif__libjpeg-turbo
 )
 
 # esp_cache_get_line_size_by_addr() is only referenced by liblvgl, which comes
@@ -74,3 +80,9 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 if(IAP2TAB5_FULL_LIBRARY_SYNC)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE IAP2TAB5_FULL_LIBRARY_SYNC=1)
 endif()
+
+# The pinned libjpeg memory-manager interface supplies coefficient spill files.
+idf_component_get_property(tab5_jpeg_dir espressif__libjpeg-turbo COMPONENT_DIR)
+target_include_directories(${COMPONENT_LIB} PRIVATE "${tab5_jpeg_dir}/libjpeg-turbo/src")
+target_link_libraries(${COMPONENT_LIB} INTERFACE
+    "-Wl,--wrap=jpeg_open_backing_store" "-Wl,-u,__wrap_jpeg_open_backing_store")

@@ -51,6 +51,7 @@ set(UI_SOURCES
     app/backend/cover_gradient.c
     app/backend/cover_gradient_math.c
     app/backend/mock_player.c
+    app/backend/media_index.c
     app/backend/ble_remote.c
     app/ui/boot.c
     app/ui/ui.c
@@ -148,6 +149,26 @@ if(IAP2TAB5_BUILD_UI_TESTS)
     target_link_libraries(navigation_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
     foreach(theme RANGE 0 2)
         add_test(NAME navigation_theme_${theme} COMMAND navigation_test ${theme})
+    endforeach()
+    add_executable(notification_test tests/notification_test.c
+        third_party/cjson/cJSON.c ${NP_TEST_SOURCES})
+    target_include_directories(notification_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(notification_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
+    target_link_libraries(notification_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
+    foreach(theme RANGE 0 2)
+        add_test(NAME notifications_theme_${theme} COMMAND notification_test ${theme})
+    endforeach()
+    add_executable(afc_ui_test tests/afc_ui_test.c
+        third_party/cjson/cJSON.c ${NP_TEST_SOURCES})
+    target_include_directories(afc_ui_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(afc_ui_test PRIVATE
+        $<TARGET_PROPERTY:tab5_sim,COMPILE_DEFINITIONS>)
+    target_link_libraries(afc_ui_test PRIVATE lvgl::lvgl ${SDL2_LINK_TARGET} m)
+    foreach(theme RANGE 0 2)
+        add_test(NAME afc_controls_theme_${theme} COMMAND afc_ui_test ${theme})
     endforeach()
 
 endif()

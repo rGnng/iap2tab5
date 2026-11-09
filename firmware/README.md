@@ -311,6 +311,29 @@ same controller. If initialization fails, it restores the BSP timer/channel
 configuration and reports the fallback in the log. CSV traces append a
 `pwm_period` column; use this value to interpret duty counts.
 
+Flicker investigation (2026-11-09): neither a 100 kHz, 8-bit trial nor a
+5 kHz, 9-bit trial improved flicker at Low (5%). Both were rolled back to
+44.1 kHz. The user also confirmed flicker on
+the restored 44.1 kHz baseline in USB-A Only mode with a direct USB-C power
+cable, without a hub or attached USB devices. Key feedback muted still
+flickered during Bluetooth dial input. Low (5%) and Mid (45%) looked almost
+equally bright at 5 kHz, 44.1 kHz and 100 kHz; Mid flickered less. The captured
+100 kHz duty values were distinct (13/256 and 115/256). PWM register readings
+were stable, with no recorded long VSYNC gaps or display-copy errors, but
+these diagnostics do not measure GPIO waveforms, supply ripple or LED current.
+USB-C OTG mode and speaker tones are therefore not required triggers in the
+observed setup. CPU/render activity is a reported correlation, not an isolated
+electrical cause. The boot log identifies this unit as board version 3
+(LCD ST7121 / touch firmware 1); its BSP still uses GPIO22 PWM for backlight
+control. Only USB-C power is available, so battery/DC comparisons and actual
+rail measurements have not been made. The user found 45% to be the lowest
+stable drive setting on this setup, with little perceived brightness change
+from 5%. This is a practical workaround for this unit and supply, not an
+established hardware limit or a confirmed root cause. The device was left at
+45%. The Low/Mid/High presets now use 45/55/100, as requested; zero-valued
+brightness settings fall back to Low (45%) while Screen Off remains a true
+backlight-off action.
+
 Example OTA upload:
 
 ```bash
@@ -436,7 +459,8 @@ also yields to the idle task periodically so the task watchdog stays happy.
 - `CONFIG_LV_USE_PPA_IMG=y` lets the PPA draw simple 1:1 images (mesh
   backdrop, raw thumbnail images) in addition to solid fills.
 - Album thumbnails on hardware come from the per-library packed cache
-  (`/sdcard/lib/<short8>/thumbs.bin`); the simulator uses the generated
+  (`/sdcard/lib/<short8>/thumbs.bin`, with a full-UUID-checked PID map in
+  `thumbs.map`); the simulator uses the generated
   `assets/mock/thumbs*.bin` packs. The Now Playing cover is decoded from the
   iAP2 FT image into a 360×360 RGB565 buffer; the simulator keeps the old
   mesh-background path.
@@ -497,13 +521,16 @@ also yields to the idle task periodically so the task watchdog stays happy.
   the PPA draw path. FATFS long filenames are enabled, but the cache files
   keep the short `.thm` / `.cov` names for compatibility with older cards.
   See `docs/media-library-import.md`.
-- TJPGD handles baseline JPEG only; progressive artwork falls back to the
-  album color placeholder.
-- iAP2 Now Playing covers work end-to-end: the album ID is resolved from
-  the iAP2 title/artist metadata (with a unique-title fallback for tag
-  differences), and the cached 360x360 cover is shown in the Now Playing
+- TJPGD and the hardware decoder handle the fast baseline JPEG path.
+  Progressive and unsupported baseline layouts use libjpeg-turbo, including
+  CMYK support and temporary SD coefficient storage when PSRAM is insufficient.
+- iAP2 Now Playing covers work end-to-end: the album persistent ID comes from
+  MediaItem property 5 (with a legacy title fallback), and the cached 360x360 cover is shown in the Now Playing
   widget. Verified with a paused iAP2 track and an AFC artwork sync; see
   `docs/screenshots/tab5-real-cover-iap2.png`.
+  Sources at least 54×54 also populate the PID-keyed album thumbnail cache,
+  without changing AFC membership or album priority. Transfer identity is
+  captured at Setup so a track change cannot misattribute the cover.
 - `# <id>` syncs one album's cover over AFC, which is useful when testing
   a specific iAP2 track without running the full library sync.
 - **Settings > iOS Device** provides Pair/Connect, Quick sync,

@@ -88,8 +88,10 @@ typedef struct {
 
     /* Existing UI settings, persisted through the same SD config file. */
     int clock_12h;
-    int sort_field;        /* 0 = add date, 1 = name, 2 = year */
+    int sort_field;        /* Albums: 0 = date added, 1 = name, 2 = year */
     int sort_desc;
+    int song_sort_field;   /* Songs: same fields, independent of Albums */
+    int song_sort_desc;
     int menubar_left;
     int touch_enabled;
     int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
@@ -98,7 +100,7 @@ typedef struct {
     int fast_scroll_trigger_window_ms; /* 550 (default), 800, 1200 */
     int fast_scroll_hold_ms; /* 150, 300 (default), 500, 1500 */
     int screen_off_minutes; /* 0 = Off (disabled), 30, 60 */
-    int brightness;        /* 1..100; a requested 0 falls back to 5 */
+    int brightness;        /* 1..100; a requested 0 falls back to Low (45) */
     int usb_mode;          /* 0 = USB-A HS, 2 = USB-A HS + USB-C FS */
     int theme;             /* 0 = Gray, 1 = Aqua, 2 = Windows 95 */
     int boot_screen;       /* 0 = off, 1 = KCN4M1 boot animation */
@@ -125,6 +127,8 @@ void ui_set_network_status(const char *status, const char *ip);
  *  iap2_mode is the USB role, present means an iPod is identified, and
  *  sd_ready reports the SD card mount. Safe to call from any task. */
 void ui_set_device_state(bool iap2_mode, bool present, bool sd_ready);
+/** Publish iAP2 library transfer activity under the platform display lock. */
+void ui_set_library_syncing(bool syncing);
 /* Read on the UI thread (under the platform display lock). */
 bool ui_library_available(void);
 void ui_system_toggle_screen_flip(void);

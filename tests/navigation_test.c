@@ -399,6 +399,130 @@ static void rapid_tab_navigation(void)
     ui_select_screen(SCR_NOW_PLAYING);pump(600);
 }
 
+static ui_system_config_t saved_order;
+static int order_saves;
+static void save_order(const ui_system_config_t *config)
+{ saved_order=*config; order_saves++; }
+
+static void sort_order_settings(void)
+{
+    int original_field=g_sort_field;
+    bool original_desc=g_sort_desc;
+    ui_set_system_config_changed_cb(save_order);
+    ui_select_screen(SCR_SETTINGS); pump(600);
+    settings_open((void *)(intptr_t)SETTING_SORT_ORDER); pump(200);
+    check(g_focus_count==4 && g_focus_index==0 && settings_detail_sort_value && settings_detail_order_value &&
+          settings_detail_song_sort_value && settings_detail_song_order_value,
+          "Sort Order must expose independent album and song controls to the knob");
+    check(!strcmp(settings_names[SETTING_SORT_ORDER],"Sort Order") &&
+          !strcmp(settings_sort_field_name(SORT_FIELD_ADD_DATE),"Date Added"),
+          "Sort Order must use the standard Date Added label");
+    check(!strcmp(lv_label_get_text(first_label(lv_obj_get_parent(settings_detail_sort_value))),"Albums: Sort By") &&
+          !strcmp(lv_label_get_text(first_label(lv_obj_get_parent(settings_detail_order_value))),"Albums: Order") &&
+          !strcmp(lv_label_get_text(first_label(lv_obj_get_parent(settings_detail_song_sort_value))),"Songs: Sort By") &&
+          !strcmp(lv_label_get_text(first_label(lv_obj_get_parent(settings_detail_song_order_value))),"Songs: Order"),
+          "Sort Order must label all four independent controls");
+    for(int i=0;i<SORT_FIELD_COUNT;i++) {
+        ui_handle_key(UI_KEY_ENTER); pump(100);
+        check(g_sort_field==(original_field+i+1)%SORT_FIELD_COUNT &&
+              saved_order.sort_field==g_sort_field && order_saves==i+1,
+              "Albums Sort By must cycle through Date Added, Name and Year and persist each choice");
+    }
+    ui_handle_key(UI_KEY_DOWN); ui_handle_key(UI_KEY_ENTER); pump(100);
+    check(g_sort_desc!=original_desc && saved_order.sort_desc==g_sort_desc &&
+          !strcmp(lv_label_get_text(settings_detail_order_value),settings_sort_order_text()),
+          "Order must toggle and persist Ascending or Descending");
+    int song_field=g_song_sort_field;
+    bool song_desc=g_song_sort_desc;
+    ui_handle_key(UI_KEY_DOWN);
+    for(int i=0;i<SORT_FIELD_COUNT;i++) {
+        ui_handle_key(UI_KEY_ENTER);pump(100);
+        check(g_song_sort_field==(song_field+i+1)%SORT_FIELD_COUNT &&
+              saved_order.song_sort_field==g_song_sort_field && g_sort_field==original_field &&
+              g_sort_desc!=original_desc,
+              "Songs Sort By must persist independently of Albums");
+    }
+    ui_handle_key(UI_KEY_DOWN);ui_handle_key(UI_KEY_ENTER);pump(100);
+    check(g_song_sort_desc!=song_desc && saved_order.song_sort_desc==g_song_sort_desc &&
+          saved_order.sort_desc==g_sort_desc,
+          "Songs Order must persist independently of Albums");
+    ui_select_screen(SCR_ALBUMS);
+    check(!settings_detail_sort_value && !settings_detail_order_value &&
+          !settings_detail_song_sort_value && !settings_detail_song_order_value,
+          "Leaving Settings must clear the deleted order controls");
+    pump(600); ui_select_screen(SCR_SETTINGS); pump(600);
+    check(settings_detail_order_value && settings_detail_sort_value &&
+          settings_detail_song_sort_value && settings_detail_song_order_value,
+          "Returning to Settings must rebuild the saved order controls");
+    lv_obj_send_event(lv_obj_get_parent(settings_detail_order_value),LV_EVENT_CLICKED,NULL); pump(100);
+    check(g_sort_desc==original_desc && saved_order.sort_desc==original_desc,
+          "Order must also work through the touch preview");
+    lv_obj_send_event(lv_obj_get_parent(settings_detail_song_order_value),LV_EVENT_CLICKED,NULL);pump(100);
+    check(g_song_sort_desc==song_desc && saved_order.song_sort_desc==song_desc,
+          "Songs Order must also work through the touch preview");
+    ui_set_system_config_changed_cb(NULL);
+    ui_select_screen(SCR_NOW_PLAYING); pump(600);
+}
+
+static void live_album_focus(void)
+{
+    ui_select_screen(SCR_NOW_PLAYING);pump(100);
+    albums_visited=false;albums_selected=0;albums_left_scroll_y=0;
+    g_sort_field=0;g_sort_desc=true;
+    player_library_reset();
+    for(int i=1;i<=2;i++) {
+        player_media_item_t item={.pid=(uint64_t)i,.album_pid=1000u+i,
+            .fields=(1u<<0)|(1u<<1)|(1u<<5)|(1u<<6)|(1u<<12)|(1u<<14)};
+        snprintf(item.title,sizeof(item.title),"Song %d",i);
+        snprintf(item.album,sizeof(item.album),"%c album",'A'+i-1);
+        strcpy(item.artist,"Artist");strcpy(item.album_artist,"Artist");
+        player_library_update(&item);
+    }
+    player_library_complete();pump(200);
+    check(albums_selected==0,"An unvisited Albums page must keep its initial top selection");
+    ui_select_screen(SCR_ALBUMS);pump(200);albums_select(1);pump(200);
+    player_album_t selected;check(player_album_get(albums_selected,&selected),"Selected fixture album exists");
+    uint64_t selected_id=selected.id;
+    ui_select_screen(SCR_NOW_PLAYING);pump(100);
+    player_media_item_t item={.pid=3,.album_pid=1003,
+        .fields=(1u<<0)|(1u<<1)|(1u<<5)|(1u<<6)|(1u<<12)|(1u<<14)};
+    strcpy(item.title,"New song");strcpy(item.album,"New album");
+    strcpy(item.artist,"Artist");strcpy(item.album_artist,"Artist");
+    player_library_update(&item);pump(200);
+    check(player_album_get(albums_selected,&selected) && selected.id==selected_id &&
+          albums_selected==2 && albums_left_scroll_y>=ALBUMS_STRIDE,
+          "An offscreen catalog update must preserve the album PID and scroll position");
+    ui_select_screen(SCR_ALBUMS);pump(200);
+    albums_open((void*)(intptr_t)albums_selected);pump(200);
+    for(int i=0;i<g_focus_count;i++) if(g_focus[i].activate==albums_track_action) {
+        focus_select(i);break;
+    }
+    item.pid=4;item.album_pid=1004;strcpy(item.album,"Newest album");
+    player_library_update(&item);pump(200);
+    check(player_album_get(albums_selected,&selected) && selected.id==selected_id &&
+          g_focus_index>=0 && g_focus[g_focus_index].activate==albums_track_action,
+          "Live updates must preserve the album detail track focus");
+}
+
+static void live_song_focus(void)
+{
+    g_song_sort_field=SORT_FIELD_NAME;g_song_sort_desc=false;
+    ui_select_screen(SCR_SONGS);pump(300);songs_select(0);pump(100);
+    player_track_t selected;check(player_song_get(songs_selected,&selected),"Selected fixture song exists");
+    uint64_t selected_id=selected.id;
+    ui_select_screen(SCR_SETTINGS);pump(200);
+    settings_sort_order_action((void*)(intptr_t)1);pump(200);
+    ui_select_screen(SCR_SONGS);pump(300);
+    check(player_song_get(songs_selected,&selected) && selected.id==selected_id &&
+          songs_selected!=0 && songs_selected_pid==selected_id,
+          "Changing song order offscreen must retain the selected PID");
+    player_media_item_t update={.pid=selected_id,.fields=1u<<1};
+    strcpy(update.title,"ZZZZ renamed song");player_library_update(&update);pump(300);
+    check(player_song_get(songs_selected,&selected) && selected.id==selected_id &&
+          songs_selected==0 && songs_selected_pid==selected_id,
+          "A live song update must rebuild the sorted view and preserve selection");
+}
+
 int main(int argc,char **argv)
 {
     lv_init();lv_display_t *display=lv_display_create(1280,720);
@@ -406,12 +530,14 @@ int main(int argc,char **argv)
     lv_display_set_buffers(display,draw_buffer,NULL,sizeof(draw_buffer),LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(display,flush);
     ui_system_config_t config={.theme=argc>1?atoi(argv[1]):0,.brightness=45,.menubar_left=1,
-        .fast_scroll_enabled=true,.fast_scroll_pages=2};
+        .fast_scroll_enabled=true,.fast_scroll_pages=2,.sort_desc=1,.song_sort_desc=1};
     ui_apply_saved_settings(&config);ui_init();pump(600);
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
     check(g_system_config.fast_scroll_trigger_window_ms==550,"Missing trigger configuration must default to 550 ms");
     alpha_fade();artist_viewport();scrollbar_views();pressed_controls();fast_navigation();
-    settings_widget_lifetime();rapid_tab_navigation();
+    settings_widget_lifetime();rapid_tab_navigation();sort_order_settings();
+    live_album_focus();
+    live_song_focus();
     puts("PASS: transparent text fade, Artists viewport restoration, column scrollbar geometry, page scrolling and theme cursor feedback");
     return 0;
 }

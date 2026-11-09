@@ -44,6 +44,7 @@ class QueuePopupTests(unittest.TestCase):
 #define SCR_NOW_PLAYING 0
 #define LV_OPA_TRANSP 0
 static bool g_ui_trace;
+static bool song_order_ready;
 typedef struct { uint64_t id; char metadata[320]; } player_track_t;
 static player_track_t tracks[MAX_TRACKS];
 static int track_count;

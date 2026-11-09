@@ -21,6 +21,7 @@
 #include "iap2_auth.h"
 #include "lockdown_client.h"
 #include "player.h"
+#include "thumb_cache.h"
 #include "artwork_refresh.h"
 #include "usb/usb_helpers.h"
 #include "usb/usb_host.h"
@@ -169,11 +170,13 @@ static char s_title[128];
 static char s_artist[128];
 static char s_album[128];
 static uint64_t s_track_key;
+static uint64_t s_album_pid;
 static char s_library_id[128];
 static char s_library_sub_id[128];
 static char s_library_revision[128];
 static bool s_library_subscribed;
 static bool s_library_resynced;
+static atomic_bool s_library_syncing;
 static int s_library_items;
 static char s_device_name[64] = "iPod touch";
 static uint32_t s_elapsed_ms;
@@ -215,6 +218,8 @@ typedef struct {
     size_t len;
     size_t cap;
     uint8_t * data;
+    uint64_t track_key, album_pid;
+    char album[128], artist[128], library[128];
 } ft_transfer_t;
 
 static ft_transfer_t s_ft[FT_MAX_TRANSFERS];
@@ -223,6 +228,8 @@ static size_t s_art_pending_len;
 static char s_art_pending_album[128];
 static char s_art_pending_artist[128];
 static uint64_t s_art_pending_key;
+static uint64_t s_art_pending_album_pid;
+static char s_art_pending_library[128];
 static uint8_t * s_art_cover;
 static bool s_art_valid;
 static artwork_quality_t s_art_quality;
@@ -590,6 +597,7 @@ static void reset_link(void)
     s_library_resynced = false;
     s_library_items = 0;
     s_stats.library_complete = false;
+    atomic_store(&s_library_syncing, false);
     if(s_tx_lock != NULL) xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     while(s_txq_tail != s_txq_head) {
         free(s_txq[s_txq_tail]);
@@ -716,6 +724,7 @@ static void open_device(uint8_t address)
 static void close_device(void)
 {
     s_connected = false;
+    atomic_store(&s_library_syncing, false);
     s_identified = false;
     s_hid_ready = false;
     s_state = LINK_IDLE;
@@ -1168,8 +1177,12 @@ static void send_library_updates_request(void)
     pb_void(&b, 4);
     pb_void(&b, 5);
     pb_void(&b, 6);
+    if(s_library_revision[0]=='\0' || !strcmp(s_library_revision,"0"))
+        player_library_reset();
     csm_send(0x4C03, &b);
     s_library_subscribed = true;
+    s_stats.library_complete = false;
+    atomic_store(&s_library_syncing, true);
     ESP_LOGI(TAG, "subscribed to media library updates: %s (rev=%s)",
              sub_id,
              s_library_revision[0] != '\0' ? s_library_revision : "0");
@@ -1293,6 +1306,8 @@ static void parse_now_playing(const uint8_t * body, size_t len)
     size_t value_len = 0;
 
     uint64_t track_key = s_track_key;
+    uint64_t album_pid = s_album_pid;
+    bool album_pid_received = false;
     bool identity_received = false;
     while(next_param(&p, end, &pid, &value, &value_len)) {
         if(pid == 0) {
@@ -1313,6 +1328,9 @@ static void parse_now_playing(const uint8_t * body, size_t len)
                     snprintf(title, sizeof(title), "%.*s", (int)cvlen,
                              (const char *)cv);
                     if(title[0]) identity_received = true;
+                }
+                else if(cid == 5 && cvlen == 8) {
+                    album_pid = be64(cv); album_pid_received = true;
                 }
                 else if(cid == 6) {
                     snprintf(album, sizeof(album), "%.*s", (int)cvlen,
@@ -1383,6 +1401,7 @@ static void parse_now_playing(const uint8_t * body, size_t len)
         changed = true;
     }
     if(track_key != s_track_key) {
+        if(!album_pid_received) album_pid = 0;
         s_track_key = track_key;
         changed = true;
         /* Keep the current cover across track changes. Tracks in the same
@@ -1390,6 +1409,7 @@ static void parse_now_playing(const uint8_t * body, size_t len)
          * a real change arrives as a new FT image, and a zero-length type 2
          * Setup clears it. */
     }
+    s_album_pid = album_pid;
     if(elapsed_ms != s_elapsed_ms || duration_ms != s_duration_ms ||
        queue_index != s_queue_index || queue_count != s_queue_count ||
        shuffle != s_shuffle || repeat != s_repeat || status != s_play_status) {
@@ -1502,8 +1522,9 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
             if(chosen[0] != '\0') {
                 snprintf(s_library_sub_id, sizeof(s_library_sub_id), "%s",
                          chosen);
-                app_config_set_library_id(chosen);
+                player_library_select(chosen);
                 s_library_revision[0] = '\0';
+                player_library_cached_revision(chosen,s_library_revision,sizeof(s_library_revision));
                 s_library_resynced = false;
                 s_library_subscribed = false;
             }
@@ -1526,7 +1547,19 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
             bool has_items = false;
             bool has_playlists = false;
             bool reset_seen = false;
+            /* Reset applies to the whole update, regardless of parameter
+             * ordering. Queue it before any item groups in this message. */
+            const uint8_t *scan = body;
+            uint16_t scan_id;
+            const uint8_t *scan_value;
+            size_t scan_len;
+            while(next_param(&scan,end,&scan_id,&scan_value,&scan_len)) {
+                if(scan_id==6) { reset_seen=true;break; }
+            }
+            if(reset_seen) player_library_reset();
             static int update_msgs;
+            s_stats.library_complete = false;
+            atomic_store(&s_library_syncing, true);
             update_msgs++;
             s_stats.library_messages++;
             while(next_param(&p, end, &pid, &value, &value_len)) {
@@ -1546,26 +1579,47 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
                     uint16_t cid = 0;
                     const uint8_t * cv = NULL;
                     size_t cvlen = 0;
-                    uint64_t album_pid = 0;
+                    player_media_item_t item = {0};
                     while(next_param(&q, qend, &cid, &cv, &cvlen)) {
-                        /* Property 5 is the album persistent ID; remember
-                         * when this album was first seen so the album list
-                         * still has a stable order without an AFC date. */
-                        if(cid == 5 && cvlen == 8) {
-                            album_pid = be64(cv);
+                        /* Empty string properties mean no value in library
+                         * updates. Preserve existing/AFC metadata like the
+                         * reference mirror rather than clearing its labels. */
+                        if((cid==1 || cid==6 || cid==12 || cid==14) &&
+                           (cvlen==0 || cv[0]==0)) continue;
+                        if(cid < 32) item.fields |= 1u << cid;
+                        switch(cid) {
+                            case 0: if(cvlen==8) item.pid=be64(cv); break;
+                            case 5: if(cvlen==8) item.album_pid=be64(cv); break;
+                            case 11: if(cvlen==8) item.artist_pid=be64(cv); break;
+                            case 13: if(cvlen==8) item.album_artist_pid=be64(cv); break;
+                            case 4: if(cvlen>=4) item.duration_ms=be32(cv); break;
+                            case 7:
+                            case 9: {
+                                uint32_t number=0;
+                                if(cvlen<=4) for(size_t k=0;k<cvlen;k++) number=(number<<8)|cv[k];
+                                if(number>65535) number=65535;
+                                if(cid==7) item.track_no=number;else item.disc_no=number;
+                                break;
+                            }
+                            case 1: snprintf(item.title,sizeof(item.title),"%.*s",(int)cvlen,(const char*)cv); break;
+                            case 6: snprintf(item.album,sizeof(item.album),"%.*s",(int)cvlen,(const char*)cv); break;
+                            case 12: snprintf(item.artist,sizeof(item.artist),"%.*s",(int)cvlen,(const char*)cv); break;
+                            case 14: snprintf(item.album_artist,sizeof(item.album_artist),"%.*s",(int)cvlen,(const char*)cv); break;
+                            default: break;
                         }
                     }
                     s_library_items++;
                     s_stats.library_items++;
-                    if(album_pid != 0) {
-                        player_note_iap2_album(album_pid);
-                    }
+                    player_library_update(&item);
                 }
                 else if(pid == 3) {
                     has_playlists = true;
                 }
                 else if(pid == 6) {
                     reset_seen = true;
+                }
+                else if(pid == 4 && value_len == 8) {
+                    player_library_delete(be64(value));
                 }
                 else if(pid == 7 && value_len >= 1) {
                     progress = value[0];
@@ -1583,15 +1637,18 @@ static void handle_csm(uint16_t msg_id, const uint8_t * body, size_t len)
                  * again with the revision the device just reported so it
                  * sends the full item/playlist database. */
                 s_library_resynced = true;
+                player_library_reset();
                 s_library_subscribed = false;
                 ESP_LOGI(TAG, "library delete phase complete; resubscribing");
                 send_library_updates_request();
             }
             else if(progress >= 100) {
+                player_library_complete_revision(s_library_revision);
                 ESP_LOGI(TAG, "media library updates complete: %d groups",
                          s_library_items);
                 s_library_resynced = false;
                 s_stats.library_complete = true;
+                atomic_store(&s_library_syncing, false);
             }
             break;
         }
@@ -1789,22 +1846,8 @@ static bool artwork_album_matches(const char * album)
     return match;
 }
 
-static void art_snapshot_meta(char * album, size_t album_len,
-                              char * artist, size_t artist_len,
-                              uint64_t * key)
-{
-    album[0] = '\0';
-    artist[0] = '\0';
-    *key = 0;
-    if(s_state_lock == NULL) return;
-    xSemaphoreTake(s_state_lock, portMAX_DELAY);
-    snprintf(album, album_len, "%s", s_album);
-    snprintf(artist, artist_len, "%s", s_artist);
-    *key = s_track_key;
-    xSemaphoreGive(s_state_lock);
-}
-
-static void ft_publish_artwork(const uint8_t * data, size_t len)
+static void ft_publish_artwork(const uint8_t * data, size_t len,
+                               const ft_transfer_t *identity)
 {
     if(data == NULL || len < 3) return;
 
@@ -1826,18 +1869,15 @@ static void ft_publish_artwork(const uint8_t * data, size_t len)
     }
     memcpy(copy, data, len);
 
-    char album[128];
-    char artist[128];
-    uint64_t key = 0;
-    art_snapshot_meta(album, sizeof(album), artist, sizeof(artist), &key);
-
     xSemaphoreTake(s_art_lock, portMAX_DELAY);
     free(s_art_pending);
     s_art_pending = copy;
     s_art_pending_len = len;
-    snprintf(s_art_pending_album, sizeof(s_art_pending_album), "%s", album);
-    snprintf(s_art_pending_artist, sizeof(s_art_pending_artist), "%s", artist);
-    s_art_pending_key = key;
+    snprintf(s_art_pending_album, sizeof(s_art_pending_album), "%s", identity->album);
+    snprintf(s_art_pending_artist, sizeof(s_art_pending_artist), "%s", identity->artist);
+    s_art_pending_key = identity->track_key;
+    s_art_pending_album_pid = identity->album_pid;
+    snprintf(s_art_pending_library,sizeof(s_art_pending_library),"%s",identity->library);
     xSemaphoreGive(s_art_lock);
     xSemaphoreGive(s_art_sem);
 
@@ -1876,6 +1916,16 @@ static void ft_feed(const uint8_t * payload, size_t len)
         }
         t->type = type;
         t->expected = expected;
+        if(type == 2 && s_state_lock) {
+            /* Pin identity at Setup. A track change while bytes arrive must
+             * never save this cover under the next album's persistent ID. */
+            xSemaphoreTake(s_state_lock, portMAX_DELAY);
+            t->track_key=s_track_key; t->album_pid=s_album_pid;
+            snprintf(t->album,sizeof(t->album),"%s",s_album);
+            snprintf(t->artist,sizeof(t->artist),"%s",s_artist);
+            xSemaphoreGive(s_state_lock);
+            snprintf(t->library,sizeof(t->library),"%s",app_config_library_id());
+        }
         if(expected > 0 && !ft_ensure(t, expected)) {
             ft_release(t);
             return;
@@ -1944,7 +1994,7 @@ static void ft_feed(const uint8_t * payload, size_t len)
                 artwork_clear_cover();
             }
             else {
-                ft_publish_artwork(t->data, t->len);
+                ft_publish_artwork(t->data, t->len, t);
             }
         }
         else if(t->type == 0x0003 || t->type == 0x0006) {
@@ -2090,12 +2140,16 @@ static void artwork_decode_task(void * arg)
         char album[128];
         char artist[128];
         uint64_t key = 0;
+        uint64_t album_pid = 0;
+        char library[128];
         xSemaphoreTake(s_art_lock, portMAX_DELAY);
         data = s_art_pending;
         len = s_art_pending_len;
         snprintf(album, sizeof(album), "%s", s_art_pending_album);
         snprintf(artist, sizeof(artist), "%s", s_art_pending_artist);
         key = s_art_pending_key;
+        album_pid = s_art_pending_album_pid;
+        snprintf(library,sizeof(library),"%s",s_art_pending_library);
         s_art_pending = NULL;
         s_art_pending_len = 0;
         s_art_pending_album[0] = '\0';
@@ -2111,12 +2165,29 @@ static void artwork_decode_task(void * arg)
             quality.width = info.width;
             quality.height = info.height;
         }
+        else if(len>=24 && !memcmp(data,"\x89PNG\r\n\x1a\n",8)) {
+            quality.width=be32(data+16);quality.height=be32(data+20);
+        }
         cover = heap_caps_malloc(ART_BYTES, MALLOC_CAP_SPIRAM);
         bool ok = cover != NULL &&
                   lockdown_client_decode_cover_mem(data, len, cover);
         free(data);
 
         if(ok) {
+            if(album_pid && quality.width>=54 && quality.height>=54)
+                thumb_cache_capture(library,album_pid,cover);
+            xSemaphoreTake(s_state_lock,portMAX_DELAY);
+            bool current = key == s_track_key ||
+                           (album_pid && album_pid == s_album_pid);
+            current = current && !strcmp(library,app_config_library_id());
+            xSemaphoreGive(s_state_lock);
+            if(!current) {
+                free(cover);
+                xSemaphoreTake(s_art_lock,portMAX_DELAY);
+                s_art_decoding=false;
+                xSemaphoreGive(s_art_lock);
+                continue;
+            }
             xSemaphoreTake(s_art_lock, portMAX_DELAY);
             free(s_art_cover);
             s_art_cover = cover;
@@ -2659,11 +2730,13 @@ bool iap2_host_get_state(iap2_state_t * out)
     if(xSemaphoreTake(s_state_lock, pdMS_TO_TICKS(20)) != pdTRUE) return false;
     out->connected = s_connected;
     out->identified = s_identified;
+    out->library_syncing = s_connected && s_identified && atomic_load(&s_library_syncing);
     out->play_status = s_play_status;
     snprintf(out->title, sizeof(out->title), "%s", s_title);
     snprintf(out->artist, sizeof(out->artist), "%s", s_artist);
     snprintf(out->album, sizeof(out->album), "%s", s_album);
     out->track_key = s_track_key;
+    out->album_pid = s_album_pid;
     snprintf(out->device_name, sizeof(out->device_name), "%s", s_device_name);
     out->elapsed_ms = s_elapsed_ms;
     out->duration_ms = s_duration_ms;
