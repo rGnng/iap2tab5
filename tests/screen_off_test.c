@@ -65,6 +65,14 @@ static lv_obj_t * settings_list(void)
     check(list && lv_obj_is_scrollable(list),"Settings rows must have their own scrollable viewport");
     return list;
 }
+static int setting_index(const char *text)
+{
+    lv_obj_t *list=settings_list();
+    for(uint32_t i=0;i<lv_obj_get_child_count(list);i++)
+        if(label(lv_obj_get_child(list,i),text))return (int)i;
+    check(false,"Requested setting must exist in the menu");
+    return 0;
+}
 static void settings_scrolling(void)
 {
     ui_select_screen(6);pump(300);
@@ -81,16 +89,16 @@ static void settings_scrolling(void)
     lv_obj_get_coords(label(lv_screen_active(),"Settings"),&current);
     check(current.y1==heading.y1,"Settings heading must stay fixed while rows scroll");
     lv_obj_get_coords(label(lv_screen_active(),"Clock"),&clock);
-    check(clock.y1>=bounds.y1 && clock.y2<=bounds.y2,"Scrolling must reveal the bottom Clock row");
-    ui_handle_key_repeat(UI_KEY_DOWN,10);pump(200);
+    check(clock.y1>=bounds.y1 && clock.y2<=bounds.y2,"Scrolling must reveal the Clock row");
+    ui_handle_key_repeat(UI_KEY_DOWN,setting_index("Clock"));pump(200);
     ui_handle_key(UI_KEY_ENTER);pump(300);
-    check(lv_obj_get_scroll_y(settings_list())==scroll,"Opening the bottom setting must preserve the left viewport");
+    check(lv_obj_get_scroll_y(settings_list())==scroll,"Opening a scrolled setting must preserve the left viewport");
     ui_handle_key(UI_KEY_BACK);pump(200);
     check(lv_obj_get_scroll_y(settings_list())==scroll,"Returning from details must preserve the left viewport");
     ui_handle_key(UI_KEY_BACK);pump(200);
     check(lv_obj_get_scroll_y(settings_list())==0,"Back must bring the first focused setting into view");
     ui_select_screen(6);pump(100);
-    ui_handle_key_repeat(UI_KEY_DOWN,6);ui_handle_key(UI_KEY_ENTER);pump(300);
+    ui_handle_key_repeat(UI_KEY_DOWN,setting_index("Fast Scroll"));ui_handle_key(UI_KEY_ENTER);pump(300);
     const char *headings[]={"Start Fast Scrolling After","Hold Time"};
     for(int i=0;i<2;i++) {
         lv_obj_t *section=label(lv_screen_active(),headings[i]);
@@ -121,7 +129,7 @@ int main(int argc, char **argv)
     ui_set_system_config_changed_cb(save);
     settings_scrolling();
     ui_select_screen(6); pump(300);
-    ui_handle_key_repeat(UI_KEY_DOWN,5); ui_handle_key(UI_KEY_ENTER); pump(300);
+    ui_handle_key_repeat(UI_KEY_DOWN,setting_index("Screen")); ui_handle_key(UI_KEY_ENTER); pump(300);
     check(label(lv_screen_active(),"Screen") && label(lv_screen_active(),"Brightness") &&
           label(lv_screen_active(),"Idle Timer") && !label(lv_screen_active(),"Screen Off"),"Screen must contain both inset groups");
     check(label(lv_screen_active(),"Low") && label(lv_screen_active(),"Mid") &&

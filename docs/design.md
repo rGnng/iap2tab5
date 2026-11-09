@@ -352,10 +352,10 @@ Queue 显示时的左栏：
   - **Blurred cover**：当前封面按 16:9 填充整个内容区，做高斯模糊，再叠 60% 黑色遮罩；封面本体仍保持清晰；
   - **Cover gradient**（默认）：把封面缩到 32×32，过滤过暗/过亮像素后用 K-Means 提取 5 个主色，再映射到 3×3 控制网格，用二次 Bezier patch 生成 592×360 静态渐变图（RGB565 约 426 KB，真机放 PSRAM），最后拉伸到 1184×720 并叠 60% 黑色遮罩；生成结果按封面缓存，不做动画；
 - 长按 Enter（650 ms）打开当前曲目的上下文菜单；菜单为居中弹层，带半透明遮罩：
-  - `GoTo`：Go to album、Go to artist；
+  - `Go To`：Go to album、Go to artist；
   - `Star`：Star / Unstar，根据当前收藏状态切换文案和实心/空心星标；
   - `Playback`：Shuffle（Off/On）、Repeat（Off/All/One），右侧显示当前状态；
-  - 切换 Star / Shuffle / Repeat 后菜单保持打开并即时刷新，方便连续调整；GoTo 项执行后跳转并关闭菜单；
+  - 切换 Star / Shuffle / Repeat 后菜单保持打开并即时刷新，方便连续调整；Go To 项执行后跳转并关闭菜单；
   - Up/Down 在菜单项间移动，Enter 执行，Back 关闭，点击菜单外部关闭；
   - 菜单使用独立焦点索引，不覆盖或清除底层 Now Playing / Queue 的焦点；
 - 焦点顺序：只有队列行（队列可见时）；
@@ -500,21 +500,25 @@ Queue 显示时的左栏：
 
 左右两栏。左栏是设置项列表：标题栏 56 px、16 px 内边距，右上角为 `当前序号/总数` 计数器（与其它列表页一致）；设置项行高 64 px，文字 FONT_H2。右栏是当前设置项的内容，没有标题，内容从顶部开始排列。
 
-设置项顺序：iOS Device、Bluetooth、Theme、Now Playing Background、USB Options、Boot Screen、About、Clock。
+设置项顺序：iOS Device、Bluetooth、Sort Order、Fast Scroll、Key Feedback、Screen、Theme、Now Playing Background、Clock、USB Options、Boot Screen、About。
 
 - **iOS Device**：iAP2/AFC 模式切换、缓存统计和 iAP2 状态；`Battery` 行放在详情最下方（`iAP2 Status` 之后），显示 `CHG` / `NOT CHG` 和电量百分比（iPod 不提供电量时显示 `--%`）。
 
 ```text
 ┌──────────────────────────────────────┬──────────────────────────────┐
-│  Settings                    3/8     │  Paired Devices              │
-│  AFC & iAP2                          │  …                           │
+│  Settings                    2/12    │  Paired Devices              │
+│  iOS Device                          │  …                           │
 │  Bluetooth                        ◀  │  Search Devices   PRESS: PAIR│
+│  Sort Order                          │  …                           │
+│  Fast Scroll                         │                              │
+│  Key Feedback                        │                              │
+│  Screen                              │                              │
 │  Theme                               │  …                           │
 │  Now Playing Background              │                              │
+│  Clock                               │                              │
 │  USB Options                         │                              │
 │  Boot Screen                         │                              │
 │  About                               │                              │
-│  Clock                               │                              │
 └──────────────────────────────────────┴──────────────────────────────┘
 ```
 

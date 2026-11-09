@@ -6521,7 +6521,7 @@ static void context_menu_open(void)
         repeat_value = "One";
     }
 
-    context_menu_group(panel, "GoTo");
+    context_menu_group(panel, "Go To");
     context_menu_item(panel, ICON_DISC, "Go to album", NULL, false,
                       context_menu_go_album);
     context_menu_item(panel, ICON_PERSON, "Go to artist", NULL, false,
@@ -7724,16 +7724,16 @@ static void ble_tick(void)
 enum {
     SETTING_AFC_IAP2 = 0,
     SETTING_BLUETOOTH,
+    SETTING_SORT_ORDER,
+    SETTING_FAST_SCROLL,
     SETTING_KEY_FEEDBACK,
+    SETTING_SCREEN,
     SETTING_THEME,
     SETTING_NOW_PLAYING_BG,
-    SETTING_SCREEN,
-    SETTING_FAST_SCROLL,
+    SETTING_DATETIME,
     SETTING_USB,
     SETTING_BOOT,
     SETTING_ABOUT,
-    SETTING_DATETIME,
-    SETTING_SORT_ORDER,
     SETTING_COUNT,
 };
 
@@ -7910,16 +7910,16 @@ static void settings_rebuild(void);
 static const char * const settings_names[SETTING_COUNT] = {
     "iOS Device",
     "Bluetooth",
+    "Sort Order",
+    "Fast Scroll",
     "Key Feedback",
+    "Screen",
     "Theme",
     "Now Playing Background",
-    "Screen",
-    "Fast Scroll",
+    "Clock",
     "USB Options",
     "Boot Screen",
     "About",
-    "Clock",
-    "Sort Order",
 };
 
 static int settings_initial_focus(int index)
