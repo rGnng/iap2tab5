@@ -3,7 +3,7 @@
 
 static uint32_t frame[720][1280];
 static uint8_t draw_buffer[1280 * 40 * 4];
-static int fast_cues;
+static int fast_cues,exit_cues;
 static void check(bool ok, const char *message)
 { if(!ok) { fprintf(stderr,"FAIL: %s\n",message); exit(1); } }
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
@@ -15,7 +15,7 @@ static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 }
 static void pump(int ms)
 { for(int i=0;i<ms;i+=10) { lv_tick_inc(10);lv_timer_handler(); } }
-static void feedback(int type) { if(type==UI_FEEDBACK_FAST_SCROLL) fast_cues++; }
+static void feedback(int type) { if(type==UI_FEEDBACK_FAST_SCROLL) fast_cues++;else if(type==UI_FEEDBACK_FAST_SCROLL_EXIT)exit_cues++; }
 
 static void alpha_fade(void)
 {
@@ -117,7 +117,11 @@ static void fast_navigation(void)
     albums_select(rows*3-1);
     int old=albums_selected;ui_handle_key(UI_KEY_DOWN);
     check(albums_selected==old+rows && fast_cues==1,"One fast notch must move exactly one page without another entry cue");
+    int exits_before=exit_cues;
     ui_handle_key(UI_KEY_UP);
+    check(exit_cues==exits_before+1,"A direction reversal must play one exit cue");
+    ui_fast_marker_update(NULL);
+    check(exit_cues==exits_before+1,"Inactive indicator refresh must not repeat the exit cue");
     check(albums_selected==old+rows-1 && !g_fast_scroll.active,"A reversal must immediately return to one-row movement");
     for(int i=0;i<14;i++) { pump(50);ui_handle_key(UI_KEY_UP); }
     check(!g_fast_scroll.active,"Reverse spin must first rebuild its own physical velocity");
@@ -127,22 +131,32 @@ static void fast_navigation(void)
     check(albums_selected==-1 && g_fast_scroll.active && fast_cues==2,
           "Reaching Shuffle All must preserve the gesture and not add entry cues");
     ui_fast_scroll_reset();now=lv_tick_get();
-    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);pump(1400);
+    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);pump(100);
     check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
-          "A 1.4 second pause must preserve fast mode and its marker");
+          "A 100 ms pause must preserve fast mode and its marker");
     old=albums_selected;int cues=fast_cues;ui_handle_key(UI_KEY_DOWN);
     check(albums_selected==old+rows && fast_cues==cues,
-          "Resuming after 1.4 seconds must keep page steps without repeating the entry cue");
-    pump(1540);
+          "Resuming after 100 ms must keep page steps without repeating the entry cue");
+    exits_before=exit_cues;
+    pump(200);
+    check(exit_cues==exits_before+1,"Idle expiry must play one descending exit cue");
+    pump(200);check(exit_cues==exits_before+1,"Idle exit cue must not repeat");
     check(!g_fast_scroll.active && lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Pausing must clear fast mode and its marker");
     old=albums_selected;ui_handle_key(UI_KEY_DOWN);check(albums_selected==old+1,"First notch after a pause must be precise");
     ui_fast_scroll_reset();g_system_config.fast_scroll_pages=0;albums_select(0);
     ui_handle_key_repeat(UI_KEY_DOWN,20);check(albums_selected==20 && !g_fast_scroll.active,"Off must retain one row per notch");
     g_system_config.fast_scroll_pages=2;ui_fast_scroll_reset();
     ui_select_screen(SCR_SETTINGS);pump(600);settings_open((void *)(intptr_t)SETTING_FAST_SCROLL);pump(200);
-    check(g_focus_count==6 && g_focus_index==2,"Fast Scroll must offer Off and 1..5 Pages, initially focusing 2 Pages");
+    check(g_focus_count==10 && g_focus_index==2,"Fast Scroll headings must be unselectable, with six thresholds and four hold times");
     ui_handle_key(UI_KEY_UP);ui_handle_key(UI_KEY_ENTER);
     check(g_system_config.fast_scroll_pages==1,"Fast Scroll choices must change the saved UI setting");
+    ui_handle_key_repeat(UI_KEY_DOWN,5);
+    for(int i=0;i<4;i++) {
+        if(i) ui_handle_key(UI_KEY_DOWN);
+        ui_handle_key(UI_KEY_ENTER);
+        check(g_system_config.fast_scroll_hold_ms==settings_fast_hold_values[i],
+              "Each Hold Time choice must update the persisted setting");
+    }
     ui_handle_key(UI_KEY_BACK);ui_select_screen(SCR_NOW_PLAYING);pump(200);
     check(!g_fast_scroll.active && !g_fast_context,"Changing tabs must discard velocity history");
 }

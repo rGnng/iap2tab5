@@ -48,6 +48,57 @@ static bool checked(const char *text)
     lv_obj_t *o=label(lv_screen_active(),text);
     return o && label(lv_obj_get_parent(o),ICON_CHECK)!=NULL;
 }
+static lv_obj_t * settings_list(void)
+{
+    lv_obj_t *title=label(lv_screen_active(),"Settings");
+    check(title!=NULL,"Settings heading must be visible");
+    lv_obj_t *panel=lv_obj_get_parent(lv_obj_get_parent(title));
+    lv_obj_t *list=lv_obj_get_child(panel,1);
+    check(list && lv_obj_is_scrollable(list),"Settings rows must have their own scrollable viewport");
+    return list;
+}
+static void settings_scrolling(void)
+{
+    ui_select_screen(6);pump(300);
+    lv_obj_t *list=settings_list();lv_area_t bounds,heading;
+    lv_obj_get_coords(list,&bounds);lv_obj_get_coords(label(lv_screen_active(),"Settings"),&heading);
+    int x=bounds.x1+60,y=bounds.y2-28;
+    pointer(x,y,true);
+    for(int i=1;i<=8;i++)pointer(x,y-i*20,true);
+    pointer(x,y-160,false);pump(400);
+    check(lv_obj_is_valid(list),"Dragging settings must not activate a row or rebuild the page");
+    int scroll=lv_obj_get_scroll_y(list);
+    check(scroll>20,"Dragging upward must scroll the Settings left column");
+    lv_area_t current,clock;
+    lv_obj_get_coords(label(lv_screen_active(),"Settings"),&current);
+    check(current.y1==heading.y1,"Settings heading must stay fixed while rows scroll");
+    lv_obj_get_coords(label(lv_screen_active(),"Clock"),&clock);
+    check(clock.y1>=bounds.y1 && clock.y2<=bounds.y2,"Scrolling must reveal the bottom Clock row");
+    ui_handle_key_repeat(UI_KEY_DOWN,10);pump(200);
+    ui_handle_key(UI_KEY_ENTER);pump(300);
+    check(lv_obj_get_scroll_y(settings_list())==scroll,"Opening the bottom setting must preserve the left viewport");
+    ui_handle_key(UI_KEY_BACK);pump(200);
+    check(lv_obj_get_scroll_y(settings_list())==scroll,"Returning from details must preserve the left viewport");
+    ui_handle_key(UI_KEY_BACK);pump(200);
+    check(lv_obj_get_scroll_y(settings_list())==0,"Back must bring the first focused setting into view");
+    ui_select_screen(6);pump(100);
+    ui_handle_key_repeat(UI_KEY_DOWN,6);ui_handle_key(UI_KEY_ENTER);pump(300);
+    const char *headings[]={"Start Fast Scrolling After","Hold Time"};
+    for(int i=0;i<2;i++) {
+        lv_obj_t *section=label(lv_screen_active(),headings[i]);
+        check(section && !lv_obj_is_clickable(lv_obj_get_parent(section)),
+              "Fast Scroll section labels must be inset, unselectable headings");
+        lv_obj_scroll_to_view(lv_obj_get_parent(section),LV_ANIM_OFF);pump(100);
+        lv_area_t heading_bounds,option_bounds;
+        lv_obj_get_coords(section,&heading_bounds);
+        lv_obj_get_coords(label(lv_screen_active(),i==0 ? "1 Page" : "150 ms"),&option_bounds);
+        check(heading_bounds.x1==option_bounds.x1,"Inset headings must align with option text");
+        tap_label(headings[i]);
+        check(saves==0,"Tapping a Fast Scroll heading must not change settings");
+    }
+    ui_handle_key(UI_KEY_BACK);ui_handle_key(UI_KEY_BACK);pump(100);
+}
+
 int main(int argc, char **argv)
 {
     lv_init();
@@ -60,6 +111,7 @@ int main(int argc, char **argv)
     ui_system_config_t cfg={.theme=argc>1?atoi(argv[1]):0,.touch_enabled=1,.menubar_left=1,.brightness=70,.volume=65};
     ui_apply_saved_settings(&cfg); ui_set_screen_power_cb(power); ui_init(); ui_attach_touch(touch); pump(600);
     ui_set_system_config_changed_cb(save);
+    settings_scrolling();
     ui_select_screen(6); pump(300);
     ui_handle_key_repeat(UI_KEY_DOWN,5); ui_handle_key(UI_KEY_ENTER); pump(300);
     check(label(lv_screen_active(),"Screen") && label(lv_screen_active(),"Brightness") &&

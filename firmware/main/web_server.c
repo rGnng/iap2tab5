@@ -695,6 +695,7 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
+    cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
     cJSON_AddStringToObject(root, "ap_ssid", g_app_config.ap_ssid);
     cJSON_AddBoolToObject(root, "sd_ready", app_config_sd_ready());
@@ -739,7 +740,14 @@ static esp_err_t config_post(httpd_req_t * req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
     }
 
-    const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_pages");
+    const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_hold_ms");
+    if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
+       (item->valueint!=150 && item->valueint!=300 && item->valueint!=500 && item->valueint!=1500))) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid Fast Scroll hold time");
+    }
+    if(item != NULL) g_app_config.fast_scroll_hold_ms=(uint16_t)item->valueint;
+    item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_pages");
     if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
        item->valueint < 0 || item->valueint > 5)) {
         cJSON_Delete(root);
@@ -1052,6 +1060,7 @@ static esp_err_t status_get(httpd_req_t * req)
     }
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
+    cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     const esp_partition_t * ota = esp_ota_get_next_update_partition(NULL);

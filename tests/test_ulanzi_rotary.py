@@ -32,7 +32,7 @@ class UlanziRotaryTests(unittest.TestCase):
         cls.lib.ulanzi_rotary_cancel.argtypes=[C.POINTER(Rotary)]
         cls.lib.ulanzi_rotary_deadline.argtypes=[C.POINTER(Rotary)]
         cls.lib.ulanzi_rotary_deadline.restype=C.c_int64
-        cls.lib.fast_scroll_feed.argtypes=[C.POINTER(FastState),C.c_uint32,C.c_int,C.c_int,C.c_int,C.c_int,C.POINTER(C.c_bool)]
+        cls.lib.fast_scroll_feed.argtypes=[C.POINTER(FastState),C.c_uint32,C.c_int,C.c_int,C.c_int,C.c_int,C.c_int,C.POINTER(C.c_bool)]
         cls.lib.fast_scroll_feed.restype=C.c_int
 
     def setUp(self):self.s=Rotary()
@@ -102,24 +102,27 @@ class UlanziRotaryTests(unittest.TestCase):
         self.assertEqual(self.deltas(self.update(1,50000)),[1])
         self.assertEqual(other.direction,-1)
 
-    def test_captured_fast_spins_have_one_activation_despite_reverse_glitches(self):
+    def test_captured_fast_spins_have_no_extra_activations_from_reverse_glitches(self):
         for fixture in ('d100h_fast_spin.csv','d100h_fast_spin_late_reverses.csv'):
             with self.subTest(fixture=fixture):
                 self.s=Rotary();rows=[]
                 for line in (ROOT/'tests/fixtures'/fixture).read_text().splitlines():
                     if line and not line.startswith('#'):rows.append(tuple(map(int,line.split(','))))
-                raw=FastState();filtered=FastState();raw_entries=entries=suppressed=0;directions=[]
+                raw=FastState();filtered=FastState();clean=FastState();raw_entries=entries=clean_entries=suppressed=0;directions=[]
                 def feed(s,t,d,count):
-                    entered=C.c_bool();self.lib.fast_scroll_feed(C.byref(s),t//1000,d,count,8,2,C.byref(entered));return entered.value
+                    entered=C.c_bool();self.lib.fast_scroll_feed(C.byref(s),t//1000,d,count,8,2,150,C.byref(entered));return entered.value
                 for t,d in rows:
                     raw_entries+=feed(raw,t,d,1)
+                    if d>0:clean_entries+=feed(clean,t,d,1)
                     out=self.update(d,t);suppressed+=out.suppressed
                     for i in range(out.count):
                         step=out.steps[i];directions.append(1 if step.delta>0 else -1)
                         entries+=feed(filtered,step.last_us,1 if step.delta>0 else -1,abs(step.delta))
-                self.assertGreater(raw_entries,1,'Recording must reproduce repeated mode entry without input qualification')
+                self.assertGreater(raw_entries,clean_entries,'Noise must cause extra activations before input qualification')
                 self.assertGreater(suppressed,0)
-                self.assertEqual(entries,1)
+                self.assertGreaterEqual(clean_entries,1)
+                self.assertEqual(entries,clean_entries,
+                    'Filtered input must match clean input, including legitimate exits after 150 ms pauses')
                 self.assertTrue(filtered.active)
                 self.assertEqual(set(directions),{1})
 

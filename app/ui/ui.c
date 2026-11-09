@@ -273,6 +273,7 @@ static ui_system_config_t g_system_config = {
     .volume = 65,
     .np_bg_mode = 2,
     .fast_scroll_pages = 2,
+    .fast_scroll_hold_ms = 150,
     .wifi_status = "WiFi off",
     .wifi_ip = "--",
 };
@@ -357,6 +358,16 @@ static void ui_feedback_emit(ui_feedback_t type, bool from_key)
         if(g_key_feedback_scope) g_key_feedback_sent = true;
         g_feedback_cb((int)type);
     }
+}
+
+/* Mode transitions are additional feedback, independent of the per-key click
+ * deduplication scope. They still obey the user's Key Feedback setting. */
+static void ui_fast_feedback(ui_feedback_t type)
+{
+    bool previous_scope = g_key_feedback_scope;
+    g_key_feedback_scope = false;
+    ui_feedback_emit(type, true);
+    g_key_feedback_scope = previous_scope;
 }
 
 void ui_play_key_feedback(ui_key_t key)
@@ -2334,6 +2345,7 @@ void ui_set_system_config(const ui_system_config_t * cfg)
     snprintf(ip, sizeof(ip), "%s", g_system_config.wifi_ip);
 
     g_system_config = *cfg;
+    g_system_config.fast_scroll_hold_ms = fast_scroll_hold_normalize(cfg->fast_scroll_hold_ms);
     if(cfg->fast_scroll_pages < 0 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
     g_system_config.brightness = screen_brightness_normalize(cfg->brightness);
 
@@ -7344,6 +7356,8 @@ enum {
 static int settings_selected;
 static bool settings_detail_open;
 static lv_obj_t * settings_right_content;
+static lv_obj_t * settings_left_list;
+static int settings_left_scroll_y;
 static counter_t settings_counter;
 static lv_obj_t * settings_detail_time_format_value;
 static lv_obj_t * settings_detail_set_time_value;
@@ -7357,6 +7371,8 @@ static lv_obj_t * settings_detail_theme_aqua_check;
 static lv_obj_t * settings_detail_theme_win95_check;
 static lv_obj_t * settings_screen_off_checks[3];
 static lv_obj_t * settings_fast_scroll_checks[6];
+static lv_obj_t * settings_fast_hold_checks[4];
+static const int settings_fast_hold_values[] = {150,300,500,1500};
 static lv_obj_t * settings_brightness_checks[3];
 static const int settings_brightness_values[] = {5, 45, 100};
 static const int settings_idle_minutes[] = {30, 60, 0};
@@ -7415,6 +7431,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
     if(cfg == NULL) return;
 
     g_system_config = *cfg;
+    g_system_config.fast_scroll_hold_ms = fast_scroll_hold_normalize(cfg->fast_scroll_hold_ms);
     if(cfg->fast_scroll_pages < 0 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
     screen_idle_configure(&g_screen_idle, cfg->screen_off_minutes, lv_tick_get());
     if(g_system_config.sound_mode < 0) g_system_config.sound_mode = 0;
@@ -8070,7 +8087,7 @@ static lv_obj_t * settings_make_choice_row(lv_obj_t * parent, const char * label
 static void settings_section(lv_obj_t * parent, const char * title)
 {
     lv_obj_t * row = make_row(parent, 38);
-    lv_obj_set_style_pad_left(row, 24, 0);
+    lv_obj_set_style_pad_left(row, 16, 0);
     lv_obj_set_clickable(row, false);
     make_label(row, title, FONT_GROUP, COL_MUTED);
 }
@@ -8198,6 +8215,20 @@ static void settings_theme_touch_cb(lv_event_t * event)
     settings_theme_action(lv_event_get_user_data(event));
 }
 
+static void settings_update_fast_scroll_checks(void)
+{
+    for(int i=0;i<6;i++) if(settings_fast_scroll_checks[i]) {
+        const char *text=i==g_system_config.fast_scroll_pages ? ICON_CHECK : "";
+        if(strcmp(lv_label_get_text(settings_fast_scroll_checks[i]),text))
+            lv_label_set_text(settings_fast_scroll_checks[i],text);
+    }
+    for(int i=0;i<4;i++) if(settings_fast_hold_checks[i]) {
+        const char *text=settings_fast_hold_values[i]==g_system_config.fast_scroll_hold_ms ? ICON_CHECK : "";
+        if(strcmp(lv_label_get_text(settings_fast_hold_checks[i]),text))
+            lv_label_set_text(settings_fast_hold_checks[i],text);
+    }
+}
+
 static void settings_fast_scroll_action(void * user)
 {
     int pages = (int)(intptr_t)user;
@@ -8212,6 +8243,21 @@ static void settings_fast_scroll_action(void * user)
 static void settings_fast_scroll_touch_cb(lv_event_t * event)
 {
     settings_fast_scroll_action(lv_event_get_user_data(event));
+}
+
+static void settings_fast_hold_action(void * user)
+{
+    int index=(int)(intptr_t)user;
+    if(index<0 || index>=4) return;
+    g_system_config.fast_scroll_hold_ms=settings_fast_hold_values[index];
+    for(int i=0;i<4;i++) if(settings_fast_hold_checks[i])
+        lv_label_set_text(settings_fast_hold_checks[i],i==index ? ICON_CHECK : "");
+    settings_system_changed();
+}
+
+static void settings_fast_hold_touch_cb(lv_event_t * event)
+{
+    settings_fast_hold_action(lv_event_get_user_data(event));
 }
 
 static void settings_screen_off_action(void * user)
@@ -8343,6 +8389,7 @@ static void settings_ble_scan_connect_cb(lv_event_t * event)
 
 static void settings_tick(void)
 {
+    if(settings_selected==SETTING_FAST_SCROLL) settings_update_fast_scroll_checks();
     if(g_current_screen == SCR_SETTINGS && settings_selected == SETTING_SCREEN &&
        !settings_detail_dirty) {
         settings_update_screen_checks();
@@ -8599,6 +8646,7 @@ static void settings_np_bg_touch_cb(lv_event_t * event)
 static void settings_render_detail(lv_obj_t * parent, bool interactive)
 {
     memset(settings_fast_scroll_checks, 0, sizeof(settings_fast_scroll_checks));
+    memset(settings_fast_hold_checks, 0, sizeof(settings_fast_hold_checks));
     if(parent == NULL) return;
     lv_obj_clean(parent);
 
@@ -8896,6 +8944,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             break;
         }
         case SETTING_FAST_SCROLL: {
+            settings_section(parent,"Start Fast Scrolling After");
             static const char * const labels[] = {"Off", "1 Page", "2 Pages", "3 Pages", "4 Pages", "5 Pages"};
             for(int i = 0; i < 6; i++) {
                 lv_obj_t * row = settings_make_choice_row(parent, labels[i],
@@ -8903,6 +8952,15 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                 if(interactive) focus_add_clickable(row, settings_fast_scroll_action,
                     NULL, (void *)(intptr_t)i, true);
                 else touch_add_clickable(row, settings_fast_scroll_touch_cb, (void *)(intptr_t)i);
+            }
+            settings_section(parent,"Hold Time");
+            static const char * const hold_labels[] = {"150 ms","300 ms","500 ms","1.5 s"};
+            for(int i=0;i<4;i++) {
+                lv_obj_t * row=settings_make_choice_row(parent,hold_labels[i],
+                    g_system_config.fast_scroll_hold_ms==settings_fast_hold_values[i],
+                    &settings_fast_hold_checks[i]);
+                if(interactive) focus_add_clickable(row,settings_fast_hold_action,NULL,(void *)(intptr_t)i,true);
+                else touch_add_clickable(row,settings_fast_hold_touch_cb,(void *)(intptr_t)i);
             }
             break;
         }
@@ -9046,6 +9104,8 @@ static void ui_page_teardown(void)
     playlists_detail_dirty = false;
     playlists_right_content = NULL;
 
+    if(settings_left_list) settings_left_scroll_y = lv_obj_get_scroll_y(settings_left_list);
+    settings_left_list = NULL;
     if(settings_detail_timer) lv_timer_pause(settings_detail_timer);
     settings_detail_dirty = false;
     settings_right_content = NULL;
@@ -9131,6 +9191,7 @@ static bool settings_back(void)
     }
     if(settings_selected > 0) {
         settings_selected = 0;
+        if(g_focus_count > 0) focus_select(0);
         settings_update_count();
         if(settings_right_content) settings_schedule_detail();
         return true;
@@ -9155,6 +9216,8 @@ static void settings_same_key(void)
         return;
     }
     settings_selected = 0;
+    settings_left_scroll_y = 0;
+    if(settings_left_list) lv_obj_scroll_to_y(settings_left_list, 0, LV_ANIM_OFF);
     settings_update_count();
     if(g_focus_count > 0) focus_select(0);
 }
@@ -9214,8 +9277,12 @@ static void settings_create(lv_obj_t * parent)
     counter_create(head, &settings_counter);
     settings_update_count();
 
+    /* Keep the heading fixed while the settings rows scroll independently. */
+    lv_obj_t * list = make_scroll(left);
+    lv_obj_set_style_pad_row(list, 0, 0);
+    settings_left_list = list;
     for(int i = 0; i < SETTING_COUNT; i++) {
-        lv_obj_t * row = make_row(left, 56);
+        lv_obj_t * row = make_row(list, 56);
         lv_obj_set_style_pad_left(row, 16, 0);
         lv_obj_set_style_outline_width(row, 0, 0);
         make_label(row, settings_names[i], FONT_H2, COL_TEXT);
@@ -9253,6 +9320,9 @@ static void settings_create(lv_obj_t * parent)
         g_page_detail_timer = settings_detail_timer;
     }
     else settings_render_detail(settings_right_content, settings_detail_open);
+
+    lv_obj_update_layout(root);
+    lv_obj_scroll_to_y(list, settings_left_scroll_y, LV_ANIM_OFF);
 
     if(settings_detail_open) {
         if(settings_time_open) {
@@ -9602,8 +9672,11 @@ static lv_timer_t * g_fast_timer;
 
 static void ui_fast_scroll_reset_reason(const char * reason)
 {
-    if(g_fast_scroll.active) UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d idle_ms=%u",
-        reason, (int)g_current_screen, (unsigned)(lv_tick_get()-g_fast_scroll.last_ms));
+    if(g_fast_scroll.active) {
+        UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d idle_ms=%u",
+            reason, (int)g_current_screen, (unsigned)(lv_tick_get()-g_fast_scroll.last_ms));
+        ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
+    }
     fast_scroll_reset(&g_fast_scroll);
     g_fast_context = NULL;
     if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
@@ -9648,10 +9721,18 @@ static void ui_fast_marker_update(lv_timer_t * timer)
     LV_UNUSED(timer);
     bool was_active = g_fast_scroll.active;
     uint32_t idle_ms = lv_tick_get()-g_fast_scroll.last_ms;
-    if(fast_scroll_expire(&g_fast_scroll, lv_tick_get()) || !g_fast_scroll.active) {
-        if(was_active) UI_PERF_LOG("fast_scroll exit: reason=idle screen=%d idle_ms=%u",
-            (int)g_current_screen, (unsigned)idle_ms);
+    if(fast_scroll_expire(&g_fast_scroll, lv_tick_get())) {
+        if(was_active) {
+            UI_PERF_LOG("fast_scroll exit: reason=idle screen=%d idle_ms=%u",
+                (int)g_current_screen, (unsigned)idle_ms);
+            ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
+        }
         ui_fast_scroll_reset(); return;
+    }
+    if(!g_fast_scroll.active) {
+        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+        if(g_fast_timer) lv_timer_pause(g_fast_timer);
+        return;
     }
     if(!ui_screen_is_on()) { ui_fast_scroll_reset_reason("screen_off"); return; }
     lv_obj_t * row = NULL;
@@ -9721,20 +9802,23 @@ void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint
         bool was_active = g_fast_scroll.active;
         int direction = key == UI_KEY_UP ? -1 : 1;
         const char * reason = g_fast_scroll.direction != direction ? "direction" :
-            g_fast_scroll.rows != rows || g_fast_scroll.pages != g_system_config.fast_scroll_pages
+            g_fast_scroll.rows != rows || g_fast_scroll.pages != g_system_config.fast_scroll_pages ||
+            g_fast_scroll.hold_ms != g_system_config.fast_scroll_hold_ms
                 ? "configuration" : "idle";
         int32_t gap_ms = (int32_t)(tick-g_fast_scroll.last_ms);
         steps += fast_scroll_feed(&g_fast_scroll, tick, direction,
-            1, rows, g_system_config.fast_scroll_pages, &just_entered);
-        if(was_active && (!g_fast_scroll.active || just_entered))
+            1, rows, g_system_config.fast_scroll_pages, g_system_config.fast_scroll_hold_ms, &just_entered);
+        if(was_active && (!g_fast_scroll.active || just_entered)) {
             UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d gap_ms=%ld",
                 reason, (int)g_current_screen, (long)gap_ms);
+            ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
+        }
         entered |= just_entered;
     }
     if(entered) {
-        UI_PERF_LOG("fast_scroll enter: screen=%d rows=%d threshold=%d count=%u",
-            (int)g_current_screen, rows, g_system_config.fast_scroll_pages, g_fast_scroll.count);
-        ui_feedback_emit(UI_FEEDBACK_FAST_SCROLL, true);
+        UI_PERF_LOG("fast_scroll enter: screen=%d rows=%d threshold=%d hold_ms=%d count=%u",
+            (int)g_current_screen, rows, g_system_config.fast_scroll_pages, g_system_config.fast_scroll_hold_ms, g_fast_scroll.count);
+        ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL);
     }
     ui_handle_key_repeat_raw(key, steps);
     if(g_fast_scroll.active) {
