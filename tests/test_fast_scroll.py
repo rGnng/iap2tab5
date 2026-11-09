@@ -74,6 +74,16 @@ class FastScrollTests(unittest.TestCase):
                 self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),5099))
                 self.assertEqual(self.feed(5100,rows=rows,pages=pages),(1,False))
 
+    def test_coarse_tick_rounding_does_not_turn_a_burst_into_a_timeout(self):
+        self.feed(1000,16)
+        self.assertFalse(self.lib.fast_scroll_expire(C.byref(self.s),999))
+        self.assertTrue(self.s.active)
+        self.assertEqual(self.feed(1020),(8,False))
+        self.assertEqual(self.feed(1019),(8,False))
+        self.assertTrue(self.s.active)
+        self.assertEqual(self.s.last_ms,1020)
+        self.assertEqual(self.feed(1021),(8,False))
+
     def test_off_invalid_or_single_row_contexts_never_accelerate(self):
         for pages,rows in [(0,8),(-1,8),(6,8),(2,1),(2,0)]:
             self.feed(0,16)

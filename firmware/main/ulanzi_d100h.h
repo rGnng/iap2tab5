@@ -81,6 +81,36 @@ typedef struct { bool down; } ulanzi_back_t;
 bool ulanzi_back_update(ulanzi_back_t * state, bool down);
 void ulanzi_back_cancel(ulanzi_back_t * state);
 
+/* D100H encoders occasionally report a lone opposite step during a fast
+ * turn. Qualify that reversal before emitting navigation, for both USB/BLE.
+ * Ordinary turns stay immediate. A deliberate isolated reverse step is
+ * released after 120 ms; three opposite steps confirm immediately. */
+#define ULANZI_ROTARY_RAPID_MS 80
+#define ULANZI_ROTARY_CONFIRM_MS 120
+#define ULANZI_ROTARY_CONFIRM_STEPS 3
+typedef struct {
+    int direction; /* -1 = CCW, +1 = CW, 0 = no preceding turn */
+    int64_t last_us;
+    int64_t pending_us, pending_last_us;
+    bool pending;
+    unsigned pending_count;
+} ulanzi_rotary_t;
+typedef struct {
+    int delta;
+    int64_t first_us, last_us;
+} ulanzi_rotary_step_t;
+typedef struct {
+    ulanzi_rotary_step_t steps[2];
+    unsigned count;
+    bool suppressed;
+} ulanzi_rotary_result_t;
+int64_t ulanzi_rotary_deadline(const ulanzi_rotary_t *state);
+ulanzi_rotary_result_t ulanzi_rotary_update(ulanzi_rotary_t *state, int direction, int64_t now_us);
+ulanzi_rotary_result_t ulanzi_rotary_poll(ulanzi_rotary_t *state, int64_t now_us);
+/* Flush before a following action key so Enter uses the intended selection. */
+ulanzi_rotary_result_t ulanzi_rotary_flush(ulanzi_rotary_t *state);
+void ulanzi_rotary_cancel(ulanzi_rotary_t *state);
+
 /* Knob press/held-turn gesture (IDs 0x07, 0x0B, 0x0C). A plain click emits
  * Enter on release; any held turn cancels that click and changes volume.
  * Normal turns (0x09/0x0A) remain stateless, coalescible navigation events. */
@@ -94,7 +124,8 @@ bool ulanzi_knob_update(ulanzi_knob_t * state, uint8_t id, bool down,
 void ulanzi_knob_cancel(ulanzi_knob_t * state);
 
 /* Stateless press/rotation events only. Top-row buttons and knob clicks use
- * the stateful helpers above, including their release reports. */
+ * the stateful helpers above, including their release reports. Normal rotary
+ * reports must pass through ulanzi_rotary_update() before navigation. */
 bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key);
 
 #ifdef __cplusplus

@@ -9,6 +9,8 @@
 
 #if defined(ESP_PLATFORM)
 
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include "esp_hosted.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -720,6 +722,10 @@ static int gap_event(struct ble_gap_event * event, void * arg)
             }
             if(id == 0x07 || id == 0x0B || id == 0x0C) {
                 usb_hid_input_post_knob(D100H_INPUT_BLE, id, down);
+                return 0;
+            }
+            if(id == 0x09 || id == 0x0A) {
+                usb_hid_input_post_rotary(D100H_INPUT_BLE, id, down);
                 return 0;
             }
             if(id == 0x05 || id == 0x08) {

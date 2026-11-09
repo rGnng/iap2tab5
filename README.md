@@ -142,7 +142,8 @@ Its top-right key opens the context menu on a tap and toggles Star on a hold.
 Hold the knob down and turn it to adjust iPod volume: clockwise raises it,
 counter-clockwise lowers it. A plain knob click activates on release;
 releasing after a held turn does not activate the selected item. This works
-over USB and BLE.
+over USB and BLE. Rapid rotation filters isolated reverse glitches before
+navigation; a deliberate single reverse notch is delivered within 120 ms.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
 **Settings → Fast Scroll** selects the activation speed: Off or 1–5 pages per

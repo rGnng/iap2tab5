@@ -35,7 +35,7 @@ typedef void *QueueHandle_t;
 static QueueHandle_t s_key_events=(void*)1;
 static int64_t clock_us;
 static bool screen_on;
-static int actions[64],offs,wakes,feedback;
+static int actions[64],offs,wakes,feedback,enter_after_up;
 static uint32_t nav_first,nav_last;static int nav_count;
 static bool bsp_display_lock(unsigned ms) { (void)ms;return true; }
 static void bsp_display_unlock(void) {}
@@ -43,7 +43,7 @@ static int64_t esp_timer_get_time(void) { return clock_us; }
 bool ui_user_activity(void) { bool woke=!screen_on;screen_on=true;if(woke)wakes++;return woke; }
 bool ui_screen_is_on(void) { return screen_on; }
 void ui_screen_off(void) { screen_on=false;offs++; }
-void ui_handle_key(ui_key_t key) { actions[key]++; }
+void ui_handle_key(ui_key_t key) { if(key==UI_KEY_ENTER)enter_after_up=actions[UI_KEY_UP];actions[key]++; }
 void ui_handle_key_repeat(ui_key_t key,int n) { actions[key]+=n; }
 static uint32_t lv_tick_get(void) { return (uint32_t)(clock_us/1000); }
 void ui_handle_key_repeat_timed(ui_key_t key,int n,uint32_t first,uint32_t last) { nav_first=first;nav_last=last;nav_count=n;actions[key]+=n; }
@@ -62,9 +62,9 @@ static int xQueueSend(void *q,const void *data,int ticks) {
         exports=r'''
 void reset(int on) {
  memset(s_top_right,0,sizeof(s_top_right));memset(s_knob,0,sizeof(s_knob));
- memset(s_back,0,sizeof(s_back));memset(s_play,0,sizeof(s_play));
+ memset(s_back,0,sizeof(s_back));memset(s_play,0,sizeof(s_play));memset(s_rotary,0,sizeof(s_rotary));
  memset(s_button_down,0,sizeof(s_button_down));memset(s_wake_consumed,0,sizeof(s_wake_consumed));
- memset(actions,0,sizeof(actions));offs=wakes=feedback=0;nav_first=nav_last=nav_count=0;clock_us=0;screen_on=on;
+ memset(actions,0,sizeof(actions));offs=wakes=feedback=enter_after_up=0;nav_first=nav_last=nav_count=0;clock_us=0;screen_on=on;
  s_hold_pending=s_hold_sent=false;s_hold_sent_us=0;queued_valid=false;
 }
 void input(int source,int id,int down,int64_t arrival,int64_t dispatch_time) {
@@ -73,23 +73,27 @@ void input(int source,int id,int down,int64_t arrival,int64_t dispatch_time) {
  else if(id==2) usb_hid_input_post_play(source,down);
  else if(id==3) usb_hid_input_post_top_right(source,down);
  else if(id==7 || id==11 || id==12) usb_hid_input_post_knob(source,id,down);
- else if(id==9 || id==10) usb_hid_input_post_key(id==9?UI_KEY_UP:UI_KEY_DOWN);
+ else if(id==9 || id==10) usb_hid_input_post_rotary(source,id,down);
  else if(id==0) usb_hid_input_cancel_gestures(source);
  clock_us=dispatch_time;if(queued_valid)dispatch_key_event(&queued);
 }
 void poll_at(int64_t now) {
  clock_us=now;
  for(int i=0;i<D100H_INPUT_COUNT;i++) {
+  dispatch_rotary_poll(i,now);
   dispatch_play(i,ULANZI_PLAY_POLL,now);
   dispatch_top_right(i,ULANZI_TOP_RIGHT_POLL,now);
  }
 }
 void keyboard_play(void) { usb_hid_input_post_key(UI_KEY_7);dispatch_key_event(&queued); }
+int up_count(void) { return actions[UI_KEY_UP]; }
+int down_count(void) { return actions[UI_KEY_DOWN]; }
 int back_count(void) { return actions[UI_KEY_BACK]; }
 int play_count(void) { return actions[UI_KEY_7]; }
 int star_count(void) { return actions[UI_KEY_STAR]; }
 int context_count(void) { return actions[UI_KEY_CONTEXT]; }
 int enter_count(void) { return actions[UI_KEY_ENTER]; }
+int enter_up_count(void) { return enter_after_up; }
 int volume_count(void) { return actions[UI_KEY_VOLUME_UP]; }
 uint32_t first_tick(void) { return nav_first; }
 uint32_t last_tick(void) { return nav_last; }
@@ -210,6 +214,42 @@ int is_on(void) { return screen_on; }
         self.assertEqual(self.lib.first_tick(),123)
         self.assertEqual(self.lib.last_tick(),123)
         self.assertEqual(self.lib.notch_count(),1)
+
+    def test_rotary_glitch_does_not_reach_navigation(self):
+        for id,t in [(10,0),(10,20000),(9,30000),(10,55000)]:self.post(id,True,t)
+        self.lib.poll_at(200000)
+        self.assertEqual((self.lib.up_count(),self.lib.down_count()),(0,3))
+
+    def test_rotary_single_reverse_is_not_lost_when_turn_stops(self):
+        self.post(10,True);self.post(10,True,20000);self.post(9,True,30000)
+        self.lib.poll_at(149999);self.assertEqual(self.lib.up_count(),0)
+        self.lib.poll_at(150000);self.assertEqual(self.lib.up_count(),1)
+
+    def test_rotary_pending_reverse_is_flushed_before_knob_enter(self):
+        self.post(10,True);self.post(10,True,20000);self.post(9,True,30000)
+        self.post(7,True,40000);self.post(7,False,45000)
+        self.assertEqual((self.lib.up_count(),self.lib.enter_count(),self.lib.enter_up_count()),(1,1,1))
+
+    def test_rotary_disconnect_cancels_only_its_source(self):
+        self.post(10,True);self.post(10,True,20000);self.post(9,True,30000)
+        self.post(9,True,40000,source=1);self.post(0,False,45000)
+        self.lib.poll_at(200000)
+        self.assertEqual((self.lib.up_count(),self.lib.down_count()),(1,2))
+
+    def test_rotary_wake_notch_does_not_reappear_after_filter_deadline(self):
+        self.lib.reset(0);self.post(10,True);self.lib.poll_at(100000)
+        self.assertEqual((self.lib.wake_count(),self.lib.down_count()),(1,0))
+        self.post(9,True,120000)
+        self.assertEqual(self.lib.up_count(),1)
+
+    def test_captured_rotary_stream_reaches_dispatch_without_false_reverse_steps(self):
+        expected=0;last=0
+        for line in (ROOT/'tests/fixtures/d100h_fast_spin.csv').read_text().splitlines():
+            if not line or line.startswith('#'):continue
+            last,d=map(int,line.split(','));self.post(10 if d>0 else 9,True,last)
+            expected+=d>0
+        self.lib.poll_at(last+60000)
+        self.assertEqual((self.lib.up_count(),self.lib.down_count()),(0,expected))
 
     def test_keyboard_play_still_acts_on_down(self):
         self.lib.keyboard_play();self.assertEqual(self.lib.play_count(),1)

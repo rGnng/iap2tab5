@@ -213,6 +213,73 @@ void ulanzi_back_cancel(ulanzi_back_t * state)
     state->down = false;
 }
 
+void ulanzi_rotary_cancel(ulanzi_rotary_t *state)
+{
+    *state = (ulanzi_rotary_t){0};
+}
+
+int64_t ulanzi_rotary_deadline(const ulanzi_rotary_t *state)
+{
+    return state->pending ? state->pending_us + (int64_t)ULANZI_ROTARY_CONFIRM_MS * 1000 : 0;
+}
+
+ulanzi_rotary_result_t ulanzi_rotary_flush(ulanzi_rotary_t *state)
+{
+    ulanzi_rotary_result_t out = {0};
+    if(state->pending) {
+        state->direction = -state->direction;
+        state->last_us = state->pending_last_us;
+        out.steps[out.count++] = (ulanzi_rotary_step_t){
+            (int)state->pending_count*state->direction, state->pending_us, state->pending_last_us};
+        state->pending = false;
+        state->pending_count = 0;
+    }
+    return out;
+}
+
+ulanzi_rotary_result_t ulanzi_rotary_poll(ulanzi_rotary_t *state, int64_t now_us)
+{
+    if(state->pending && now_us >= ulanzi_rotary_deadline(state)) return ulanzi_rotary_flush(state);
+    return (ulanzi_rotary_result_t){0};
+}
+
+ulanzi_rotary_result_t ulanzi_rotary_update(ulanzi_rotary_t *state, int direction, int64_t now_us)
+{
+    ulanzi_rotary_result_t out = {0};
+    if(direction != -1 && direction != 1) return out;
+    if(state->pending && now_us >= ulanzi_rotary_deadline(state)) out = ulanzi_rotary_flush(state);
+    if(state->pending) {
+        if(direction != state->direction) {
+            state->pending_count++;
+            state->pending_last_us = now_us;
+            if(state->pending_count < ULANZI_ROTARY_CONFIRM_STEPS) return out;
+            /* Fast turns can contain two-report glitches. Require a third
+             * consistent report, then preserve all held detents and times. */
+            out.steps[out.count++] = (ulanzi_rotary_step_t){
+                (int)state->pending_count*direction, state->pending_us, now_us};
+            state->pending = false;
+            state->pending_count = 0;
+            state->direction = direction;
+            state->last_us = now_us;
+            return out;
+        }
+        state->pending = false;
+        state->pending_count = 0;
+        out.suppressed = true;
+    }
+    if(state->direction && direction != state->direction &&
+       now_us - state->last_us <= (int64_t)ULANZI_ROTARY_RAPID_MS * 1000) {
+        state->pending = true;
+        state->pending_count = 1;
+        state->pending_us = state->pending_last_us = now_us;
+        return out;
+    }
+    state->direction = direction;
+    state->last_us = now_us;
+    out.steps[out.count++] = (ulanzi_rotary_step_t){direction, now_us, now_us};
+    return out;
+}
+
 void ulanzi_knob_cancel(ulanzi_knob_t * state)
 {
     *state = (ulanzi_knob_t){0};

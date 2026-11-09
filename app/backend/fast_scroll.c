@@ -6,7 +6,8 @@ void fast_scroll_reset(fast_scroll_t *s) { memset(s, 0, sizeof(*s)); }
 bool fast_scroll_expire(fast_scroll_t *s, uint32_t now)
 {
     bool active = s->active;
-    if(s->count && (uint32_t)(now - s->last_ms) >= FAST_SCROLL_PAUSE_MS) fast_scroll_reset(s);
+    int32_t elapsed = (int32_t)(now - s->last_ms);
+    if(s->count && elapsed >= (int32_t)FAST_SCROLL_PAUSE_MS) fast_scroll_reset(s);
     return active && !s->active;
 }
 
@@ -19,6 +20,11 @@ int fast_scroll_feed(fast_scroll_t *s, uint32_t now, int direction,
         fast_scroll_reset(s);
         return notches;
     }
+    /* Report age and the 5 ms LVGL tick are sampled separately. Queued
+     * reports in the same BLE burst can map a few milliseconds backwards.
+     * Keep input time monotonic instead of mistaking unsigned underflow for
+     * a long pause (or pruning the entire rolling window). */
+    if(s->count && (int32_t)(now - s->last_ms) < 0) now = s->last_ms;
     fast_scroll_expire(s, now);
     if(s->direction != direction || s->rows != rows || s->pages != pages) fast_scroll_reset(s);
     s->direction = direction; s->rows = rows; s->pages = pages;

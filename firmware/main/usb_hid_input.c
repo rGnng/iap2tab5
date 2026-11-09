@@ -6,6 +6,8 @@
  * Key presses are translated into the shared ui_key_t events.
  */
 
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include "usb_hid_input.h"
 
 #include "usb_host_core.h"
@@ -44,6 +46,7 @@ typedef enum {
     KEY_EVENT_ACTIVITY,
     KEY_EVENT_BACK,
     KEY_EVENT_PLAY,
+    KEY_EVENT_ROTARY,
 } key_event_kind_t;
 
 typedef struct {
@@ -59,6 +62,7 @@ static QueueHandle_t s_device_events;
 static QueueHandle_t s_key_events;
 static ulanzi_top_right_t s_top_right[D100H_INPUT_COUNT];
 static ulanzi_knob_t s_knob[D100H_INPUT_COUNT];
+static ulanzi_rotary_t s_rotary[D100H_INPUT_COUNT];
 static ulanzi_play_t s_play[D100H_INPUT_COUNT];
 static ulanzi_back_t s_back[D100H_INPUT_COUNT];
 static uint16_t s_button_down[D100H_INPUT_COUNT];
@@ -296,6 +300,9 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                     else if(id == 0x07 || id == 0x0B || id == 0x0C) {
                         usb_hid_input_post_knob(D100H_INPUT_USB, id, down);
                     }
+                    else if(id == 0x09 || id == 0x0A) {
+                        usb_hid_input_post_rotary(D100H_INPUT_USB, id, down);
+                    }
                     else if(id == 0x05 || id == 0x08) {
                         usb_hid_input_post_key_state(
                             id == 0x05 ? UI_KEY_PREV_TRACK
@@ -435,6 +442,63 @@ static uint16_t gesture_button_bit(const key_event_t * evt)
     return 0;
 }
 
+/* Direction qualification happens here, before navigation and Fast Scroll.
+ * UI drawing and list state never participate in the Ulanzi debounce. */
+static void dispatch_rotary_run(d100h_input_source_t source, const ulanzi_rotary_step_t *run)
+{
+    (void)source; /* Source is otherwise used only by the optional trace. */
+    if(!run->delta || !bsp_display_lock(1000)) return;
+    if(ui_screen_is_on()) {
+        uint32_t tick = lv_tick_get();
+        int64_t now_us = esp_timer_get_time();
+        ESP_LOGD(TAG, "D100H rotary output source=%d delta=%d", (int)source, run->delta);
+        ui_handle_key_repeat_timed(run->delta<0 ? UI_KEY_UP : UI_KEY_DOWN,
+            run->delta<0 ? -run->delta : run->delta,
+            tick-(uint32_t)((now_us-run->first_us)/1000),
+            tick-(uint32_t)((now_us-run->last_us)/1000));
+    }
+    bsp_display_unlock();
+}
+
+static void rotary_accumulate(d100h_input_source_t source, ulanzi_rotary_step_t *run,
+                               const ulanzi_rotary_result_t *out)
+{
+    if(out->suppressed) ESP_LOGD(TAG, "D100H rotary reverse glitch filtered source=%d", (int)source);
+    for(unsigned i=0;i<out->count;i++) {
+        const ulanzi_rotary_step_t *step = &out->steps[i];
+        if(run->delta && ((run->delta<0) != (step->delta<0))) {
+            dispatch_rotary_run(source,run);
+            *run = (ulanzi_rotary_step_t){0};
+        }
+        if(!run->delta) *run = *step;
+        else { run->delta += step->delta; run->last_us = step->last_us; }
+    }
+}
+
+static void dispatch_rotary_poll(d100h_input_source_t source, int64_t now_us)
+{
+    ulanzi_rotary_result_t out = ulanzi_rotary_poll(&s_rotary[source],now_us);
+    ulanzi_rotary_step_t run = {0};
+    rotary_accumulate(source,&run,&out);
+    dispatch_rotary_run(source,&run);
+}
+
+static void dispatch_rotary_burst(const key_event_t *first)
+{
+    key_event_t current = *first;
+    ulanzi_rotary_step_t run = {0};
+    for(int n=0;n<64;n++) {
+        ulanzi_rotary_result_t out = ulanzi_rotary_update(&s_rotary[first->source],
+            current.id==0x09 ? -1 : 1,current.time_us);
+        rotary_accumulate(first->source,&run,&out);
+        key_event_t next;
+        if(n==63 || xQueuePeek(s_key_events,&next,0)!=pdTRUE ||
+           next.kind!=KEY_EVENT_ROTARY || next.source!=first->source) break;
+        xQueueReceive(s_key_events,&current,0);
+    }
+    dispatch_rotary_run(first->source,&run);
+}
+
 static void dispatch_play(d100h_input_source_t source,
                           ulanzi_play_event_t event, int64_t now_us)
 {
@@ -471,6 +535,16 @@ static void dispatch_top_right(d100h_input_source_t source,
 
 static void dispatch_key_event(const key_event_t * evt)
 {
+    /* Preserve event order when Enter/Back/etc follows a pending reverse.
+     * Disconnect cancels it instead; a wake press discards all gestures. */
+    if(evt->down && evt->kind!=KEY_EVENT_ROTARY && evt->kind!=KEY_EVENT_GESTURE_CANCEL) {
+        for(int i=0;i<D100H_INPUT_COUNT;i++) {
+            ulanzi_rotary_result_t out = ulanzi_rotary_flush(&s_rotary[i]);
+            ulanzi_rotary_step_t run = {0};
+            rotary_accumulate((d100h_input_source_t)i,&run,&out);
+            dispatch_rotary_run((d100h_input_source_t)i,&run);
+        }
+    }
     uint16_t bit = gesture_button_bit(evt);
     if(bit) {
         if(evt->down) {
@@ -498,6 +572,7 @@ static void dispatch_key_event(const key_event_t * evt)
             for(int i = 0; i < D100H_INPUT_COUNT; i++) {
                 s_wake_consumed[i] |= s_button_down[i];
                 ulanzi_knob_cancel(&s_knob[i]);
+                ulanzi_rotary_cancel(&s_rotary[i]);
                 ulanzi_back_cancel(&s_back[i]);
                 dispatch_play((d100h_input_source_t)i, ULANZI_PLAY_CANCEL, evt->time_us);
                 dispatch_top_right((d100h_input_source_t)i, ULANZI_TOP_RIGHT_CANCEL, evt->time_us);
@@ -506,6 +581,7 @@ static void dispatch_key_event(const key_event_t * evt)
         }
     }
     if(evt->kind == KEY_EVENT_ACTIVITY) return;
+    if(evt->kind == KEY_EVENT_ROTARY) { dispatch_rotary_burst(evt); return; }
     if(evt->kind == KEY_EVENT_PLAY) {
         dispatch_play(evt->source, evt->down ? ULANZI_PLAY_DOWN : ULANZI_PLAY_UP, evt->time_us);
         return;
@@ -536,6 +612,7 @@ static void dispatch_key_event(const key_event_t * evt)
         if(evt->kind == KEY_EVENT_GESTURE_CANCEL) {
             s_button_down[evt->source] = s_wake_consumed[evt->source] = 0;
             ulanzi_knob_cancel(&s_knob[evt->source]);
+            ulanzi_rotary_cancel(&s_rotary[evt->source]);
             ulanzi_back_cancel(&s_back[evt->source]);
             dispatch_play(evt->source, ULANZI_PLAY_CANCEL, evt->time_us);
         }
@@ -621,6 +698,8 @@ static void key_dispatch_task(void * arg)
                 : s_hold_start_us + (int64_t)HOLD_MS * 1000;
         }
         for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+            int64_t rotary_deadline = ulanzi_rotary_deadline(&s_rotary[i]);
+            if(rotary_deadline && (!deadline || rotary_deadline<deadline)) deadline=rotary_deadline;
             int64_t back_deadline = ulanzi_play_deadline(&s_play[i]);
             if(back_deadline && (!deadline || back_deadline < deadline)) deadline = back_deadline;
             int64_t top_right_deadline = ulanzi_top_right_deadline(&s_top_right[i]);
@@ -649,6 +728,7 @@ static void key_dispatch_task(void * arg)
         int64_t gesture_now = xQueuePeek(s_key_events, &next, 0) == pdTRUE
             ? next.time_us : now_us;
         for(int i = 0; i < D100H_INPUT_COUNT; i++) {
+            dispatch_rotary_poll((d100h_input_source_t)i,gesture_now);
             dispatch_play((d100h_input_source_t)i, ULANZI_PLAY_POLL, gesture_now);
             dispatch_top_right((d100h_input_source_t)i,
                                ULANZI_TOP_RIGHT_POLL, gesture_now);
@@ -720,6 +800,12 @@ void usb_hid_input_post_play(d100h_input_source_t source, bool down)
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down)
 {
     post_gesture_event(source, KEY_EVENT_TOP_RIGHT, ULANZI_TOP_RIGHT_ID, down);
+}
+
+void usb_hid_input_post_rotary(d100h_input_source_t source, uint8_t id, bool down)
+{
+    if(!down || (id!=0x09 && id!=0x0A)) return;
+    post_gesture_event(source,KEY_EVENT_ROTARY,id,true);
 }
 
 void usb_hid_input_post_knob(d100h_input_source_t source, uint8_t id, bool down)

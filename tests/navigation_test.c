@@ -82,6 +82,39 @@ static void fast_navigation(void)
     pump(40);lv_area_t marker;lv_obj_get_coords(g_fast_marker,&marker);
     check((frame[(marker.y1+marker.y2)/2][marker.x1+1]&0xffffff)==g_theme->on_selection,
           "Fast cursor rails must actually render above the selected row");
+    /* A queued BLE report can map one tick behind its predecessor because
+     * the LVGL tick and report age are sampled at different resolutions. */
+    now=lv_tick_get();int previous=albums_selected;
+    ui_handle_key_repeat_timed(UI_KEY_DOWN,1,now,now);
+    ui_handle_key_repeat_timed(UI_KEY_DOWN,1,now-1,now-1);
+    check(g_fast_scroll.active && fast_cues==1 && albums_selected==previous+rows*2,
+          "A slightly older mapped timestamp must keep fast mode and page steps");
+    int selected_slot=-1;
+    for(int i=0;i<ALBUMS_POOL;i++) if(albums_row_indices[i]==albums_selected) selected_slot=i;
+    check(selected_slot>=0,"Fixture must have a selected virtual row");
+    int bound=albums_row_indices[selected_slot];albums_row_indices[selected_slot]=-1;
+    ui_fast_marker_update(NULL);
+    check(g_fast_scroll.active && fast_cues==1,
+          "A temporarily unbound cursor row must not cancel fast scrolling");
+    check(lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Unavailable row only hides the indicator");
+    albums_row_indices[selected_slot]=bound;ui_fast_marker_update(NULL);pump(40);
+    check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
+          "Cursor indicator must recover after virtual row binding without another cue");
+    int saved_scroll=lv_obj_get_scroll_y(albums_left_list);
+    lv_obj_scroll_to_y(albums_left_list,0,LV_ANIM_OFF);ui_fast_marker_update(NULL);
+    check(g_fast_scroll.active && lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
+          "A temporarily offscreen selected row must only hide the cursor indicator");
+    lv_obj_scroll_to_y(albums_left_list,saved_scroll,LV_ANIM_OFF);ui_fast_marker_update(NULL);pump(40);
+    check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
+          "Cursor must recover after viewport layout without cancelling fast mode");
+    for(int step=0;step<20;step++) {
+        pump(50);ui_handle_key(UI_KEY_DOWN);
+        if(!g_fast_scroll.active || fast_cues!=1)
+            fprintf(stderr,"Sustained spin reset: step=%d selected=%d cues=%d active=%d\n",step,albums_selected,fast_cues,g_fast_scroll.active);
+        check(g_fast_scroll.active && fast_cues==1,
+              "A continuous page spin must survive recycled rows and reaching the list end");
+    }
+    albums_select(rows*3-1);
     int old=albums_selected;ui_handle_key(UI_KEY_DOWN);
     check(albums_selected==old+rows && fast_cues==1,"One fast notch must move exactly one page without another entry cue");
     ui_handle_key(UI_KEY_UP);
@@ -90,6 +123,9 @@ static void fast_navigation(void)
     check(!g_fast_scroll.active,"Reverse spin must first rebuild its own physical velocity");
     pump(50);ui_handle_key(UI_KEY_UP);
     check(g_fast_scroll.active && fast_cues==2,"A sustained reverse spin must re-enter fast mode without losing its first notch");
+    ui_handle_key(UI_KEY_UP);ui_handle_key(UI_KEY_UP);pump(40);
+    check(albums_selected==-1 && g_fast_scroll.active && fast_cues==2,
+          "Reaching Shuffle All must preserve the gesture and not add entry cues");
     ui_fast_scroll_reset();now=lv_tick_get();
     ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);pump(1400);
     check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),

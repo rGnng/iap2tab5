@@ -26,6 +26,8 @@ void usb_hid_input_post_back(d100h_input_source_t source, bool down);
 void usb_hid_input_post_play(d100h_input_source_t source, bool down);
 /** Top-right: tap for Context, hold 600 ms for Star while still pressed. */
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down);
+/** Ordinary D100H rotation; reverse glitches are qualified before navigation. */
+void usb_hid_input_post_rotary(d100h_input_source_t source, uint8_t id, bool down);
 /** Knob click / held rotation: vendor IDs 0x07, 0x0B and 0x0C. */
 void usb_hid_input_post_knob(d100h_input_source_t source, uint8_t id, bool down);
 /** Cancel a source's pending gestures when it disconnects. */

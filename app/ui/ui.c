@@ -9600,12 +9600,19 @@ static lv_obj_t * g_fast_context;
 static lv_obj_t * g_fast_marker;
 static lv_timer_t * g_fast_timer;
 
-static void ui_fast_scroll_reset(void)
+static void ui_fast_scroll_reset_reason(const char * reason)
 {
+    if(g_fast_scroll.active) UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d idle_ms=%u",
+        reason, (int)g_current_screen, (unsigned)(lv_tick_get()-g_fast_scroll.last_ms));
     fast_scroll_reset(&g_fast_scroll);
     g_fast_context = NULL;
     if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
     if(g_fast_timer) lv_timer_pause(g_fast_timer);
+}
+
+static void ui_fast_scroll_reset(void)
+{
+    ui_fast_scroll_reset_reason("page_change");
 }
 
 /* Only vertical list navigation accelerates. Value editors, transport buttons,
@@ -9639,12 +9646,18 @@ static int ui_fast_scroll_rows(lv_obj_t **context)
 static void ui_fast_marker_update(lv_timer_t * timer)
 {
     LV_UNUSED(timer);
-    if(fast_scroll_expire(&g_fast_scroll, lv_tick_get()) || !g_fast_scroll.active || !ui_screen_is_on()) {
+    bool was_active = g_fast_scroll.active;
+    uint32_t idle_ms = lv_tick_get()-g_fast_scroll.last_ms;
+    if(fast_scroll_expire(&g_fast_scroll, lv_tick_get()) || !g_fast_scroll.active) {
+        if(was_active) UI_PERF_LOG("fast_scroll exit: reason=idle screen=%d idle_ms=%u",
+            (int)g_current_screen, (unsigned)idle_ms);
         ui_fast_scroll_reset(); return;
     }
+    if(!ui_screen_is_on()) { ui_fast_scroll_reset_reason("screen_off"); return; }
     lv_obj_t * row = NULL;
     if(g_current_screen == SCR_ALBUMS && !albums_detail_open) {
-        for(int i = 0; i < ALBUMS_POOL; i++)
+        if(albums_selected < 0) row = albums_shuffle_row;
+        else for(int i = 0; i < ALBUMS_POOL; i++)
             if(albums_row_indices[i] == albums_selected) row = albums_rows[i];
     }
     else if(g_current_screen == SCR_ARTISTS && !artists_detail_open) {
@@ -9656,12 +9669,21 @@ static void ui_fast_marker_update(lv_timer_t * timer)
             if(songs_row_indices[i] == songs_selected) row = songs_rows[i];
     }
     else if(g_focus_index >= 0 && g_focus_index < g_focus_count) row = g_focus[g_focus_index].obj;
-    if(!row || !g_fast_context) { ui_fast_scroll_reset(); return; }
+    /* Virtual row binding and layout can lag a page jump by one frame.
+     * The indicator is decorative: hide it until its row is ready, but keep
+     * the gesture latched and retry on the next timer tick. */
+    if(!row || !g_fast_context) {
+        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+        return;
+    }
     lv_area_t bounds, viewport;
     lv_obj_get_coords(row, &bounds); lv_obj_get_content_coords(g_fast_context, &viewport);
     bounds.x1 = LV_MAX(bounds.x1, viewport.x1); bounds.x2 = LV_MIN(bounds.x2, viewport.x2);
     bounds.y1 = LV_MAX(bounds.y1, viewport.y1); bounds.y2 = LV_MIN(bounds.y2, viewport.y2);
-    if(bounds.x1 > bounds.x2 || bounds.y1 > bounds.y2) { ui_fast_scroll_reset(); return; }
+    if(bounds.x1 > bounds.x2 || bounds.y1 > bounds.y2) {
+        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+        return;
+    }
     if(!g_fast_marker) {
         g_fast_marker = lv_obj_create(lv_layer_top());
         lv_obj_remove_style_all(g_fast_marker);
@@ -9680,13 +9702,13 @@ static void ui_fast_marker_update(lv_timer_t * timer)
 void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint32_t last_ms)
 {
     if(count <= 0) return;
-    if(ui_user_activity()) { ui_fast_scroll_reset(); return; }
+    if(ui_user_activity()) { ui_fast_scroll_reset_reason("wake"); return; }
     if(key != UI_KEY_UP && key != UI_KEY_DOWN) {
-        ui_fast_scroll_reset(); ui_handle_key_repeat_raw(key, count); return;
+        ui_fast_scroll_reset_reason("key_action"); ui_handle_key_repeat_raw(key, count); return;
     }
     lv_obj_t * context;
     int rows = ui_fast_scroll_rows(&context);
-    if(context != g_fast_context) ui_fast_scroll_reset();
+    if(context != g_fast_context) ui_fast_scroll_reset_reason("list_change");
     g_fast_context = context;
     bool entered = false;
     int steps = 0;
@@ -9696,11 +9718,24 @@ void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint
         uint32_t tick = count > 1 ? first_ms +
             (uint32_t)((uint64_t)(last_ms - first_ms) * i / (count - 1)) : last_ms;
         bool just_entered;
-        steps += fast_scroll_feed(&g_fast_scroll, tick, key == UI_KEY_UP ? -1 : 1,
+        bool was_active = g_fast_scroll.active;
+        int direction = key == UI_KEY_UP ? -1 : 1;
+        const char * reason = g_fast_scroll.direction != direction ? "direction" :
+            g_fast_scroll.rows != rows || g_fast_scroll.pages != g_system_config.fast_scroll_pages
+                ? "configuration" : "idle";
+        int32_t gap_ms = (int32_t)(tick-g_fast_scroll.last_ms);
+        steps += fast_scroll_feed(&g_fast_scroll, tick, direction,
             1, rows, g_system_config.fast_scroll_pages, &just_entered);
+        if(was_active && (!g_fast_scroll.active || just_entered))
+            UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d gap_ms=%ld",
+                reason, (int)g_current_screen, (long)gap_ms);
         entered |= just_entered;
     }
-    if(entered) ui_feedback_emit(UI_FEEDBACK_FAST_SCROLL, true);
+    if(entered) {
+        UI_PERF_LOG("fast_scroll enter: screen=%d rows=%d threshold=%d count=%u",
+            (int)g_current_screen, rows, g_system_config.fast_scroll_pages, g_fast_scroll.count);
+        ui_feedback_emit(UI_FEEDBACK_FAST_SCROLL, true);
+    }
     ui_handle_key_repeat_raw(key, steps);
     if(g_fast_scroll.active) {
         if(!g_fast_timer) g_fast_timer = lv_timer_create(ui_fast_marker_update, 40, NULL);
@@ -9722,7 +9757,7 @@ void ui_handle_key_repeat(ui_key_t key, int count)
 void ui_handle_key(ui_key_t key)
 {
     if(key == UI_KEY_UP || key == UI_KEY_DOWN) ui_handle_key_repeat(key, 1);
-    else { ui_fast_scroll_reset(); ui_handle_key_single(key); }
+    else { ui_fast_scroll_reset_reason("key_action"); ui_handle_key_single(key); }
 }
 
 /* Marquee target for the current page: the selected row's name (or the
