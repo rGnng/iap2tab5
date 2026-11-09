@@ -17,6 +17,7 @@ typedef struct {
     uint32_t mini_bg, mini_fg, mini_muted, mini_dim;
     uint32_t bg, surface, panel, panel_alt, border, text, muted, dim;
     uint32_t accent, selection, focus, on_selection, outline, counter;
+    uint32_t fast_scroll_band;
     uint32_t green, amber, red, purple, cyan;
     uint32_t context_panel, context_group, context_border, progress, scrim;
     uint32_t button_top, button_bottom, bevel_light, bevel_shadow;

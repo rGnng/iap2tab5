@@ -533,6 +533,38 @@ static bool ui_page_touch_pressed_enabled(void)
     return g_afc_sync_mode || g_current_screen != SCR_NOW_PLAYING;
 }
 
+/* Share the cursor band color across focused rows. USER_3 follows logical
+ * focus, including recycled virtual rows; no overlay or retained row pointer
+ * has to chase a scrolling viewport. Only mode/theme transitions change the
+ * shared color, so the idle timer never triggers repeated redraws. */
+static lv_style_t g_cursor_band_style;
+static bool g_cursor_band_ready;
+static uint32_t g_cursor_band_color;
+
+static void ui_cursor_band_color(uint32_t color)
+{
+    if(g_cursor_band_ready && color == g_cursor_band_color) return;
+    if(!g_cursor_band_ready) {
+        lv_style_init(&g_cursor_band_style);
+        g_cursor_band_ready = true;
+    }
+    g_cursor_band_color = color;
+    lv_style_set_border_color(&g_cursor_band_style, lv_color_hex(color));
+    lv_obj_report_style_change(&g_cursor_band_style);
+}
+
+static void ui_cursor_band_bind(lv_obj_t * row)
+{
+    if(!g_cursor_band_ready) ui_cursor_band_color(COL_ACCENT);
+    lv_obj_add_style(row, &g_cursor_band_style, LV_STATE_USER_3);
+}
+
+static void ui_cursor_band_focus(lv_obj_t * row, bool focused)
+{
+    if(focused) lv_obj_add_state(row, LV_STATE_USER_3);
+    else lv_obj_remove_state(row, LV_STATE_USER_3);
+}
+
 static void focus_visual(focus_item_t * item, bool focused)
 {
     if(item == NULL || item->obj == NULL || item->silent) return;
@@ -552,6 +584,7 @@ static void focus_visual(focus_item_t * item, bool focused)
         lv_obj_set_style_border_width(item->obj, focused ? 3 : 0, 0);
         lv_obj_set_style_border_side(item->obj, LV_BORDER_SIDE_LEFT, 0);
         lv_obj_set_style_border_color(item->obj, lv_color_hex(COL_ACCENT), 0);
+        ui_cursor_band_focus(item->obj, focused);
     }
     else {
         lv_obj_set_style_outline_width(item->obj, focused ? 3 : 0, 0);
@@ -585,6 +618,7 @@ static int focus_add(lv_obj_t * obj, focus_activate_fn activate,
     g_focus[index].user = user;
     g_focus[index].fill = fill;
     g_focus[index].silent = false;
+    if(fill) ui_cursor_band_bind(obj);
     return index;
 }
 
@@ -4557,6 +4591,7 @@ static void albums_apply_row_style(lv_obj_t * row, int index)
     lv_obj_set_style_border_width(row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+    ui_cursor_band_focus(row, focused);
     theme_mark_selected(row, selected);
 }
 
@@ -4572,6 +4607,7 @@ static void albums_apply_shuffle_row_style(void)
     lv_obj_set_style_border_width(albums_shuffle_row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(albums_shuffle_row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(albums_shuffle_row, lv_color_hex(COL_ACCENT), 0);
+    ui_cursor_band_focus(albums_shuffle_row, focused);
     theme_mark_selected(albums_shuffle_row, selected);
 }
 
@@ -5338,6 +5374,7 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_set_clickable(spacer, false);
 
     albums_shuffle_row = make_row(list, ALBUMS_ROW_H);
+    ui_cursor_band_bind(albums_shuffle_row);
     lv_obj_set_pos(albums_shuffle_row, 0, 0);
     lv_obj_set_width(albums_shuffle_row, LV_PCT(100));
     lv_obj_set_clickable(albums_shuffle_row, true);
@@ -5351,6 +5388,7 @@ static void albums_create(lv_obj_t * parent)
 
     for(int i = 0; i < ALBUMS_POOL; i++) {
         lv_obj_t * row = make_row(list, ALBUMS_ROW_H);
+        ui_cursor_band_bind(row);
         lv_obj_set_width(row, LV_PCT(100));
         lv_obj_set_clickable(row, true);
         lv_obj_set_gesture_bubble(row, false);
@@ -5480,6 +5518,7 @@ static void artists_apply_row_style(lv_obj_t * row, int index)
     lv_obj_set_style_border_width(row, focused ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+    ui_cursor_band_focus(row, focused);
     theme_mark_selected(row, selected);
 }
 
@@ -6121,6 +6160,7 @@ static void artists_create(lv_obj_t * parent)
     artists_first_index = -1;
     for(int i = 0; i < ARTISTS_POOL; i++) {
         lv_obj_t * row = make_row(list, ARTISTS_ROW_H);
+        ui_cursor_band_bind(row);
         lv_obj_set_width(row, LV_PCT(100));
         lv_obj_set_clickable(row, true);
         lv_obj_set_gesture_bubble(row, false);
@@ -6583,6 +6623,7 @@ static void songs_apply_selection(lv_obj_t * row, bool selected)
     lv_obj_set_style_border_width(row, selected ? 3 : 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_ACCENT), 0);
+    ui_cursor_band_focus(row, selected);
     theme_mark_selected(row, selected);
 }
 
@@ -6937,6 +6978,7 @@ static void songs_create(lv_obj_t * parent)
 
     for(int i = 0; i < SONGS_POOL; i++) {
         lv_obj_t * row = make_row(songs_list, SONGS_ROW_H);
+        ui_cursor_band_bind(row);
         lv_obj_set_width(row, LV_PCT(100));
         lv_obj_set_style_pad_right(row, 12, 0);
         lv_obj_set_clickable(row, true);
@@ -10171,7 +10213,6 @@ static void ui_handle_key_repeat_raw(ui_key_t key, int count)
 
 static fast_scroll_t g_fast_scroll;
 static lv_obj_t * g_fast_context;
-static lv_obj_t * g_fast_marker;
 static lv_timer_t * g_fast_timer;
 
 static void ui_fast_scroll_reset_reason(const char * reason)
@@ -10183,7 +10224,7 @@ static void ui_fast_scroll_reset_reason(const char * reason)
     }
     fast_scroll_reset(&g_fast_scroll);
     g_fast_context = NULL;
-    if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+    ui_cursor_band_color(COL_ACCENT);
     if(g_fast_timer) lv_timer_pause(g_fast_timer);
 }
 
@@ -10220,7 +10261,7 @@ static int ui_fast_scroll_rows(lv_obj_t **context)
     return *context && height > 0 ? lv_obj_get_content_height(*context) / height : 0;
 }
 
-static void ui_fast_marker_update(lv_timer_t * timer)
+static void ui_fast_scroll_visual_update(lv_timer_t * timer)
 {
     if(!g_system_config.fast_scroll_enabled) {
         ui_fast_scroll_reset_reason("configuration");
@@ -10238,54 +10279,12 @@ static void ui_fast_marker_update(lv_timer_t * timer)
         ui_fast_scroll_reset(); return;
     }
     if(!g_fast_scroll.active) {
-        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+        ui_cursor_band_color(COL_ACCENT);
         if(g_fast_timer) lv_timer_pause(g_fast_timer);
         return;
     }
     if(!ui_screen_is_on()) { ui_fast_scroll_reset_reason("screen_off"); return; }
-    lv_obj_t * row = NULL;
-    if(g_current_screen == SCR_ALBUMS && !albums_detail_open) {
-        if(albums_selected < 0) row = albums_shuffle_row;
-        else for(int i = 0; i < ALBUMS_POOL; i++)
-            if(albums_row_indices[i] == albums_selected) row = albums_rows[i];
-    }
-    else if(g_current_screen == SCR_ARTISTS && !artists_detail_open) {
-        for(int i = 0; i < ARTISTS_POOL; i++)
-            if(artists_row_indices[i] == artists_selected) row = artists_rows[i];
-    }
-    else if(g_current_screen == SCR_SONGS) {
-        for(int i = 0; i < SONGS_POOL; i++)
-            if(songs_row_indices[i] == songs_selected) row = songs_rows[i];
-    }
-    else if(g_focus_index >= 0 && g_focus_index < g_focus_count) row = g_focus[g_focus_index].obj;
-    /* Virtual row binding and layout can lag a page jump by one frame.
-     * The indicator is decorative: hide it until its row is ready, but keep
-     * the gesture latched and retry on the next timer tick. */
-    if(!row || !g_fast_context) {
-        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
-        return;
-    }
-    lv_area_t bounds, viewport;
-    lv_obj_get_coords(row, &bounds); lv_obj_get_content_coords(g_fast_context, &viewport);
-    bounds.x1 = LV_MAX(bounds.x1, viewport.x1); bounds.x2 = LV_MIN(bounds.x2, viewport.x2);
-    bounds.y1 = LV_MAX(bounds.y1, viewport.y1); bounds.y2 = LV_MIN(bounds.y2, viewport.y2);
-    if(bounds.x1 > bounds.x2 || bounds.y1 > bounds.y2) {
-        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
-        return;
-    }
-    if(!g_fast_marker) {
-        g_fast_marker = lv_obj_create(lv_layer_top());
-        lv_obj_remove_style_all(g_fast_marker);
-        lv_obj_remove_flag(g_fast_marker, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_border_width(g_fast_marker, 3, 0);
-        lv_obj_set_style_border_side(g_fast_marker, LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT, 0);
-    }
-    /* Twin rails distinguish page jumps without changing row geometry. The
-     * selection foreground stays legible even on Windows 95's navy cursor. */
-    lv_obj_set_style_border_color(g_fast_marker, lv_color_hex(g_theme->on_selection), 0);
-    lv_obj_set_pos(g_fast_marker, bounds.x2 - 11, bounds.y1 + 8);
-    lv_obj_set_size(g_fast_marker, 8, LV_MAX(8, lv_area_get_height(&bounds) - 16));
-    lv_obj_set_hidden(g_fast_marker, false);
+    ui_cursor_band_color(g_theme->fast_scroll_band);
 }
 
 void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint32_t last_ms)
@@ -10334,12 +10333,12 @@ void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint
     }
     ui_handle_key_repeat_raw(key, steps);
     if(g_fast_scroll.active) {
-        if(!g_fast_timer) g_fast_timer = lv_timer_create(ui_fast_marker_update, 40, NULL);
+        if(!g_fast_timer) g_fast_timer = lv_timer_create(ui_fast_scroll_visual_update, 40, NULL);
         if(g_fast_timer) { lv_timer_reset(g_fast_timer); lv_timer_resume(g_fast_timer); }
-        ui_fast_marker_update(NULL);
+        ui_fast_scroll_visual_update(NULL);
     }
     else {
-        if(g_fast_marker) lv_obj_set_hidden(g_fast_marker, true);
+        ui_cursor_band_color(COL_ACCENT);
         if(g_fast_timer) lv_timer_pause(g_fast_timer);
     }
 }

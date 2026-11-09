@@ -185,7 +185,7 @@ percentage, charging and sleep-disable confirmation update automatically.
 default: 550 ms), **Start Fast Scrolling After** (1–5 pages within that trigger
 window; default: 2 Pages) and **Hold Time** (150 ms, 300 ms,
 500 ms, or 1.5 s; default: 300 ms). A quick spin switches to one visible page
-per notch, with a short high tone and twin marks beside the cursor.
+per notch, with a short high tone and a gold/yellow left cursor band.
 A short lower tone marks exit. Pausing for the selected hold time or
 reversing direction restores normal single-row precision. Speed uses physical
 notches rather than amplified page jumps; touch scrolling stays unchanged.

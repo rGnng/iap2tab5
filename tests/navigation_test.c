@@ -225,6 +225,39 @@ static void scrollbar_views(void)
     check(audited_scrollbars>=30,"Audit must cover virtual lists, detail panes, Settings and Up Next with either menu position");
 }
 
+static lv_obj_t *cursor_row(void)
+{
+    if(g_current_screen==SCR_ALBUMS && !albums_detail_open) {
+        if(albums_selected<0)return albums_shuffle_row;
+        for(int i=0;i<ALBUMS_POOL;i++)if(albums_row_indices[i]==albums_selected)return albums_rows[i];
+    }
+    else if(g_current_screen==SCR_ARTISTS && !artists_detail_open) {
+        for(int i=0;i<ARTISTS_POOL;i++)if(artists_row_indices[i]==artists_selected)return artists_rows[i];
+    }
+    else if(g_current_screen==SCR_SONGS) {
+        for(int i=0;i<SONGS_POOL;i++)if(songs_row_indices[i]==songs_selected)return songs_rows[i];
+    }
+    else if(g_focus_index>=0 && g_focus_index<g_focus_count)return g_focus[g_focus_index].obj;
+    return NULL;
+}
+
+static void check_cursor_band(bool fast)
+{
+    lv_obj_t *row=cursor_row();check(row!=NULL,"Cursor fixture must have a bound row");
+    uint32_t expected=fast?g_theme->fast_scroll_band:COL_ACCENT;
+    check(lv_color_eq(lv_obj_get_style_border_color(row,0),lv_color_hex(expected)),
+          "The selected row's left band must reflect the scroll mode");
+    check(lv_obj_get_style_border_side(row,0)==LV_BORDER_SIDE_LEFT &&
+          lv_obj_get_style_border_width(row,0)==3,"Scroll mode must preserve the three-pixel left band");
+    lv_obj_update_layout(lv_screen_active());lv_refr_now(lv_display_get_default());
+    lv_area_t bounds,viewport;lv_obj_get_coords(row,&bounds);
+    lv_obj_get_content_coords(lv_obj_get_parent(row),&viewport);
+    int top=LV_MAX(bounds.y1,viewport.y1),bottom=LV_MIN(bounds.y2,viewport.y2);
+    check(top<=bottom && top>=0 && bottom<720,"Cursor band must be in the visible viewport");
+    check((frame[(top+bottom)/2][bounds.x1+1]&0xffffff)==expected,
+          "The real rendered cursor band must show the mode color");
+}
+
 static void fast_navigation(void)
 {
     g_system_config.fast_scroll_hold_ms=150; /* Exercise the shortest selectable hold. */
@@ -235,16 +268,12 @@ static void fast_navigation(void)
     lv_obj_t *context;int rows=ui_fast_scroll_rows(&context);
     check(rows==8,"Albums must use eight visible rows per fast notch");
     uint32_t now=lv_tick_get();
+    uint32_t overlays=lv_obj_get_child_count(lv_layer_top());
     ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-500,now);
     check(albums_selected==rows*3-1,"Threshold crossing must apply a page jump once and coalesce rendering");
     check(fast_cues==1 && g_fast_scroll.active,"Entering fast scroll must produce exactly one special cue");
-    check(g_fast_marker && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Fast cursor rails must be visible");
-    check(lv_color_eq(lv_obj_get_style_border_color(g_fast_marker,0),
-                      lv_color_hex(g_theme->on_selection)),
-          "Fast indicator must use a contrasting selection foreground in every theme");
-    pump(40);lv_area_t marker;lv_obj_get_coords(g_fast_marker,&marker);
-    check((frame[(marker.y1+marker.y2)/2][marker.x1+1]&0xffffff)==g_theme->on_selection,
-          "Fast cursor rails must actually render above the selected row");
+    check(lv_obj_get_child_count(lv_layer_top())==overlays,"Fast scrolling must not create an overlay indicator");
+    pump(40);check_cursor_band(true);
     /* A queued BLE report can map one tick behind its predecessor because
      * the LVGL tick and report age are sampled at different resolutions. */
     now=lv_tick_get();int previous=albums_selected;
@@ -256,26 +285,25 @@ static void fast_navigation(void)
     for(int i=0;i<ALBUMS_POOL;i++) if(albums_row_indices[i]==albums_selected) selected_slot=i;
     check(selected_slot>=0,"Fixture must have a selected virtual row");
     int bound=albums_row_indices[selected_slot];albums_row_indices[selected_slot]=-1;
-    ui_fast_marker_update(NULL);
+    ui_fast_scroll_visual_update(NULL);
     check(g_fast_scroll.active && fast_cues==1,
           "A temporarily unbound cursor row must not cancel fast scrolling");
-    check(lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Unavailable row only hides the indicator");
-    albums_row_indices[selected_slot]=bound;ui_fast_marker_update(NULL);pump(40);
-    check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
-          "Cursor indicator must recover after virtual row binding without another cue");
+    check(lv_color_eq(lv_obj_get_style_border_color(albums_rows[selected_slot],0),lv_color_hex(g_theme->fast_scroll_band)),
+          "Temporary unbinding must not reset the row's fast band color");
+    albums_row_indices[selected_slot]=bound;ui_fast_scroll_visual_update(NULL);pump(40);
+    check(g_fast_scroll.active,"Binding a virtual row must retain fast mode");check_cursor_band(true);
     int saved_scroll=lv_obj_get_scroll_y(albums_left_list);
-    lv_obj_scroll_to_y(albums_left_list,0,LV_ANIM_OFF);ui_fast_marker_update(NULL);
-    check(g_fast_scroll.active && lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
-          "A temporarily offscreen selected row must only hide the cursor indicator");
-    lv_obj_scroll_to_y(albums_left_list,saved_scroll,LV_ANIM_OFF);ui_fast_marker_update(NULL);pump(40);
-    check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
-          "Cursor must recover after viewport layout without cancelling fast mode");
+    lv_obj_scroll_to_y(albums_left_list,0,LV_ANIM_OFF);ui_fast_scroll_visual_update(NULL);
+    check(g_fast_scroll.active,"An offscreen cursor must not cancel fast mode");
+    lv_obj_scroll_to_y(albums_left_list,saved_scroll,LV_ANIM_OFF);ui_fast_scroll_visual_update(NULL);pump(40);
+    check(g_fast_scroll.active,"Restoring the viewport must retain fast mode");check_cursor_band(true);
     for(int step=0;step<20;step++) {
         pump(50);ui_handle_key(UI_KEY_DOWN);
         if(!g_fast_scroll.active || fast_cues!=1)
             fprintf(stderr,"Sustained spin reset: step=%d selected=%d cues=%d active=%d\n",step,albums_selected,fast_cues,g_fast_scroll.active);
         check(g_fast_scroll.active && fast_cues==1,
               "A continuous page spin must survive recycled rows and reaching the list end");
+        check_cursor_band(true);
     }
     albums_select(rows*3-1);
     int old=albums_selected;ui_handle_key(UI_KEY_DOWN);
@@ -283,9 +311,10 @@ static void fast_navigation(void)
     int exits_before=exit_cues;
     ui_handle_key(UI_KEY_UP);
     check(exit_cues==exits_before+1,"A direction reversal must play one exit cue");
-    ui_fast_marker_update(NULL);
+    ui_fast_scroll_visual_update(NULL);
     check(exit_cues==exits_before+1,"Inactive indicator refresh must not repeat the exit cue");
     check(albums_selected==old+rows-1 && !g_fast_scroll.active,"A reversal must immediately return to one-row movement");
+    check_cursor_band(false);
     for(int i=0;i<14;i++) { pump(30);ui_handle_key(UI_KEY_UP); }
     check(!g_fast_scroll.active,"Reverse spin must first rebuild its own physical velocity");
     pump(30);ui_handle_key(UI_KEY_UP);
@@ -295,8 +324,7 @@ static void fast_navigation(void)
           "Reaching Shuffle All must preserve the gesture and not add entry cues");
     ui_fast_scroll_reset();now=lv_tick_get();
     ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-500,now);pump(100);
-    check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
-          "A 100 ms pause must preserve fast mode and its marker");
+    check(g_fast_scroll.active,"A 100 ms pause must preserve fast mode");check_cursor_band(true);
     old=albums_selected;int cues=fast_cues;ui_handle_key(UI_KEY_DOWN);
     check(albums_selected==old+rows && fast_cues==cues,
           "Resuming after 100 ms must keep page steps without repeating the entry cue");
@@ -304,7 +332,7 @@ static void fast_navigation(void)
     pump(200);
     check(exit_cues==exits_before+1,"Idle expiry must play one descending exit cue");
     pump(200);check(exit_cues==exits_before+1,"Idle exit cue must not repeat");
-    check(!g_fast_scroll.active && lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Pausing must clear fast mode and its marker");
+    check(!g_fast_scroll.active,"Pausing must clear fast mode");check_cursor_band(false);
     old=albums_selected;ui_handle_key(UI_KEY_DOWN);check(albums_selected==old+1,"First notch after a pause must be precise");
     ui_fast_scroll_reset();g_system_config.fast_scroll_enabled=false;albums_select(0);
     ui_handle_key_repeat(UI_KEY_DOWN,20);
@@ -353,6 +381,23 @@ static void fast_navigation(void)
     }
     ui_handle_key(UI_KEY_BACK);ui_select_screen(SCR_NOW_PLAYING);pump(200);
     check(!g_fast_scroll.active && !g_fast_context,"Changing tabs must discard velocity history");
+}
+
+static void cursor_band_views(void)
+{
+    const screen_id_t views[]={SCR_ALBUMS,SCR_ARTISTS,SCR_SONGS,SCR_PLAYLISTS,SCR_SETTINGS};
+    g_system_config.fast_scroll_enabled=true;g_system_config.fast_scroll_pages=2;
+    g_system_config.fast_scroll_trigger_window_ms=550;g_system_config.fast_scroll_hold_ms=300;
+    for(unsigned i=0;i<sizeof(views)/sizeof(views[0]);i++) {
+        ui_select_screen(views[i]);pump(600);
+        lv_obj_t *context;int rows=ui_fast_scroll_rows(&context);
+        check(rows>0 && context,"Every list fixture must allow fast scrolling");
+        uint32_t now=lv_tick_get();
+        ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-500,now);pump(40);
+        check(g_fast_scroll.active,"Every list must enter fast scrolling");check_cursor_band(true);
+        ui_fast_scroll_reset();check_cursor_band(false);
+    }
+    ui_select_screen(SCR_NOW_PLAYING);pump(200);
 }
 
 static void settings_widget_lifetime(void)
@@ -535,7 +580,7 @@ int main(int argc,char **argv)
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
     check(g_system_config.fast_scroll_trigger_window_ms==550,"Missing trigger configuration must default to 550 ms");
     alpha_fade();artist_viewport();scrollbar_views();pressed_controls();fast_navigation();
-    settings_widget_lifetime();rapid_tab_navigation();sort_order_settings();
+    cursor_band_views();settings_widget_lifetime();rapid_tab_navigation();sort_order_settings();
     live_album_focus();
     live_song_focus();
     puts("PASS: transparent text fade, Artists viewport restoration, column scrollbar geometry, page scrolling and theme cursor feedback");

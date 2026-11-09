@@ -98,6 +98,7 @@ static void lv_obj_set_style_border_width(lv_obj_t *o, int v, int part) { (void)
 static void lv_obj_set_style_border_side(lv_obj_t *o, int v, int part) { (void)o; (void)v; (void)part; }
 static void lv_obj_set_style_border_color(lv_obj_t *o, int v, int part) { (void)o; (void)v; (void)part; }
 static void theme_mark_selected(lv_obj_t *o, bool selected) { (void)o; (void)selected; }
+static void ui_cursor_band_focus(lv_obj_t *o, bool focused) { (void)o; (void)focused; }
 static void lv_image_set_src(lv_obj_t *o, const void *s) { o->src = s; }
 static const void *lv_image_get_src(lv_obj_t *o) { return o->src; }
 static int lv_obj_get_scroll_top(lv_obj_t *o) { return o->top; }

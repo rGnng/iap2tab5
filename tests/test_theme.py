@@ -11,7 +11,7 @@ from test_album_view import function
 ROOT = Path(__file__).resolve().parents[1]
 COLORS = """menu_top_bg menu_top_fg menu_body_bg menu_body_fg
 mini_bg mini_fg mini_muted mini_dim bg surface panel panel_alt border text muted dim
-accent selection focus on_selection outline counter green amber red purple cyan
+accent selection focus on_selection outline counter fast_scroll_band green amber red purple cyan
 context_panel context_group context_border progress scrim
 button_top button_bottom bevel_light bevel_shadow""".split()
 
@@ -127,6 +127,13 @@ unsigned label_state(int index) { return nodes[index].state; }
             for fg, bg in pairs:
                 with self.subTest(theme=i, foreground=fg, background=bg):
                     self.assertGreaterEqual(contrast(getattr(t, fg), getattr(t, bg)), 4.5)
+
+    def test_fast_scroll_band_is_distinct_and_contrasts_with_the_cursor(self):
+        for i in range(3):
+            t=self.lib.ui_theme_get(i).contents
+            with self.subTest(theme=i):
+                self.assertNotEqual(t.fast_scroll_band,t.accent)
+                self.assertGreaterEqual(contrast(t.fast_scroll_band,t.focus),3)
 
     def test_light_theme_scrims_keep_dark_text_legible(self):
         # Worst case: black cover behind a light scrim.
