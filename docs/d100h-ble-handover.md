@@ -19,8 +19,9 @@ Static ARM64 analysis of `Frameworks/Ulanzi_Studio.dylib` identifies:
 
 The native parser loads all four timer bytes. `MacOS/UlanziDeck`'s
 `SettingDialog` constructor assigns its five sleep buttons the values
-3600, 7200, 10800, 14400 and 0. Its last button (`this+0x278`) is labeled
-`关` (Off), and `onSleepTimeChanged(int)` forwards its value unchanged to
+3600, 7200, 10800, 14400 and 0. Its last button (`SettingDialog+0x278`, or
+`Ui_SettingDialogClass+0x250`) is labeled `关闭` (Off), and
+`onSleepTimeChanged(int)` forwards its value unchanged to
 `setDeviceSleepTime`. Thus sleep timer zero is confirmed by the official app.
 
 Live read-only queries on firmware `bt-official-power-query` returned sleep
