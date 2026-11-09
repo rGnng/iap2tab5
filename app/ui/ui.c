@@ -237,6 +237,7 @@ typedef enum {
  * ------------------------------------------------------------------------- */
 static bool g_afc_sync_mode;
 static bool np_chrome_tinted;
+static screen_id_t g_current_screen = SCR_NOW_PLAYING;
 
 typedef void (*focus_activate_fn)(void * user);
 typedef void (*focus_adjust_fn)(int delta, void * user);
@@ -256,6 +257,7 @@ static void enable_event_bubble(lv_obj_t * obj);
 static void settings_update_system_labels(void);
 static void ui_page_teardown(void);
 static bool ui_apply_theme(void);
+static void ui_feedback_emit(ui_feedback_t type, bool from_key);
 
 static focus_item_t g_focus[MAX_FOCUS];
 static int g_focus_count;
@@ -337,6 +339,7 @@ static void clock_hold_cb(lv_timer_t * timer)
 static void clock_touch_cb(lv_event_t * event)
 {
     if(lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        ui_feedback_emit(UI_FEEDBACK_CLICK, false);
         if(!g_clock_hold_timer) g_clock_hold_timer = lv_timer_create(clock_hold_cb, 2000, NULL);
         if(g_clock_hold_timer) {
             lv_timer_set_user_data(g_clock_hold_timer, lv_event_get_current_target(event));
@@ -434,6 +437,86 @@ static void theme_mark_selected(lv_obj_t * obj, bool selected)
     for(uint32_t i = 0; i < count; i++) {
         theme_mark_selected(lv_obj_get_child(obj, i), selected);
     }
+}
+
+/* Touch feedback has its own state, independent of the knob selection.
+ * Shared styles avoid per-row style copies; the inset outline does not change
+ * layout, and remains visible when the pressed row is already selected.
+ * USER_2 also takes priority over existing button PRESSED/label USER_1 styles. */
+static lv_style_t g_touch_pressed_style, g_touch_pressed_text_style;
+static const ui_theme_t *g_touch_pressed_theme;
+
+static void ui_touch_pressed_labels(lv_obj_t *obj, bool pressed)
+{
+    if(lv_obj_check_type(obj, &lv_label_class)) {
+        if(pressed) lv_obj_add_state(obj, LV_STATE_USER_2);
+        else lv_obj_remove_state(obj, LV_STATE_USER_2);
+    }
+    for(uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        ui_touch_pressed_labels(lv_obj_get_child(obj, i), pressed);
+    }
+}
+
+static void ui_touch_pressed_cb(lv_event_t *event)
+{
+    lv_obj_t *obj = lv_event_get_current_target(event);
+    lv_event_code_t code = lv_event_get_code(event);
+    if(code == LV_EVENT_STATE_CHANGED) {
+        /* LVGL clears PRESSED when a scroll starts or input is reset, without
+         * sending PRESS_LOST. Include events from decorative child containers
+         * that can own the pointer, but let the row display the feedback. */
+        const lv_state_t *before = lv_event_get_param(event);
+        if(!before || !(*before & LV_STATE_PRESSED) ||
+           lv_obj_has_state(lv_event_get_target_obj(event), LV_STATE_PRESSED)) return;
+    }
+    bool pressed = code == LV_EVENT_PRESSED;
+    if(pressed) lv_obj_add_state(obj, LV_STATE_USER_2);
+    else lv_obj_remove_state(obj, LV_STATE_USER_2);
+    ui_touch_pressed_labels(obj, pressed);
+}
+
+static void ui_touch_pressed_bind_labels(lv_obj_t *obj)
+{
+    if(lv_obj_check_type(obj, &lv_label_class)) {
+        lv_obj_add_style(obj, &g_touch_pressed_text_style, LV_STATE_USER_2);
+    }
+    for(uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        ui_touch_pressed_bind_labels(lv_obj_get_child(obj, i));
+    }
+}
+
+/* Bind once, after the control's labels exist. Scroll viewports, section
+ * headings and the full/mini Now Playing content do not receive this style. */
+static void ui_touch_pressed_bind(lv_obj_t *obj)
+{
+    if(!g_touch_pressed_theme) {
+        lv_style_init(&g_touch_pressed_style);
+        lv_style_init(&g_touch_pressed_text_style);
+        lv_style_set_bg_opa(&g_touch_pressed_style, LV_OPA_COVER);
+        lv_style_set_bg_grad_dir(&g_touch_pressed_style, LV_GRAD_DIR_NONE);
+        lv_style_set_radius(&g_touch_pressed_style, 0);
+        lv_style_set_outline_width(&g_touch_pressed_style, 2);
+        lv_style_set_outline_pad(&g_touch_pressed_style, -2);
+        lv_style_set_outline_opa(&g_touch_pressed_style, LV_OPA_COVER);
+    }
+    if(g_touch_pressed_theme != g_theme) {
+        lv_style_set_bg_color(&g_touch_pressed_style, lv_color_hex(COL_FOCUS));
+        lv_style_set_outline_color(&g_touch_pressed_style, lv_color_hex(g_theme->on_selection));
+        lv_style_set_text_color(&g_touch_pressed_text_style, lv_color_hex(g_theme->on_selection));
+        g_touch_pressed_theme = g_theme;
+    }
+    lv_obj_add_style(obj, &g_touch_pressed_style, LV_STATE_USER_2);
+    ui_touch_pressed_bind_labels(obj);
+    enable_event_bubble(obj);
+    lv_obj_add_event_cb(obj, ui_touch_pressed_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(obj, ui_touch_pressed_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(obj, ui_touch_pressed_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(obj, ui_touch_pressed_cb, LV_EVENT_STATE_CHANGED, NULL);
+}
+
+static bool ui_page_touch_pressed_enabled(void)
+{
+    return g_afc_sync_mode || g_current_screen != SCR_NOW_PLAYING;
 }
 
 static void focus_visual(focus_item_t * item, bool focused)
@@ -607,6 +690,7 @@ static int focus_add_clickable(lv_obj_t * obj, focus_activate_fn activate,
 {
     lv_obj_set_clickable(obj, true);
     enable_event_bubble(obj);
+    if(ui_page_touch_pressed_enabled()) ui_touch_pressed_bind(obj);
     int index = focus_add(obj, activate, adjust, user, fill);
     if(index >= 0) {
         lv_obj_add_event_cb(obj, focus_click_cb, LV_EVENT_CLICKED,
@@ -627,6 +711,7 @@ static void touch_add_clickable(lv_obj_t * obj, lv_event_cb_t cb, void * user)
 {
     lv_obj_set_clickable(obj, true);
     enable_event_bubble(obj);
+    if(ui_page_touch_pressed_enabled()) ui_touch_pressed_bind(obj);
     lv_obj_add_event_cb(obj, feedback_touch_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(obj, cb, LV_EVENT_CLICKED, user);
 }
@@ -1854,7 +1939,6 @@ static lv_obj_t * g_menu_items[SCR_COUNT];
 static lv_obj_t * g_menu_icons[SCR_COUNT];
 static bool g_menubar_left = true;
 static bool g_touch_enabled = true;
-static screen_id_t g_current_screen = SCR_NOW_PLAYING;
 static screen_id_t g_ble_return_screen = SCR_COUNT;
 static bool g_ctx_menu_open;
 static bool g_device_available;
@@ -2014,6 +2098,8 @@ static void ui_menu_update(void)
         lv_obj_set_style_bg_opa(g_menu_items[i],
                                 active ? selected_opa : LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(g_menu_items[i], 0, 0);
+        lv_obj_set_style_bg_opa(g_menu_items[i],
+            np_chrome_tinted ? LV_OPA_30 : LV_OPA_COVER, LV_STATE_USER_2);
         lv_obj_set_style_text_color(g_menu_icons[i],
                                     lv_color_hex(dimmed ? COL_DIM
                                                 : active ? selected_fg
@@ -2279,6 +2365,7 @@ static void build_menubar(lv_obj_t * parent)
     lv_obj_set_clickable(g_status_time, false);
     lv_obj_set_width(g_status_time, LV_PCT(100));
     lv_obj_set_style_text_align(g_status_time, LV_TEXT_ALIGN_CENTER, 0);
+    ui_touch_pressed_bind(time_area);
 
     /* Menu icons sit in the flexible middle area. */
     lv_obj_t * menu_area = lv_obj_create(g_menubar);
@@ -2326,6 +2413,7 @@ static void build_menubar(lv_obj_t * parent)
         g_menu_items[screen] = item;
         g_menu_icons[screen] = make_label(item, icons[slot],
                                           &bootstrap_icons_40, COL_MUTED);
+        ui_touch_pressed_bind(item);
     }
 
 
@@ -3468,6 +3556,7 @@ static void np_gradient_visibility(bool visible)
     lv_obj_set_style_bg_opa(g_menubar, visible ? LV_OPA_10 : LV_OPA_COVER, 0);
     lv_obj_t * clock = lv_obj_get_parent(g_status_time);
     lv_obj_set_style_bg_opa(clock, visible ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(clock, visible ? LV_OPA_30 : LV_OPA_COVER, LV_STATE_USER_2);
     lv_obj_set_style_text_color(g_status_time,
         lv_color_hex(visible ? COL_TEXT : COL_MENU_TOP_FG), 0);
     if(g_theme->id == UI_THEME_WINDOWS_95) {
@@ -5045,6 +5134,7 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_add_event_cb(albums_shuffle_row, albums_shuffle_all_touch_cb,
                         LV_EVENT_CLICKED, NULL);
     make_label(albums_shuffle_row, "Shuffle All", FONT_H2, COL_TEXT);
+    ui_touch_pressed_bind(albums_shuffle_row);
     albums_apply_shuffle_row_style();
 
     for(int i = 0; i < ALBUMS_POOL; i++) {
@@ -5082,6 +5172,7 @@ static void albums_create(lv_obj_t * parent)
         lv_obj_set_width(albums_row_artists[i], LV_PCT(100));
         lv_obj_set_height(albums_row_artists[i], 24);
         ui_text_fade(albums_row_artists[i]);
+        ui_touch_pressed_bind(row);
         lv_obj_set_hidden(row, true);
         albums_rows[i] = row;
     }
@@ -5841,6 +5932,7 @@ static void artists_create(lv_obj_t * parent)
         lv_obj_set_flex_grow(artists_names[i], 1);
         ui_text_fade(artists_names[i]);
         artists_metas[i] = make_label(text, "", FONT_CAPTION, COL_MUTED);
+        ui_touch_pressed_bind(row);
         lv_obj_set_hidden(row, true);
         artists_rows[i] = row;
     }
@@ -6030,6 +6122,7 @@ static int context_menu_item(lv_obj_t * parent, const char * icon,
         lv_obj_set_style_text_align(item->value, LV_TEXT_ALIGN_RIGHT, 0);
     }
     item->action = action;
+    if(ui_page_touch_pressed_enabled()) ui_touch_pressed_bind(item->row);
     return index;
 }
 
@@ -6642,6 +6735,7 @@ static void songs_create(lv_obj_t * parent)
         songs_lengths[i] = make_label(row, "", FONT_NUM, COL_MUTED);
         lv_obj_set_width(songs_lengths[i], 56);
         lv_obj_set_style_text_align(songs_lengths[i], LV_TEXT_ALIGN_RIGHT, 0);
+        ui_touch_pressed_bind(row);
         lv_obj_set_hidden(row, true);
 
         songs_rows[i] = row;
@@ -8054,6 +8148,7 @@ static lv_obj_t * settings_time_touch_button(lv_obj_t * parent,
     lv_obj_t * label = make_label(button, icon, &bootstrap_icons_32, COL_DIM);
     theme_button(button);
     if(icon_out != NULL) *icon_out = label;
+    if(callback != NULL) ui_touch_pressed_bind(button);
     return button;
 }
 

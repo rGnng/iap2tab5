@@ -128,6 +128,10 @@ static void drag(const char * name, int region, bool down)
     printf("%s %s: scrolled %d px\n", name, down ? "down" : "up", moved);
     fflush(stdout);
     check(down ? moved < -stride : moved > stride, "Pointer drag must scroll the album list");
+    for(uint32_t i=1;i<lv_obj_get_child_count(list);i++) {
+        check(!lv_obj_has_state(lv_obj_get_child(list,i),LV_STATE_USER_2),
+              "Scrolling must cancel the row press highlight before the finger lifts");
+    }
     pump(100); /* Lift after stopping, so inertia does not make the test nondeterministic. */
     pointer(point.x, point.y, false);
     pump(200);

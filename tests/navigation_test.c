@@ -4,6 +4,9 @@
 static uint32_t frame[720][1280];
 static uint8_t draw_buffer[1280 * 40 * 4];
 static int fast_cues,exit_cues;
+static lv_indev_t *touch;
+static lv_point_t touch_point;
+static bool touch_down;
 static void check(bool ok, const char *message)
 { if(!ok) { fprintf(stderr,"FAIL: %s\n",message); exit(1); } }
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
@@ -16,6 +19,92 @@ static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 static void pump(int ms)
 { for(int i=0;i<ms;i+=10) { lv_tick_inc(10);lv_timer_handler(); } }
 static void feedback(int type) { if(type==UI_FEEDBACK_FAST_SCROLL) fast_cues++;else if(type==UI_FEEDBACK_FAST_SCROLL_EXIT)exit_cues++; }
+
+static void read_touch(lv_indev_t *indev, lv_indev_data_t *data)
+{ LV_UNUSED(indev);data->point=touch_point;data->state=touch_down?LV_INDEV_STATE_PRESSED:LV_INDEV_STATE_RELEASED; }
+static void pointer(int x,int y,bool down)
+{ touch_point=(lv_point_t){x,y};touch_down=down;lv_indev_read(touch);pump(30); }
+static lv_obj_t *first_label(lv_obj_t *obj)
+{
+    if(lv_obj_check_type(obj,&lv_label_class))return obj;
+    for(uint32_t i=0;i<lv_obj_get_child_count(obj);i++) {
+        lv_obj_t *found=first_label(lv_obj_get_child(obj,i));if(found)return found;
+    }
+    return NULL;
+}
+static void press_control(lv_obj_t *obj,bool styled)
+{
+    check(obj && lv_obj_is_visible(obj),"Press fixture must have a visible target");
+    lv_area_t bounds,before,after;lv_obj_get_coords(obj,&bounds);
+    lv_obj_t *label=first_label(obj);
+    check(label!=NULL,"Press fixture must include a label");
+    lv_state_t state=lv_obj_get_state(label);
+    lv_color_t color=lv_obj_get_style_text_color(label,0);
+    lv_obj_get_coords(label,&before);
+    pointer((bounds.x1+bounds.x2)/2,(bounds.y1+bounds.y2)/2,true);
+    if(lv_obj_has_state(obj,LV_STATE_USER_2)!=styled)
+        fprintf(stderr,"Press mismatch: screen=%d label=%s bounds=(%ld,%ld)-(%ld,%ld) expected=%d state=%u\n",
+            g_current_screen,lv_label_get_text(label),(long)bounds.x1,(long)bounds.y1,(long)bounds.x2,(long)bounds.y2,styled,lv_obj_get_state(obj));
+    check(lv_obj_has_state(obj,LV_STATE_USER_2)==styled,
+          "Touch targets must show the press state, except Now Playing content");
+    if(styled) {
+        lv_obj_get_coords(label,&after);
+        check(lv_area_is_equal(&before,&after),"Press feedback must not shift text or change row geometry");
+        check(lv_color_eq(lv_obj_get_style_text_color(label,0),lv_color_hex(g_theme->on_selection)),
+              "Pressed text must stay legible, including nested and already-selected labels");
+        if((frame[bounds.y2][(bounds.x1+bounds.x2)/2]&0xffffff)!=g_theme->on_selection)
+            fprintf(stderr,"Press pixels: screen=%d label=%s expected=%06lx actual=%06lx\n",g_current_screen,
+                lv_label_get_text(label),(unsigned long)g_theme->on_selection,
+                (unsigned long)(frame[bounds.y2][(bounds.x1+bounds.x2)/2]&0xffffff));
+        check((frame[bounds.y2][(bounds.x1+bounds.x2)/2]&0xffffff)==g_theme->on_selection,
+              "A real pointer press must render the square inset outline");
+    }
+    /* Cancel through the input device so destructive/playback actions do not
+     * run; LVGL delivers PRESS_LOST, as it does when a drag takes over. */
+    lv_indev_wait_release(touch);
+    pointer(touch_point.x,touch_point.y,false);
+    check(!lv_obj_has_state(obj,LV_STATE_USER_2),"Cancelling a touch must clear its temporary highlight");
+    check(lv_obj_get_state(label)==state && lv_color_eq(lv_obj_get_style_text_color(label,0),color),
+          "Cancelling a press must restore the original selection and label color");
+}
+static void pressed_controls(void)
+{
+    touch=lv_indev_create();lv_indev_set_type(touch,LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(touch,lv_display_get_default());lv_indev_set_read_cb(touch,read_touch);
+    ui_set_touch_enabled(true);ui_attach_touch(touch);
+    ui_select_screen(SCR_ALBUMS);pump(600);albums_select(0);pump(100);
+    press_control(lv_obj_get_parent(g_status_time),true);
+    press_control(g_menu_items[SCR_ALBUMS],true);
+    press_control(albums_rows[0],true);
+    press_control(lv_obj_get_child(albums_right_content,1),false); /* The scroll viewport itself is not a button. */
+    press_control(lv_obj_get_child(lv_obj_get_child(albums_right_content,1),0),true);
+    press_control(g_mini,false);
+    ui_select_screen(SCR_ARTISTS);pump(600);artists_select(0);pump(100);
+    press_control(artists_rows[0],true);
+    press_control(lv_obj_get_child(lv_obj_get_child(artists_right_content,1),0),true);
+    ui_select_screen(SCR_SONGS);pump(600);songs_select(0);pump(100);
+    press_control(songs_rows[0],true);
+    ui_select_screen(SCR_PLAYLISTS);pump(600);
+    press_control(lv_obj_get_child(playlists_left_list,0),true);
+    ui_select_screen(SCR_SETTINGS);pump(600);
+    press_control(lv_obj_get_child(settings_left_list,0),true);
+    settings_open((void *)(intptr_t)SETTING_SCREEN);pump(200);
+    press_control(g_focus[g_focus_index].obj,true);
+    ui_select_screen(SCR_BLUETOOTH);pump(600);
+    press_control(g_focus[0].obj,true);
+    ui_select_screen(SCR_NOW_PLAYING);pump(600);
+    press_control(lv_obj_get_parent(np_play_icon),false);
+    press_control(np_star_btn,false);
+    press_control(np_shuffle_btn,false);
+    np_toggle_queue();pump(600);
+    press_control(g_focus[np_queue_focus_start].obj,false);
+    np_toggle_queue();pump(200);
+    np_gradient_visibility(true);pump(100);
+    press_control(lv_obj_get_parent(g_status_time),true);
+    press_control(g_menu_items[SCR_NOW_PLAYING],true);
+    np_gradient_visibility(false);pump(100);
+    ui_attach_touch(NULL);lv_indev_delete(touch);touch=NULL;
+}
 
 static void alpha_fade(void)
 {
@@ -243,7 +332,7 @@ int main(int argc,char **argv)
     ui_system_config_t config={.theme=argc>1?atoi(argv[1]):0,.brightness=45,.menubar_left=1,.fast_scroll_pages=2};
     ui_apply_saved_settings(&config);ui_init();pump(600);
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
-    alpha_fade();artist_viewport();scrollbar_views();fast_navigation();
+    alpha_fade();artist_viewport();scrollbar_views();pressed_controls();fast_navigation();
     puts("PASS: transparent text fade, Artists viewport restoration, column scrollbar geometry, page scrolling and theme cursor feedback");
     return 0;
 }

@@ -11,6 +11,7 @@ static lv_point_t point;
 static bool pressed, backlight = true;
 static int saved_minutes = -1;
 static int saved_brightness = -1, saves;
+static int touch_clicks;
 static uint8_t pixels[1280 * 40 * 4];
 static void check(bool condition, const char *message)
 {
@@ -25,6 +26,7 @@ static void pump(int ms)
 static void pointer(int x, int y, bool down)
 { point = (lv_point_t){x,y}; pressed=down; lv_indev_read(touch); pump(20); }
 static void power(bool on) { backlight=on; }
+static void feedback(int type) { if(type==UI_FEEDBACK_CLICK)touch_clicks++; }
 static void save(const ui_system_config_t *cfg)
 { saved_minutes=cfg->screen_off_minutes; saved_brightness=cfg->brightness; saves++; }
 static lv_obj_t *label(lv_obj_t *o, const char *text)
@@ -152,8 +154,20 @@ int main(int argc, char **argv)
     tap_label("Off");
     ui_select_screen(0); pump(300);
 
+    ui_set_feedback_cb(feedback);
+    for(int mode=0;mode<=2;mode++) {
+        cfg.sound_enabled=mode!=0;cfg.sound_mode=mode;ui_set_system_config(&cfg);
+        int before_clicks=touch_clicks;
+        pointer(54,35,true);
+        check(touch_clicks==before_clicks+(mode!=0),"Clock touch-down must click once when touch feedback is enabled");
+        pointer(54,35,false);
+        check(touch_clicks==before_clicks+(mode!=0),"Clock release must not emit a second click");
+    }
+
+    int before_clicks=touch_clicks;
     pointer(54,35,true); pump(1800);
     check(ui_screen_is_on(),"Clock must stay on before two seconds");
+    check(touch_clicks==before_clicks+1,"Holding the clock must not repeat touch feedback");
     pointer(54,35,false); pump(400);
     check(ui_screen_is_on(),"Short clock press must cancel the timer");
     pointer(54,35,true); pointer(200,35,true); pump(2200); pointer(200,35,false);
@@ -162,6 +176,11 @@ int main(int argc, char **argv)
     check(!ui_screen_is_on() && !backlight,"Two-second hold must blank and disable backlight");
     pump(2500); pointer(54,35,false); pump(1100);
     check(!ui_screen_is_on(),"Held finger, release and playing must not wake a manual blank");
+
+    before_clicks=touch_clicks;
+    pointer(54,35,true);pump(2100);pointer(54,35,false);
+    check(ui_screen_is_on() && touch_clicks==before_clicks,"A clock touch that wakes the screen must not click or start another screen-off hold");
+    ui_screen_off();
 
     player_snapshot_t before,after; player_get_snapshot(&before);
     ui_handle_key(UI_KEY_7); player_get_snapshot(&after);
