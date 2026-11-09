@@ -296,14 +296,14 @@ int is_on(void) { return screen_on; }
                 self.lib.reset(1)
                 self.post(10,True,source=source)
                 self.post(9,True,200000,source=source,delayed=900000)
-                self.post(10,True,225000,source=source,delayed=910000)
+                self.post(10,True,245000,source=source,delayed=910000)
                 self.lib.poll_at(1000000)
                 self.assertEqual((self.lib.up_count(),self.lib.down_count()),(0,2))
 
-    def test_normal_rotary_reverse_is_released_after_30_ms(self):
+    def test_normal_rotary_reverse_is_released_after_50_ms(self):
         self.post(10,True);self.post(9,True,200000)
-        self.lib.poll_at(229999);self.assertEqual(self.lib.up_count(),0)
-        self.lib.poll_at(230000);self.assertEqual(self.lib.up_count(),1)
+        self.lib.poll_at(249999);self.assertEqual(self.lib.up_count(),0)
+        self.lib.poll_at(250000);self.assertEqual(self.lib.up_count(),1)
 
     def test_normal_rotary_reverse_is_flushed_before_enter(self):
         self.post(10,True);self.post(9,True,200000)
@@ -315,7 +315,7 @@ int is_on(void) { return screen_on; }
         for source in (0,1):
             self.post(10,True,source=source);self.post(9,True,200000,source=source)
         self.post(0,False,210000,source=0)
-        self.lib.poll_at(230000)
+        self.lib.poll_at(250000)
         self.assertEqual((self.lib.up_count(),self.lib.down_count()),(1,2))
 
     def test_rotary_pending_reverse_is_flushed_before_knob_enter(self):

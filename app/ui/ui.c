@@ -10221,7 +10221,6 @@ static void ui_afc_sync_build(lv_obj_t * screen)
     afc_sync_button(root, "Pair / Trust", UI_AFC_ACTION_PAIR, 64, 624, 224);
     afc_sync_button(root, "Sync", UI_AFC_ACTION_SYNC, 520, 624, 240);
     afc_sync_button(root, "Exit", UI_AFC_ACTION_IPOD_MODE, 1016, 624, 200);
-    afc_button_primary(UI_AFC_ACTION_SYNC, true);
     focus_select(0);
     afc_sync_update();
 }

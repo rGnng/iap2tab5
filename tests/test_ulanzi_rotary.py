@@ -46,34 +46,34 @@ class UlanziRotaryTests(unittest.TestCase):
             self.assertEqual(self.deltas(self.update(1,t)),[1])
             self.assertFalse(self.s.pending)
 
-    def test_normal_single_reverse_waits_exactly_30_ms_and_keeps_arrival_time(self):
+    def test_normal_single_reverse_waits_exactly_50_ms_and_keeps_arrival_time(self):
         self.update(1,0)
         self.assertEqual(self.deltas(self.update(-1,200000)),[])
-        self.assertEqual(self.lib.ulanzi_rotary_deadline(C.byref(self.s)),230000)
-        self.assertEqual(self.deltas(self.poll(229999)),[])
-        out=self.poll(230000)
+        self.assertEqual(self.lib.ulanzi_rotary_deadline(C.byref(self.s)),250000)
+        self.assertEqual(self.deltas(self.poll(249999)),[])
+        out=self.poll(250000)
         self.assertEqual(self.deltas(out),[-1])
         self.assertEqual((out.steps[0].first_us,out.steps[0].last_us),(200000,200000))
         self.assertEqual(self.deltas(self.poll(400000)),[])
         self.assertEqual(self.deltas(self.update(-1,600000)),[-1])
 
-    def test_normal_reverse_glitch_is_discarded_when_turn_resumes_within_30_ms(self):
+    def test_normal_reverse_glitch_is_discarded_when_turn_resumes_within_50_ms(self):
         for count in (1,2):
             with self.subTest(reverse_reports=count):
                 self.s=Rotary();self.update(1,0);self.update(1,200000)
                 for i in range(count):self.assertEqual(self.deltas(self.update(-1,400000+i*10000)),[])
-                out=self.update(1,429999)
+                out=self.update(1,449999)
                 self.assertTrue(out.suppressed)
                 self.assertEqual(self.deltas(out),[1])
                 self.assertEqual(self.deltas(self.poll(500000)),[])
 
     def test_normal_two_reverse_steps_keep_the_first_deadline_and_both_notches(self):
         self.update(1,0);self.update(-1,200000)
-        self.assertEqual(self.deltas(self.update(-1,220000)),[])
-        self.assertEqual(self.lib.ulanzi_rotary_deadline(C.byref(self.s)),230000)
-        out=self.poll(230000)
+        self.assertEqual(self.deltas(self.update(-1,240000)),[])
+        self.assertEqual(self.lib.ulanzi_rotary_deadline(C.byref(self.s)),250000)
+        out=self.poll(250000)
         self.assertEqual(self.deltas(out),[-2])
-        self.assertEqual((out.steps[0].first_us,out.steps[0].last_us),(200000,220000))
+        self.assertEqual((out.steps[0].first_us,out.steps[0].last_us),(200000,240000))
 
     def test_normal_three_consistent_reverse_reports_confirm_early(self):
         self.update(1,0);self.update(-1,200000);self.update(-1,210000)
@@ -81,7 +81,7 @@ class UlanziRotaryTests(unittest.TestCase):
         self.assertEqual(self.lib.ulanzi_rotary_deadline(C.byref(self.s)),0)
 
     def test_normal_and_rapid_deadlines_use_the_physical_gap(self):
-        for gap,deadline in ((80000,200000),(80001,110001)):
+        for gap,deadline in ((80000,200000),(80001,130001)):
             with self.subTest(gap=gap):
                 self.s=Rotary();self.update(1,0);self.update(-1,gap)
                 self.assertEqual(self.lib.ulanzi_rotary_deadline(C.byref(self.s)),deadline)
@@ -111,7 +111,8 @@ class UlanziRotaryTests(unittest.TestCase):
     def test_late_report_preserves_opposite_event_order(self):
         self.rapid();self.update(-1,30000)
         self.assertEqual(self.deltas(self.update(1,200000)),[-1])
-        self.assertEqual(self.deltas(self.poll(230000)),[1])
+        self.assertEqual(self.deltas(self.poll(249999)),[])
+        self.assertEqual(self.deltas(self.poll(250000)),[1])
 
     def test_two_report_glitch_is_held_and_discarded_on_original_direction(self):
         self.rapid();self.update(-1,30000)

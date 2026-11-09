@@ -163,8 +163,12 @@ Its top-right key opens the context menu on a tap and toggles Star on a hold.
 Hold the knob down and turn it to adjust iPod volume: clockwise raises it,
 counter-clockwise lowers it. A plain knob click activates on release;
 releasing after a held turn does not activate the selected item. This works
-over USB and BLE. Rapid rotation filters isolated reverse glitches before
-navigation; a deliberate single reverse notch is delivered within 120 ms.
+over USB and BLE. Same-direction notches pass through immediately. An opposite
+notch is held for 50 ms during normal scrolling, or 120 ms if it arrives within
+80 ms of the preceding accepted notch. Resuming the original direction during
+that window discards the held reverse reports as noise. Otherwise the held
+notches are delivered at the deadline; three consecutive reverse reports
+confirm the change early. Arrival timestamps are preserved before UI dispatch.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 Paired-device rows show the reported percentage as `BATT <percent>%`, with
 `CHG` appended while charging, or `disconnect` when disconnected. `BATT --%`

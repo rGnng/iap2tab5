@@ -108,10 +108,10 @@ bool ulanzi_back_update(ulanzi_back_t * state, bool down);
 void ulanzi_back_cancel(ulanzi_back_t * state);
 
 /* Qualify opposite steps before navigation, for both USB/BLE. Normal turns
- * use a 30 ms reversal debounce; rapid turns retain the longer noise filter.
+ * use a 50 ms reversal debounce; rapid turns retain the longer noise filter.
  * Same-direction steps stay immediate. Three opposite reports confirm a
  * reversal early; a lone deliberate reverse is released at its deadline. */
-#define ULANZI_ROTARY_NORMAL_DEBOUNCE_MS 30
+#define ULANZI_ROTARY_NORMAL_DEBOUNCE_MS 50
 #define ULANZI_ROTARY_RAPID_MS 80
 #define ULANZI_ROTARY_CONFIRM_MS 120
 #define ULANZI_ROTARY_CONFIRM_STEPS 3
