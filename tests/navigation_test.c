@@ -339,6 +339,45 @@ static void fast_navigation(void)
     check(!g_fast_scroll.active && !g_fast_context,"Changing tabs must discard velocity history");
 }
 
+static void settings_widget_lifetime(void)
+{
+    settings_selected=SETTING_FAST_SCROLL;settings_detail_open=false;
+    ui_select_screen(SCR_SETTINGS);pump(600);
+    check(settings_fast_scroll_enabled_value!=NULL,"Fast Scroll preview must be rendered before leaving Settings");
+    ui_select_screen(SCR_ALBUMS);
+    check(settings_fast_scroll_enabled_value==NULL && settings_fast_scroll_checks[0]==NULL &&
+          settings_fast_hold_checks[0]==NULL,"Leaving Settings must drop references to deleted detail widgets");
+    pump(600);ui_select_screen(SCR_SETTINGS);pump(70);
+    check(!g_page_loading && settings_detail_dirty && !settings_fast_scroll_enabled_value,
+          "Returning to Settings must wait for its deferred detail render with no stale labels");
+    settings_tick();pump(400);
+    check(settings_fast_scroll_enabled_value && !settings_detail_dirty &&
+          !strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),"Enabled"),
+          "Fast Scroll preview must refresh normally after returning to Settings");
+}
+
+static void rapid_tab_navigation(void)
+{
+    ui_select_screen(SCR_NOW_PLAYING);pump(600);
+    for(int round=0;round<12;round++) {
+        for(int step=0;step<6;step++) {
+            ui_handle_key(UI_KEY_SCREEN_NEXT);pump(40+(round%4)*50);
+        }
+        for(int step=0;step<8;step++) {
+            ui_handle_key(UI_KEY_SCREEN_PREV);pump(40+(round%4)*50);
+        }
+        check(g_current_screen==SCR_NOW_PLAYING,"Repeated previous-tab input must return to Now Playing");
+        for(int step=0;step<6;step++) {
+            ui_handle_key(UI_KEY_SCREEN_PREV);pump(30+step*20);
+        }
+        ui_handle_key(UI_KEY_BACK);pump(200);
+    }
+    ui_select_screen(SCR_ALBUMS);pump(600);
+    check(!g_page_loading && albums_left_list && albums_right_content,
+          "Albums must remain usable after rapid tab and queue transitions");
+    ui_select_screen(SCR_NOW_PLAYING);pump(600);
+}
+
 int main(int argc,char **argv)
 {
     lv_init();lv_display_t *display=lv_display_create(1280,720);
@@ -350,6 +389,7 @@ int main(int argc,char **argv)
     ui_apply_saved_settings(&config);ui_init();pump(600);
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
     alpha_fade();artist_viewport();scrollbar_views();pressed_controls();fast_navigation();
+    settings_widget_lifetime();rapid_tab_navigation();
     puts("PASS: transparent text fade, Artists viewport restoration, column scrollbar geometry, page scrolling and theme cursor feedback");
     return 0;
 }

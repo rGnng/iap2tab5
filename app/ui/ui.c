@@ -7542,6 +7542,53 @@ static lv_obj_t * settings_detail_sound_touch_check;
 static lv_obj_t * settings_detail_sound_both_check;
 static lv_obj_t * settings_detail_sound_none_check;
 
+/* A returning tab can show its shell and master list before the 140 ms
+ * detail render. Clear every detail reference before deleting its widgets,
+ * so tick/blink callbacks cannot use labels from the previous visit. */
+static void settings_clear_detail_widgets(void)
+{
+    settings_detail_time_format_value = NULL;
+    settings_detail_set_time_value = NULL;
+    settings_detail_ble_value = NULL;
+    settings_detail_usb_a_check = NULL;
+    settings_detail_usb_both_check = NULL;
+    settings_detail_boot_off_check = NULL;
+    settings_detail_boot_anim1_check = NULL;
+    settings_detail_theme_gray_check = NULL;
+    settings_detail_theme_aqua_check = NULL;
+    settings_detail_theme_win95_check = NULL;
+    settings_fast_scroll_enabled_value = NULL;
+    memset(settings_fast_scroll_checks, 0, sizeof(settings_fast_scroll_checks));
+    memset(settings_fast_hold_checks, 0, sizeof(settings_fast_hold_checks));
+    memset(settings_screen_off_checks, 0, sizeof(settings_screen_off_checks));
+    memset(settings_brightness_checks, 0, sizeof(settings_brightness_checks));
+    settings_time_ampm_value = NULL;
+    settings_time_ampm_column = NULL;
+    settings_time_ampm_spacer = NULL;
+    settings_time_year_value = NULL;
+    settings_time_month_value = NULL;
+    settings_time_day_value = NULL;
+    settings_time_hour_value = NULL;
+    settings_time_minute_value = NULL;
+    settings_time_up_button = NULL;
+    settings_time_down_button = NULL;
+    settings_time_up_icon = NULL;
+    settings_time_down_icon = NULL;
+    settings_detail_touch_value = NULL;
+    settings_detail_menubar_value = NULL;
+    settings_detail_sort_value = NULL;
+    settings_detail_order_value = NULL;
+    settings_detail_np_bg_theme_check = NULL;
+    settings_detail_np_bg_mesh_check = NULL;
+    settings_detail_screen_value = NULL;
+    settings_detail_wifi_mode_value = NULL;
+    settings_detail_wifi_status_value = NULL;
+    settings_detail_volume_value = NULL;
+    settings_detail_sound_touch_check = NULL;
+    settings_detail_sound_both_check = NULL;
+    settings_detail_sound_none_check = NULL;
+}
+
 typedef enum {
     USB_MODE_HOST = 0,
     USB_MODE_BOTH = 2,
@@ -8123,7 +8170,8 @@ static void settings_time_apply_blink(void)
 
 static void settings_time_blink_tick(void)
 {
-    if(g_current_screen != SCR_SETTINGS || !settings_time_open ||
+    if(g_current_screen != SCR_SETTINGS || settings_detail_dirty ||
+       settings_right_content == NULL || !settings_time_open ||
        !settings_detail_open || !settings_time_editing ||
        settings_time_segment == SETTINGS_TIME_NONE) {
         return;
@@ -8530,14 +8578,14 @@ static void settings_ble_scan_connect_cb(lv_event_t * event)
 
 static void settings_tick(void)
 {
+    if(g_current_screen != SCR_SETTINGS || settings_detail_dirty ||
+       settings_right_content == NULL) return;
     if(settings_selected==SETTING_FAST_SCROLL) settings_update_fast_scroll_checks();
-    if(g_current_screen == SCR_SETTINGS && settings_selected == SETTING_SCREEN &&
-       !settings_detail_dirty) {
+    if(settings_selected == SETTING_SCREEN) {
         settings_update_screen_checks();
         return;
     }
-    if(g_current_screen != SCR_SETTINGS ||
-       settings_selected != SETTING_BLUETOOTH || !settings_detail_open) {
+    if(settings_selected != SETTING_BLUETOOTH || !settings_detail_open) {
         return;
     }
     uint32_t rev = ble_remote_revision();
@@ -8786,42 +8834,9 @@ static void settings_np_bg_touch_cb(lv_event_t * event)
 
 static void settings_render_detail(lv_obj_t * parent, bool interactive)
 {
-    settings_fast_scroll_enabled_value = NULL;
-    memset(settings_fast_scroll_checks, 0, sizeof(settings_fast_scroll_checks));
-    memset(settings_fast_hold_checks, 0, sizeof(settings_fast_hold_checks));
+    settings_clear_detail_widgets();
     if(parent == NULL) return;
     lv_obj_clean(parent);
-
-    settings_detail_time_format_value = NULL;
-    settings_detail_set_time_value = NULL;
-    settings_detail_ble_value = NULL;
-    settings_detail_usb_a_check = NULL;
-    settings_detail_usb_both_check = NULL;
-    settings_detail_boot_off_check = NULL;
-    settings_detail_boot_anim1_check = NULL;
-    settings_detail_theme_gray_check = NULL;
-    settings_detail_theme_aqua_check = NULL;
-    settings_detail_theme_win95_check = NULL;
-    memset(settings_screen_off_checks, 0, sizeof(settings_screen_off_checks));
-    memset(settings_brightness_checks, 0, sizeof(settings_brightness_checks));
-    settings_detail_screen_value = NULL;
-    settings_detail_wifi_mode_value = NULL;
-    settings_detail_wifi_status_value = NULL;
-    settings_detail_volume_value = NULL;
-    settings_detail_sound_touch_check = NULL;
-    settings_detail_sound_both_check = NULL;
-    settings_detail_sound_none_check = NULL;
-    settings_time_year_value = NULL;
-    settings_time_month_value = NULL;
-    settings_time_day_value = NULL;
-    settings_time_hour_value = NULL;
-    settings_time_minute_value = NULL;
-    settings_detail_touch_value = NULL;
-    settings_detail_menubar_value = NULL;
-    settings_detail_sort_value = NULL;
-    settings_detail_order_value = NULL;
-    settings_detail_np_bg_theme_check = NULL;
-    settings_detail_np_bg_mesh_check = NULL;
 
     int index = settings_selected;
     if(index < 0 || index >= SETTING_COUNT) index = 0;
@@ -9259,6 +9274,7 @@ static void ui_page_teardown(void)
     if(settings_detail_timer) lv_timer_pause(settings_detail_timer);
     settings_detail_dirty = false;
     settings_right_content = NULL;
+    settings_clear_detail_widgets();
 }
 
 static void settings_row_focus(void * user)
@@ -9388,26 +9404,7 @@ static void settings_create(lv_obj_t * parent)
     settings_detail_dirty = false;
     settings_right_content = NULL;
     settings_counter.group = NULL;
-    settings_detail_time_format_value = NULL;
-    settings_detail_set_time_value = NULL;
-    settings_time_hour_value = NULL;
-    settings_time_minute_value = NULL;
-    settings_detail_touch_value = NULL;
-    settings_detail_menubar_value = NULL;
-    memset(settings_brightness_checks, 0, sizeof(settings_brightness_checks));
-    memset(settings_screen_off_checks, 0, sizeof(settings_screen_off_checks));
-    settings_detail_sort_value = NULL;
-    settings_detail_order_value = NULL;
-    settings_detail_np_bg_theme_check = NULL;
-    settings_detail_np_bg_mesh_check = NULL;
-    settings_detail_ble_value = NULL;
-    settings_detail_usb_a_check = NULL;
-    settings_detail_usb_both_check = NULL;
-    settings_detail_boot_off_check = NULL;
-    settings_detail_boot_anim1_check = NULL;
-    settings_detail_theme_gray_check = NULL;
-    settings_detail_theme_aqua_check = NULL;
-    settings_detail_theme_win95_check = NULL;
+    settings_clear_detail_widgets();
 
     lv_obj_t * root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
