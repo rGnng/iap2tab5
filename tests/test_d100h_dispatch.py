@@ -72,6 +72,7 @@ void input(int source,int id,int down,int64_t arrival,int64_t dispatch_time) {
  if(id==1) usb_hid_input_post_back(source,down);
  else if(id==2) usb_hid_input_post_play(source,down);
  else if(id==3) usb_hid_input_post_top_right(source,down);
+ else if(id==4 || id==6) usb_hid_input_post_side(source,id,down);
  else if(id==7 || id==11 || id==12) usb_hid_input_post_knob(source,id,down);
  else if(id==9 || id==10) usb_hid_input_post_rotary(source,id,down);
  else if(id==0) usb_hid_input_cancel_gestures(source);
@@ -86,6 +87,9 @@ void poll_at(int64_t now) {
  }
 }
 void keyboard_play(void) { usb_hid_input_post_key(UI_KEY_7);dispatch_key_event(&queued); }
+void keyboard_tab(void) { usb_hid_input_post_key(UI_KEY_SCREEN_NEXT);dispatch_key_event(&queued); }
+int side_prev_count(void) { return actions[UI_KEY_SCREEN_PREV]; }
+int side_next_count(void) { return actions[UI_KEY_SCREEN_NEXT]; }
 int up_count(void) { return actions[UI_KEY_UP]; }
 int down_count(void) { return actions[UI_KEY_DOWN]; }
 int back_count(void) { return actions[UI_KEY_BACK]; }
@@ -121,6 +125,67 @@ int is_on(void) { return screen_on; }
         self.post(2,False,100000)
         self.assertEqual(self.lib.play_count(),1)
         self.assertEqual(self.lib.off_count(),0)
+
+    def test_side_buttons_fire_once_only_on_matching_release_for_all_sources(self):
+        for source in range(3):
+            for id,count in ((4,self.lib.side_prev_count),(6,self.lib.side_next_count)):
+                with self.subTest(source=source,id=id):
+                    self.lib.reset(1)
+                    self.post(id,False,source=source)
+                    self.post(id,True,100000,source=source)
+                    self.post(id,True,200000,source=source)
+                    self.lib.poll_at(3000000)
+                    self.assertEqual(count(),0)
+                    self.post(id,False,4000000,source=source)
+                    self.post(id,False,4100000,source=source)
+                    self.assertEqual(count(),1)
+
+    def test_side_wake_press_is_consumed_through_release(self):
+        for source in range(3):
+            for id,count in ((4,self.lib.side_prev_count),(6,self.lib.side_next_count)):
+                with self.subTest(source=source,id=id):
+                    self.lib.reset(0)
+                    self.post(id,True,source=source)
+                    self.post(id,True,100000,source=source)
+                    self.post(id,False,200000,source=source)
+                    self.assertEqual((self.lib.wake_count(),count()),(1,0))
+                    self.post(id,True,300000,source=source)
+                    self.post(id,False,400000,source=source)
+                    self.assertEqual(count(),1)
+
+    def test_side_buttons_track_independent_presses(self):
+        self.post(4,True);self.post(6,True)
+        self.post(6,False,100000)
+        self.assertEqual((self.lib.side_prev_count(),self.lib.side_next_count()),(0,1))
+        self.post(4,False,200000)
+        self.assertEqual((self.lib.side_prev_count(),self.lib.side_next_count()),(1,1))
+
+    def test_disconnect_cancels_side_releases_only_for_its_source(self):
+        for source in (0,1):
+            for id in (4,6):self.post(id,True,source=source)
+        self.post(0,False,100000,source=0)
+        for id in (4,6):self.post(id,False,200000,source=0)
+        self.assertEqual((self.lib.side_prev_count(),self.lib.side_next_count()),(0,0))
+        for id in (4,6):self.post(id,False,300000,source=1)
+        self.assertEqual((self.lib.side_prev_count(),self.lib.side_next_count()),(1,1))
+
+    def test_side_release_after_screen_off_never_wakes_or_navigates(self):
+        self.post(4,True);self.post(6,True)
+        self.lib.ui_screen_off()
+        self.post(4,False,100000);self.post(6,False,200000)
+        self.assertFalse(self.lib.is_on())
+        self.assertEqual((self.lib.wake_count(),self.lib.side_prev_count(),self.lib.side_next_count()),(0,0,0))
+
+    def test_wake_elsewhere_consumes_already_held_side_releases(self):
+        self.post(4,True,source=1);self.post(6,True,source=1)
+        self.lib.ui_screen_off();self.post(1,True,100000,source=2)
+        self.post(4,False,200000,source=1);self.post(6,False,200000,source=1)
+        self.post(1,False,200000,source=2)
+        self.assertTrue(self.lib.is_on())
+        self.assertEqual((self.lib.side_prev_count(),self.lib.side_next_count(),self.lib.back_count()),(0,0,0))
+
+    def test_keyboard_tab_still_acts_on_down(self):
+        self.lib.keyboard_tab();self.assertEqual(self.lib.side_next_count(),1)
 
     def test_hold_blanks_at_threshold_and_release_does_not_navigate_or_wake(self):
         self.post(2,True)

@@ -47,6 +47,7 @@ typedef enum {
     KEY_EVENT_BACK,
     KEY_EVENT_PLAY,
     KEY_EVENT_ROTARY,
+    KEY_EVENT_SIDE,
 } key_event_kind_t;
 
 typedef struct {
@@ -294,6 +295,9 @@ static void hid_interface_cb(hid_host_device_handle_t handle,
                     else if(id == 0x02) {
                         usb_hid_input_post_play(D100H_INPUT_USB, down);
                     }
+                    else if(id == 0x04 || id == 0x06) {
+                        usb_hid_input_post_side(D100H_INPUT_USB, id, down);
+                    }
                     else if(id == ULANZI_TOP_RIGHT_ID) {
                         usb_hid_input_post_top_right(D100H_INPUT_USB, down);
                     }
@@ -437,7 +441,8 @@ static uint8_t hold_bit_for_key(ui_key_t key)
 static uint16_t gesture_button_bit(const key_event_t * evt)
 {
     if(evt->kind == KEY_EVENT_BACK || evt->kind == KEY_EVENT_PLAY ||
-       evt->kind == KEY_EVENT_TOP_RIGHT || (evt->kind == KEY_EVENT_KNOB && evt->id == 0x07))
+       evt->kind == KEY_EVENT_TOP_RIGHT || evt->kind == KEY_EVENT_SIDE ||
+       (evt->kind == KEY_EVENT_KNOB && evt->id == 0x07))
         return (uint16_t)(1u << evt->id);
     return 0;
 }
@@ -546,6 +551,7 @@ static void dispatch_key_event(const key_event_t * evt)
         }
     }
     uint16_t bit = gesture_button_bit(evt);
+    bool released = false;
     if(bit) {
         if(evt->down) {
             /* Repeated down reports from the held Play/Pause key must not wake
@@ -554,6 +560,7 @@ static void dispatch_key_event(const key_event_t * evt)
             s_button_down[evt->source] |= bit;
         }
         else {
+            released = (s_button_down[evt->source] & bit) != 0;
             s_button_down[evt->source] &= ~bit;
             if(s_wake_consumed[evt->source] & bit) {
                 s_wake_consumed[evt->source] &= ~bit;
@@ -591,6 +598,21 @@ static void dispatch_key_event(const key_event_t * evt)
             if(ui_screen_is_on()) {
                 ESP_LOGI(TAG, "D100H back source=%d action=back", (int)evt->source);
                 ui_handle_key(UI_KEY_BACK);
+            }
+            bsp_display_unlock();
+        }
+        return;
+    }
+    if(evt->kind == KEY_EVENT_SIDE) {
+        /* Keep both physical edges in the gesture queue for future holds.
+         * For now, a held button has no action until its matching release. */
+        if(!evt->down && released && bsp_display_lock(1000)) {
+            if(ui_screen_is_on()) {
+                ui_key_t key = evt->id == 0x04 ? UI_KEY_SCREEN_PREV : UI_KEY_SCREEN_NEXT;
+                ESP_LOGI(TAG, "D100H side source=%d id=0x%02x action=%s",
+                    (int)evt->source, (unsigned)evt->id,
+                    key == UI_KEY_SCREEN_PREV ? "screen_prev" : "screen_next");
+                ui_handle_key(key);
             }
             bsp_display_unlock();
         }
@@ -795,6 +817,12 @@ void usb_hid_input_post_back(d100h_input_source_t source, bool down)
 void usb_hid_input_post_play(d100h_input_source_t source, bool down)
 {
     post_gesture_event(source, KEY_EVENT_PLAY, 0x02, down);
+}
+
+void usb_hid_input_post_side(d100h_input_source_t source, uint8_t id, bool down)
+{
+    if(id != 0x04 && id != 0x06) return;
+    post_gesture_event(source, KEY_EVENT_SIDE, id, down);
 }
 
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down)

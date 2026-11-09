@@ -927,6 +927,10 @@ static int gap_event(struct ble_gap_event * event, void * arg)
                 usb_hid_input_post_play(D100H_INPUT_BLE, down);
                 return 0;
             }
+            if(id == 0x04 || id == 0x06) {
+                usb_hid_input_post_side(D100H_INPUT_BLE, id, down);
+                return 0;
+            }
             if(id == 0x03) {
                 usb_hid_input_post_top_right(D100H_INPUT_BLE, down);
                 return 0;

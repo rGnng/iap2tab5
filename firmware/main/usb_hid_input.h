@@ -24,6 +24,8 @@ typedef enum {
 void usb_hid_input_post_back(d100h_input_source_t source, bool down);
 /** Top-middle: Play/Pause on short release; hold two seconds for Screen Off. */
 void usb_hid_input_post_play(d100h_input_source_t source, bool down);
+/** Left-side tab buttons (0x04/0x06): act once on release. */
+void usb_hid_input_post_side(d100h_input_source_t source, uint8_t id, bool down);
 /** Top-right: tap for Context, hold 600 ms for Star while still pressed. */
 void usb_hid_input_post_top_right(d100h_input_source_t source, bool down);
 /** Ordinary D100H rotation; reverse glitches are qualified before navigation. */

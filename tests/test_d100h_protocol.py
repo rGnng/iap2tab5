@@ -219,8 +219,8 @@ class D100HProtocolTests(unittest.TestCase):
         self.lib.ulanzi_back_cancel(ctypes.byref(state))
         self.assertFalse(self.lib.ulanzi_back_update(ctypes.byref(state),False))
 
-    def test_play_and_back_bypass_stateless_mapping(self):
-        for control in (1,2):
+    def test_play_back_and_side_buttons_bypass_stateless_mapping(self):
+        for control in (1,2,4,6):
             for down in (False,True):
                 key = ctypes.c_int(-1)
                 self.assertFalse(self.lib.ulanzi_d100h_to_ui(control,down,ctypes.byref(key)))

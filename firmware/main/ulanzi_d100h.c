@@ -362,9 +362,9 @@ bool ulanzi_d100h_to_ui(uint8_t id, bool down, ui_key_t * key)
         /* 0x03 top-right is press-duration sensitive: the caller decides
          * between UI_KEY_CONTEXT (short) and UI_KEY_STAR (long). */
         case 0x03: return false;
-        case 0x04: *key = UI_KEY_SCREEN_PREV; return true; /* upper-left */
+        case 0x04: return false; /* upper-left: release handled by caller */
         case 0x05: *key = UI_KEY_PREV_TRACK;  return true; /* upper-right */
-        case 0x06: *key = UI_KEY_SCREEN_NEXT; return true; /* lower-left */
+        case 0x06: return false; /* lower-left: release handled by caller */
         case 0x07: return false; /* stateful click / held-turn gesture */
         case 0x08: *key = UI_KEY_NEXT_TRACK;  return true; /* lower-right */
         case 0x09: *key = UI_KEY_UP;          return true; /* rotate ccw */

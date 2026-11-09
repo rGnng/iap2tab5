@@ -259,6 +259,7 @@ Useful endpoints:
 | `POST /api/key?k=screenoff` / `k=wake` | blank/wake the display without changing saved brightness |
 | `POST /api/keystate?k=back&down=1\|0` | D100H Back press/release; action fires on release |
 | `POST /api/keystate?k=play&down=1\|0` | D100H Play/Pause on short release; hold 2 seconds for Screen Off |
+| `POST /api/keystate?k=sideprev\|sidenext&down=1\|0` | D100H left-side tab buttons; action fires once on release |
 | `POST /api/keystate?k=cancel` | cancel web keypad holds without emitting a click |
 | `POST /api/sync` | same incremental library/artwork sync worker as the AFC screen |
 | `GET /api/screenshot.bmp` | 1280x720 24-bit BMP snapshot |

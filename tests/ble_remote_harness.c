@@ -74,6 +74,7 @@ static struct {
 } ble_hs_cfg;
 static int64_t clock_us;
 static int connect_rc, write_rc, connects, terminates, cancels, writes, gestures;
+static int side_events,side_source,side_id,side_down;
 static bool connecting, scanning;
 static int probe_reads, subscribe_writes, probe_rc;
 static int (*probe_cb)(uint16_t,const struct ble_gatt_error *,struct ble_gatt_attr *,void *);
@@ -132,6 +133,8 @@ void ble_store_config_init(void) {}
 #define OS_MBUF_PKTLEN(m) ((m)->len)
 static int os_mbuf_copydata(struct fake_mbuf *m,int start,int len,void *out) { memcpy(out,m->data+start,len);return 0; }
 static void usb_hid_input_cancel_gestures(int source) { gestures++; }
+static void usb_hid_input_post_side(int source,uint8_t id,bool down)
+{ side_events++;side_source=source;side_id=id;side_down=down; }
 #define usb_hid_input_post_back(...) ((void)0)
 #define usb_hid_input_post_play(...) ((void)0)
 #define usb_hid_input_post_top_right(...) ((void)0)
@@ -145,6 +148,7 @@ static void reset(void)
 {
     clock_us=1000000;connecting=scanning=false;connect_rc=write_rc=0;
     connects=terminates=cancels=writes=gestures=0;
+    side_events=0;side_source=side_id=side_down=-1;
     probe_reads=subscribe_writes=probe_rc=0;probe_cb=NULL;probe_arg=NULL;
     memset(&s_link_stats,0,sizeof(s_link_stats));
     s_enabled=s_nimble_ready=true;s_have_target=true;s_disconnect_requested=false;
@@ -185,6 +189,16 @@ static void respond_probe(int status)
 }
 int main(void)
 {
+    reset();linked();
+    for(int id=4;id<=6;id+=2) {
+        for(int down=1;down>=0;down--) {
+            int before=side_events;
+            NOTIFY(0x8b,0x10,id,down);
+            assert(side_events==before+1 && side_source==D100H_INPUT_BLE);
+            assert(side_id==id && side_down==down);
+        }
+    }
+
     reset();connect_rc=4;
     for(int i=0;i<40;i++) tick(clock_us+16000000);
     assert(connects==40 && s_reconnect && s_state==BLE_REMOTE_IDLE);

@@ -138,6 +138,7 @@ Its top-left Back key acts on release. The top-middle Play/Pause key acts on
 short release; holding it for two seconds turns off the screen without toggling
 playback. A press that
 wakes the screen is consumed through release, without navigating or playing.
+Both left-side tab buttons also act once on release, over USB and BLE.
 Its top-right key opens the context menu on a tap and toggles Star on a hold.
 Hold the knob down and turn it to adjust iPod volume: clockwise raises it,
 counter-clockwise lowers it. A plain knob click activates on release;
