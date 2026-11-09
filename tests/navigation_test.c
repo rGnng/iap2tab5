@@ -235,7 +235,7 @@ static void fast_navigation(void)
     lv_obj_t *context;int rows=ui_fast_scroll_rows(&context);
     check(rows==8,"Albums must use eight visible rows per fast notch");
     uint32_t now=lv_tick_get();
-    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);
+    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-500,now);
     check(albums_selected==rows*3-1,"Threshold crossing must apply a page jump once and coalesce rendering");
     check(fast_cues==1 && g_fast_scroll.active,"Entering fast scroll must produce exactly one special cue");
     check(g_fast_marker && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Fast cursor rails must be visible");
@@ -286,15 +286,15 @@ static void fast_navigation(void)
     ui_fast_marker_update(NULL);
     check(exit_cues==exits_before+1,"Inactive indicator refresh must not repeat the exit cue");
     check(albums_selected==old+rows-1 && !g_fast_scroll.active,"A reversal must immediately return to one-row movement");
-    for(int i=0;i<14;i++) { pump(50);ui_handle_key(UI_KEY_UP); }
+    for(int i=0;i<14;i++) { pump(30);ui_handle_key(UI_KEY_UP); }
     check(!g_fast_scroll.active,"Reverse spin must first rebuild its own physical velocity");
-    pump(50);ui_handle_key(UI_KEY_UP);
+    pump(30);ui_handle_key(UI_KEY_UP);
     check(g_fast_scroll.active && fast_cues==2,"A sustained reverse spin must re-enter fast mode without losing its first notch");
     ui_handle_key(UI_KEY_UP);ui_handle_key(UI_KEY_UP);pump(40);
     check(albums_selected==-1 && g_fast_scroll.active && fast_cues==2,
           "Reaching Shuffle All must preserve the gesture and not add entry cues");
     ui_fast_scroll_reset();now=lv_tick_get();
-    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-750,now);pump(100);
+    ui_handle_key_repeat_timed(UI_KEY_DOWN,rows*2,now-500,now);pump(100);
     check(g_fast_scroll.active && !lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),
           "A 100 ms pause must preserve fast mode and its marker");
     old=albums_selected;int cues=fast_cues;ui_handle_key(UI_KEY_DOWN);
@@ -312,7 +312,12 @@ static void fast_navigation(void)
           "Disabled must retain one row per notch without losing the activation threshold");
     g_system_config.fast_scroll_enabled=true;ui_fast_scroll_reset();
     ui_select_screen(SCR_SETTINGS);pump(600);settings_open((void *)(intptr_t)SETTING_FAST_SCROLL);pump(200);
-    check(g_focus_count==10 && g_focus_index==0,"Fast Scroll must focus its top toggle, followed by five thresholds and four hold times");
+    check(g_focus_count==13 && g_focus_index==0,"Fast Scroll must focus its top toggle, three trigger times, five thresholds and four hold times");
+    check(!strcmp(lv_label_get_text(settings_fast_trigger_checks[0]),ICON_CHECK),
+          "550 ms must be selected by default");
+    check(lv_obj_get_index(lv_obj_get_parent(settings_fast_trigger_checks[0])) <
+          lv_obj_get_index(lv_obj_get_parent(settings_fast_scroll_checks[0])),
+          "Trigger Time choices must appear before the page thresholds");
     for(uint32_t i=0;i<lv_obj_get_child_count(settings_right_content);i++) {
         lv_obj_t *text=first_label(lv_obj_get_child(settings_right_content,i));
         check(!text || strcmp(lv_label_get_text(text),"Off"),"Threshold choices must not contain Off");
@@ -321,14 +326,25 @@ static void fast_navigation(void)
     check(!g_system_config.fast_scroll_enabled && g_system_config.fast_scroll_pages==2 &&
           !strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),"Disabled"),
           "The top control must disable Fast Scroll and preserve its threshold");
+    for(int i=0;i<3;i++) {
+        ui_handle_key(UI_KEY_DOWN);ui_handle_key(UI_KEY_ENTER);
+        check(g_system_config.fast_scroll_trigger_window_ms==settings_fast_trigger_values[i] &&
+              !g_system_config.fast_scroll_enabled,
+              "Every Trigger Time choice must work while Fast Scroll is disabled");
+        for(int j=0;j<3;j++)
+            check(!strcmp(lv_label_get_text(settings_fast_trigger_checks[j]),j==i ? ICON_CHECK : ""),
+                  "Only the chosen Trigger Time must have a checkmark");
+    }
     ui_handle_key(UI_KEY_DOWN);ui_handle_key(UI_KEY_ENTER);
     check(g_system_config.fast_scroll_pages==1 && !g_system_config.fast_scroll_enabled,
           "A threshold can be changed while disabled without re-enabling Fast Scroll");
-    ui_handle_key(UI_KEY_UP);ui_handle_key(UI_KEY_ENTER);
+    ui_handle_key_repeat(UI_KEY_UP,4);ui_handle_key(UI_KEY_ENTER);
     check(g_system_config.fast_scroll_enabled && g_system_config.fast_scroll_pages==1 &&
           !strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),"Enabled"),
           "Re-enabling must retain the chosen threshold");
-    ui_handle_key_repeat(UI_KEY_DOWN,6);
+    check(g_system_config.fast_scroll_trigger_window_ms==1200,"Re-enabling must preserve Trigger Time");
+    /* Visit individual options without this navigation becoming a fast spin. */
+    for(int i=0;i<9;i++) { pump(160);ui_handle_key(UI_KEY_DOWN); }
     for(int i=0;i<4;i++) {
         if(i) ui_handle_key(UI_KEY_DOWN);
         ui_handle_key(UI_KEY_ENTER);
@@ -345,7 +361,7 @@ static void settings_widget_lifetime(void)
     ui_select_screen(SCR_SETTINGS);pump(600);
     check(settings_fast_scroll_enabled_value!=NULL,"Fast Scroll preview must be rendered before leaving Settings");
     ui_select_screen(SCR_ALBUMS);
-    check(settings_fast_scroll_enabled_value==NULL && settings_fast_scroll_checks[0]==NULL &&
+    check(settings_fast_scroll_enabled_value==NULL && settings_fast_trigger_checks[0]==NULL && settings_fast_scroll_checks[0]==NULL &&
           settings_fast_hold_checks[0]==NULL,"Leaving Settings must drop references to deleted detail widgets");
     pump(600);ui_select_screen(SCR_SETTINGS);pump(70);
     check(!g_page_loading && settings_detail_dirty && !settings_fast_scroll_enabled_value,
@@ -354,6 +370,11 @@ static void settings_widget_lifetime(void)
     check(settings_fast_scroll_enabled_value && !settings_detail_dirty &&
           !strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),"Enabled"),
           "Fast Scroll preview must refresh normally after returning to Settings");
+    lv_obj_send_event(lv_obj_get_parent(settings_fast_trigger_checks[1]),LV_EVENT_CLICKED,NULL);
+    pump(100);
+    check(g_system_config.fast_scroll_trigger_window_ms==800 &&
+          !strcmp(lv_label_get_text(settings_fast_trigger_checks[1]),ICON_CHECK),
+          "The preview Trigger Time choices must also work through touch callbacks");
 }
 
 static void rapid_tab_navigation(void)
@@ -388,6 +409,7 @@ int main(int argc,char **argv)
         .fast_scroll_enabled=true,.fast_scroll_pages=2};
     ui_apply_saved_settings(&config);ui_init();pump(600);
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
+    check(g_system_config.fast_scroll_trigger_window_ms==550,"Missing trigger configuration must default to 550 ms");
     alpha_fade();artist_viewport();scrollbar_views();pressed_controls();fast_navigation();
     settings_widget_lifetime();rapid_tab_navigation();
     puts("PASS: transparent text fade, Artists viewport restoration, column scrollbar geometry, page scrolling and theme cursor feedback");

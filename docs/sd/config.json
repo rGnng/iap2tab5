@@ -12,6 +12,7 @@
   "touch_enabled": true,
   "np_bg_mode": 2,
   "brightness": 70,
+  "fast_scroll_trigger_window_ms": 550,
   "usb_mode": 0,
   "charge_enabled": true,
   "qc_high": true

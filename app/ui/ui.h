@@ -94,7 +94,8 @@ typedef struct {
     int touch_enabled;
     int np_bg_mode;        /* 0 = theme, 1 = blurred, 2 = gradient */
     bool fast_scroll_enabled; /* default true; retains threshold when disabled */
-    int fast_scroll_pages; /* 1..5 pages/1200 ms; default 2 */
+    int fast_scroll_pages; /* 1..5 pages per trigger window; default 2 */
+    int fast_scroll_trigger_window_ms; /* 550 (default), 800, 1200 */
     int fast_scroll_hold_ms; /* 150, 300 (default), 500, 1500 */
     int screen_off_minutes; /* 0 = Off (disabled), 30, 60 */
     int brightness;        /* 1..100; a requested 0 falls back to 5 */

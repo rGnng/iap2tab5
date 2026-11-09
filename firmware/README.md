@@ -176,6 +176,7 @@ live in `../docs/sd/`. Two files are used:
   "screen_off_minutes": 0,
   "fast_scroll_enabled": true,
   "fast_scroll_pages": 2,
+  "fast_scroll_trigger_window_ms": 550,
   "fast_scroll_hold_ms": 300,
   "usb_mode": 0,
   "charge_enabled": true,
@@ -187,9 +188,12 @@ live in `../docs/sd/`. Two files are used:
 - `wifi_mode`: `0` station, `1` open AP
 - `np_bg_mode`: `0` theme, `1` blurred cover, `2` cover gradient
 - `fast_scroll_enabled`: `true` (default) or `false`. Disabling preserves the
-  threshold and hold time. Legacy `fast_scroll_pages: 0` migrates to disabled
+  trigger time, threshold and hold time. Legacy `fast_scroll_pages: 0` migrates to disabled
   with the default 2-page threshold.
-- `fast_scroll_pages`: `1`–`5` physical pages per 1200 ms to enter fast
+- `fast_scroll_trigger_window_ms`: Trigger Time: `550` (default), `800`, or `1200`
+  ms. Missing or invalid saved values use `550` ms. This is the rolling window
+  for detecting the selected page threshold; activation can happen sooner.
+- `fast_scroll_pages`: `1`–`5` physical pages within the selected trigger window to enter fast
   scroll (default `2`). Once active, each notch moves one visible page.
 - `fast_scroll_hold_ms`: `150`, `300` (default), `500`, or `1500` ms without
   another scroll notch before returning to single-row precision.

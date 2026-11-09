@@ -163,14 +163,15 @@ panel with enable/disable, scanning, Pair, Connect and Delete controls. Battery
 percentage, charging and sleep-disable confirmation update automatically.
 
 **Settings → Fast Scroll** starts with an **Enabled / Disabled** control
-(default: Enabled), followed by **Start Fast Scrolling After** (1–5 pages per
-1200 ms; default: 2 Pages) and **Hold Time** (150 ms, 300 ms,
+(default: Enabled), followed by **Trigger Time** (550 ms, 800 ms, or 1200 ms;
+default: 550 ms), **Start Fast Scrolling After** (1–5 pages within that trigger
+window; default: 2 Pages) and **Hold Time** (150 ms, 300 ms,
 500 ms, or 1.5 s; default: 300 ms). A quick spin switches to one visible page
 per notch, with a short high tone and twin marks beside the cursor.
 A short lower tone marks exit. Pausing for the selected hold time or
 reversing direction restores normal single-row precision. Speed uses physical
 notches rather than amplified page jumps; touch scrolling stays unchanged.
-Disabling Fast Scroll preserves the selected threshold and hold time.
+Disabling Fast Scroll preserves the selected trigger time, threshold and hold time.
 Screen off and wake also play a short low and high tone respectively when
 Key Feedback is enabled.
 

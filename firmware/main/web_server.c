@@ -704,6 +704,7 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddBoolToObject(root, "fast_scroll_enabled", g_app_config.fast_scroll_enabled);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
+    cJSON_AddNumberToObject(root, "fast_scroll_trigger_window_ms", g_app_config.fast_scroll_trigger_window_ms);
     cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
     cJSON_AddStringToObject(root, "ap_ssid", g_app_config.ap_ssid);
@@ -754,6 +755,12 @@ static esp_err_t config_post(httpd_req_t * req)
         cJSON_Delete(root);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid Fast Scroll enable value");
     }
+    const cJSON * trigger = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_trigger_window_ms");
+    if(trigger != NULL && (!cJSON_IsNumber(trigger) || trigger->valuedouble != trigger->valueint ||
+       (trigger->valueint != 550 && trigger->valueint != 800 && trigger->valueint != 1200))) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid Fast Scroll trigger time");
+    }
     const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_hold_ms");
     if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
        (item->valueint!=150 && item->valueint!=300 && item->valueint!=500 && item->valueint!=1500))) {
@@ -774,6 +781,7 @@ static esp_err_t config_post(httpd_req_t * req)
         else g_app_config.fast_scroll_pages = (uint8_t)item->valueint;
     }
     if(enabled != NULL) g_app_config.fast_scroll_enabled = cJSON_IsTrue(enabled);
+    if(trigger != NULL) g_app_config.fast_scroll_trigger_window_ms = (uint16_t)trigger->valueint;
     item = cJSON_GetObjectItemCaseSensitive(root, "screen_off_minutes");
     if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
        (item->valueint != 0 && item->valueint != 30 && item->valueint != 60))) {
@@ -1267,6 +1275,7 @@ static esp_err_t status_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
     cJSON_AddBoolToObject(root, "fast_scroll_enabled", g_app_config.fast_scroll_enabled);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
+    cJSON_AddNumberToObject(root, "fast_scroll_trigger_window_ms", g_app_config.fast_scroll_trigger_window_ms);
     cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);

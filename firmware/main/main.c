@@ -452,6 +452,7 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.np_bg_mode = (uint8_t)cfg->np_bg_mode;
     g_app_config.fast_scroll_enabled = cfg->fast_scroll_enabled;
     g_app_config.fast_scroll_pages = (uint8_t)cfg->fast_scroll_pages;
+    g_app_config.fast_scroll_trigger_window_ms = (uint16_t)fast_scroll_trigger_window_normalize(cfg->fast_scroll_trigger_window_ms);
     g_app_config.fast_scroll_hold_ms = (uint16_t)fast_scroll_hold_normalize(cfg->fast_scroll_hold_ms);
     g_app_config.brightness = (uint8_t)screen_brightness_normalize(cfg->brightness);
     g_app_config.screen_off_minutes = (uint8_t)cfg->screen_off_minutes;
@@ -509,6 +510,7 @@ static void fill_ui_config(ui_system_config_t * cfg)
     cfg->np_bg_mode = g_app_config.np_bg_mode;
     cfg->fast_scroll_enabled = g_app_config.fast_scroll_enabled;
     cfg->fast_scroll_pages = g_app_config.fast_scroll_pages;
+    cfg->fast_scroll_trigger_window_ms = g_app_config.fast_scroll_trigger_window_ms;
     cfg->fast_scroll_hold_ms = g_app_config.fast_scroll_hold_ms;
     cfg->brightness = g_app_config.brightness;
     cfg->screen_off_minutes = g_app_config.screen_off_minutes;

@@ -32,7 +32,7 @@ class UlanziRotaryTests(unittest.TestCase):
         cls.lib.ulanzi_rotary_cancel.argtypes=[C.POINTER(Rotary)]
         cls.lib.ulanzi_rotary_deadline.argtypes=[C.POINTER(Rotary)]
         cls.lib.ulanzi_rotary_deadline.restype=C.c_int64
-        cls.lib.fast_scroll_feed.argtypes=[C.POINTER(FastState),C.c_uint32,C.c_int,C.c_int,C.c_int,C.c_int,C.c_int,C.POINTER(C.c_bool)]
+        cls.lib.fast_scroll_feed.argtypes=[C.POINTER(FastState),C.c_uint32,C.c_int,C.c_int,C.c_int,C.c_int,C.c_int,C.c_int,C.POINTER(C.c_bool)]
         cls.lib.fast_scroll_feed.restype=C.c_int
 
     def setUp(self):self.s=Rotary()
@@ -110,7 +110,7 @@ class UlanziRotaryTests(unittest.TestCase):
                     if line and not line.startswith('#'):rows.append(tuple(map(int,line.split(','))))
                 raw=FastState();filtered=FastState();clean=FastState();raw_entries=entries=clean_entries=suppressed=0;directions=[]
                 def feed(s,t,d,count):
-                    entered=C.c_bool();self.lib.fast_scroll_feed(C.byref(s),t//1000,d,count,8,2,150,C.byref(entered));return entered.value
+                    entered=C.c_bool();self.lib.fast_scroll_feed(C.byref(s),t//1000,d,count,8,2,550,150,C.byref(entered));return entered.value
                 for t,d in rows:
                     raw_entries+=feed(raw,t,d,1)
                     if d>0:clean_entries+=feed(clean,t,d,1)

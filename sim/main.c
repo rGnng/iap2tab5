@@ -371,7 +371,8 @@ int main(int argc, char ** argv)
 
     ui_system_config_t settings = {.theme = theme, .touch_enabled = 1,
         .volume = 65, .brightness = 70, .menubar_left = 1, .sort_desc = 1, .np_bg_mode = 2,
-        .fast_scroll_enabled = true, .fast_scroll_pages = 2, .fast_scroll_hold_ms = 300,
+        .fast_scroll_enabled = true, .fast_scroll_pages = 2,
+        .fast_scroll_trigger_window_ms = 550, .fast_scroll_hold_ms = 300,
         .sound_enabled = true, .sound_mode = 2, .wifi_status = "WiFi off", .wifi_ip = "--"};
     ui_apply_saved_settings(&settings);
     ui_set_afc_sync_mode(sim_afc_state != NULL);

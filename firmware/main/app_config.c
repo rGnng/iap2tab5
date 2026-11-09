@@ -55,6 +55,7 @@ app_config_t g_app_config = {
     .np_bg_mode = 2,
     .fast_scroll_enabled = true,
     .fast_scroll_pages = 2,
+    .fast_scroll_trigger_window_ms = FAST_SCROLL_TRIGGER_WINDOW_DEFAULT_MS,
     .fast_scroll_hold_ms = 300,
     .brightness = 70,
     .usb_mode = 0,
@@ -480,6 +481,7 @@ static void set_defaults(void)
     g_app_config.np_bg_mode = 2;
     g_app_config.fast_scroll_enabled = true;
     g_app_config.fast_scroll_pages = 2;
+    g_app_config.fast_scroll_trigger_window_ms = FAST_SCROLL_TRIGGER_WINDOW_DEFAULT_MS;
     g_app_config.fast_scroll_hold_ms = 300;
     g_app_config.brightness = 70;
     g_app_config.screen_off_minutes = 0;
@@ -569,6 +571,9 @@ static void load_from_json(const char * text)
     }
     item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_enabled");
     if(cJSON_IsBool(item)) g_app_config.fast_scroll_enabled = cJSON_IsTrue(item);
+    item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_trigger_window_ms");
+    if(cJSON_IsNumber(item) && item->valuedouble == item->valueint)
+        g_app_config.fast_scroll_trigger_window_ms = (uint16_t)fast_scroll_trigger_window_normalize(item->valueint);
     item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_hold_ms");
     if(cJSON_IsNumber(item) && item->valuedouble == item->valueint)
         g_app_config.fast_scroll_hold_ms = (uint16_t)fast_scroll_hold_normalize(item->valueint);
@@ -683,6 +688,7 @@ esp_err_t app_config_save(void)
     cJSON_AddNumberToObject(root, "np_bg_mode", g_app_config.np_bg_mode);
     cJSON_AddBoolToObject(root, "fast_scroll_enabled", g_app_config.fast_scroll_enabled);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
+    cJSON_AddNumberToObject(root, "fast_scroll_trigger_window_ms", g_app_config.fast_scroll_trigger_window_ms);
     cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
