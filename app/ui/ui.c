@@ -570,11 +570,15 @@ static void focus_visual(focus_item_t * item, bool focused)
     if(item == NULL || item->obj == NULL || item->silent) return;
 
     if(g_afc_sync_mode) {
+        /* Primary actions use the accent as their fill. Match the label so
+         * keyboard focus remains visible on both light and dark buttons. */
+        lv_obj_t * label = lv_obj_get_child(item->obj, 0);
         lv_obj_set_style_outline_width(item->obj, 0, 0);
         lv_obj_set_style_border_width(item->obj, focused ? 2 : 1, 0);
         lv_obj_set_style_border_side(item->obj, LV_BORDER_SIDE_FULL, 0);
         lv_obj_set_style_border_color(item->obj,
-            lv_color_hex(focused ? g_theme->outline : COL_BORDER), 0);
+            focused && label ? lv_obj_get_style_text_color(label, 0) :
+            lv_color_hex(COL_BORDER), 0);
         return;
     }
     if(item->fill) {
@@ -9936,13 +9940,15 @@ static const page_t g_pages[SCR_COUNT] = {
 /* -------------------------------------------------------------------------
  * Dedicated AFC sync screen (boot mode 2: no media controls)
  * ------------------------------------------------------------------------- */
-/* Fixed geometry mirrors the 1280 x 720 player, with one clear reading path. */
+/* Bottom-controls layout: status, counts and progress share one open canvas.
+ * The action dock stays fixed through pairing, sync and completion. */
 static lv_obj_t * afc_connection, * afc_trust_hint;
-static lv_obj_t * afc_sd_text, * afc_sd_bar, * afc_library_updated;
+static lv_obj_t * afc_sd_text, * afc_library_updated;
 static lv_obj_t * afc_metrics[3];
 static lv_obj_t * afc_progress_title, * afc_progress_detail, * afc_progress_album;
 static lv_obj_t * afc_progress_bar, * afc_pct_label;
 static lv_obj_t * afc_buttons[4];
+static bool afc_buttons_primary[4];
 static bool afc_job_finished_seen;
 
 static void afc_set_text(lv_obj_t * label, const char * text)
@@ -9999,7 +10005,7 @@ static void afc_sync_action(void * user)
 static lv_obj_t * afc_sync_button(lv_obj_t * parent, const char * text,
                                  int action, int x, int y, int w)
 {
-    lv_obj_t * button = afc_box(parent, x, y, w, 56, COL_PANEL_ALT);
+    lv_obj_t * button = afc_box(parent, x, y, w, 64, COL_PANEL_ALT);
     lv_obj_set_style_border_color(button, lv_color_hex(COL_BORDER), 0);
     lv_obj_set_style_border_width(button, 1, 0);
     lv_obj_set_style_opa(button, LV_OPA_40, LV_STATE_DISABLED);
@@ -10019,18 +10025,50 @@ static void afc_button_enabled(int action, bool enabled)
     else lv_obj_add_state(afc_buttons[action], LV_STATE_DISABLED);
 }
 
+static void afc_button_primary(int action, bool primary)
+{
+    if(afc_buttons_primary[action] == primary) return;
+    afc_buttons_primary[action] = primary;
+    lv_obj_t * button = afc_buttons[action];
+    lv_obj_t * label = lv_obj_get_child(button, 0);
+    uint32_t ink = primary ? (g_theme->id == UI_THEME_GRAY ? COL_BG :
+                             g_theme->on_selection) : COL_TEXT;
+    lv_obj_set_style_bg_color(button, lv_color_hex(primary ? COL_ACCENT :
+        g_theme->id == UI_THEME_GRAY ? COL_PANEL_ALT : g_theme->button_top), 0);
+    lv_obj_set_style_bg_grad_dir(button,
+        !primary && g_theme->id == UI_THEME_AQUA ? LV_GRAD_DIR_VER : LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(ink), 0);
+    if(g_focus_index >= 0 && g_focus[g_focus_index].obj == button)
+        focus_visual(&g_focus[g_focus_index], true);
+}
+
+/* Counts are nonnegative and locale-independent on both the host and ESP32.
+ * 16 bytes holds every int32 count with grouping and a terminator. */
+static void afc_format_count(int value, char out[16])
+{
+    char digits[16];
+    snprintf(digits, sizeof(digits), "%d", value > 0 ? value : 0);
+    size_t n = strlen(digits), j = 0;
+    for(size_t i = 0; i < n; i++) {
+        if(i && (n - i) % 3 == 0) out[j++] = ',';
+        out[j++] = digits[i];
+    }
+    out[j] = '\0';
+}
+
 static void afc_sync_update(void)
 {
     ui_afc_status_t st = {0};
     if(g_afc_status_cb != NULL) g_afc_status_cb(&st);
     char text[160], used[24], total[24];
     bool busy = st.job_active || st.pair_busy;
-    afc_button_enabled(UI_AFC_ACTION_PAIR,
-                       st.available && st.usb_connected &&
-                       !st.connected && !st.pair_trusted && !busy);
+    bool can_pair = st.available && st.usb_connected &&
+                    !st.connected && !st.pair_trusted && !busy;
+    afc_button_enabled(UI_AFC_ACTION_PAIR, can_pair);
     afc_button_enabled(UI_AFC_ACTION_SYNC,
                        st.connected && st.sd_ready && !busy);
     afc_button_enabled(UI_AFC_ACTION_IPOD_MODE, !busy);
+    afc_button_primary(UI_AFC_ACTION_PAIR, can_pair);
     if(!st.job_finished) afc_job_finished_seen = false;
     else if(!busy && !afc_job_finished_seen) {
         for(int i = 0; i < g_focus_count; i++) {
@@ -10051,23 +10089,33 @@ static void afc_sync_update(void)
                  st.pair_trusted ? "" :
                  st.pair_status[0] ? st.pair_status :
                  "Unlock the device, then select Pair / Trust.");
-    settings_format_bytes(st.sd_used_bytes, used, sizeof(used));
-    settings_format_bytes(st.sd_total_bytes, total, sizeof(total));
-    snprintf(text, sizeof(text), "%s of %s used", used, total);
-    afc_set_text(afc_sd_text, st.sd_ready ? text : "Insert an SD card to sync.");
-    lv_bar_set_value(afc_sd_bar, st.sd_total_bytes ?
-        (int)(st.sd_used_bytes * 1000 / st.sd_total_bytes) : 0, LV_ANIM_OFF);
-    snprintf(text, sizeof(text), "%d", st.library_albums);
-    afc_set_text(afc_metrics[0], text);
-    snprintf(text, sizeof(text), "%d", st.library_tracks);
-    afc_set_text(afc_metrics[1], text);
-    snprintf(text, sizeof(text), "%d", st.thumb_count);
-    afc_set_text(afc_metrics[2], text);
-    snprintf(text, sizeof(text), "Last library import  %s", st.library_updated);
+    if(st.sd_total_bytes >= (uint64_t)1024 * 1024 * 1024) {
+        const double gb = 1024.0 * 1024.0 * 1024.0;
+        snprintf(text, sizeof(text), "%.1f / %.1f GB",
+                 (double)st.sd_used_bytes / gb, (double)st.sd_total_bytes / gb);
+    }
+    else {
+        settings_format_bytes(st.sd_used_bytes, used, sizeof(used));
+        settings_format_bytes(st.sd_total_bytes, total, sizeof(total));
+        snprintf(text, sizeof(text), "%s / %s", used, total);
+    }
+    afc_set_text(afc_sd_text, st.sd_ready ? text : "Not inserted");
+    const int counts[] = {st.library_albums, st.library_tracks, st.thumb_count};
+    for(int i = 0; i < 3; i++) {
+        char count[16];
+        afc_format_count(counts[i], count);
+        if(strcmp(lv_label_get_text(afc_metrics[i]), count) != 0) {
+            /* Keep even unusually large libraries inside their column. */
+            lv_obj_set_style_text_font(afc_metrics[i], strlen(count) > 9 ?
+                &inter_tabular_36 : &inter_tabular_54, 0);
+            afc_set_text(afc_metrics[i], count);
+        }
+    }
+    snprintf(text, sizeof(text), "Updated %s", st.library_updated);
     afc_set_text(afc_library_updated, st.library_db_bytes ? text : "No library imported yet");
 
     const char * title = "Ready to sync";
-    const char * detail = "Existing covers are reused. Only missing artwork is downloaded.";
+    const char * detail = "";
     if(!st.connected) {
         title = st.pair_busy ? "Waiting for trust" :
                 st.pair_trusted ? "Connecting device" :
@@ -10075,21 +10123,30 @@ static void afc_sync_update(void)
         detail = "";
     }
     else if(!st.sd_ready) {
-        title = "An SD card is needed";
-        detail = "Insert your card to store the library and album covers.";
+        title = "SD Card missing";
+        detail = "Insert a card to sync.";
     }
     if(st.job_active) {
         title = st.sync_phase == 1 ? "Checking the library" :
                 st.sync_phase == 2 ? "Copying album artwork" :
                 st.sync_phase == 3 ? "Preparing thumbnails" : "Preparing sync";
         if(st.sync_phase == 1 && st.job_kind == 2) title = "Copying the music database";
-        snprintf(text, sizeof(text), "%d of %d processed   /   %d failed",
-                 st.sync_attempted, st.sync_total, st.sync_failed);
-        detail = st.sync_total ? text : "Keep your iPod connected while sync runs.";
+        char attempted[16], count[16], failed[16];
+        afc_format_count(st.sync_attempted, attempted);
+        afc_format_count(st.sync_total, count);
+        afc_format_count(st.sync_failed, failed);
+        const char * unit = st.sync_phase == 2 ? "covers" :
+                            st.sync_phase == 3 ? "thumbnails" : "items";
+        snprintf(text, sizeof(text), "%s / %s %s", attempted, count, unit);
+        if(st.sync_failed > 0) {
+            size_t len = strlen(text);
+            snprintf(text + len, sizeof(text) - len, "   /   %s failed", failed);
+        }
+        detail = st.sync_total > 0 ? text : "";
     }
     else if(st.job_finished) {
         title = st.job_failed ? "Sync finished with errors" : "Sync complete";
-        detail = st.job_failed ? st.status : "Your album covers are ready. Return to the player when you like.";
+        detail = st.job_failed ? st.status : "";
     }
     afc_set_text(afc_progress_title, title);
     afc_set_text(afc_progress_detail, detail);
@@ -10100,9 +10157,13 @@ static void afc_sync_update(void)
     if(percent < 0) percent = 0;
     if(!st.job_active && !st.job_finished) percent = 0;
     if(st.job_finished && !st.job_failed) percent = 100;
+    bool show_progress = ((st.job_active || st.job_finished) && st.sync_total > 0) ||
+                         (st.job_finished && !st.job_failed);
+    lv_obj_set_hidden(afc_progress_bar, !show_progress);
+    lv_obj_set_hidden(afc_pct_label, !show_progress);
     lv_bar_set_value(afc_progress_bar, percent * 10, LV_ANIM_OFF);
     snprintf(text, sizeof(text), "%d%%", percent);
-    afc_set_text(afc_pct_label, st.job_active || st.job_finished ? text : "");
+    afc_set_text(afc_pct_label, show_progress ? text : "");
 }
 
 static void afc_sync_tick_cb(lv_timer_t * timer)
@@ -10115,52 +10176,52 @@ static void afc_sync_tick_cb(lv_timer_t * timer)
 static void ui_afc_sync_build(lv_obj_t * screen)
 {
     memset(afc_buttons, 0, sizeof(afc_buttons));
+    memset(afc_buttons_primary, 0, sizeof(afc_buttons_primary));
     afc_job_finished_seen = false;
     lv_obj_t * root = afc_box(screen, 0, 0, SCREEN_W, SCREEN_H, COL_BG);
-    afc_text(root, "Library Sync", FONT_H1, COL_TEXT, 32, 28, 700);
-    lv_obj_t * badge = afc_box(root, 1128, 36, 120, 36, COL_PANEL_ALT);
-    lv_obj_t * label = make_label(badge, "AFC MODE", FONT_CAPTION, COL_MUTED);
-    lv_obj_center(label);
+    afc_text(root, "Library Sync", &inter_32, COL_TEXT, 64, 54, 700);
+    afc_box(root, 64, 121, 1152, 1, COL_BORDER);
 
-    lv_obj_t * device = afc_box(root, 32, 104, 328, 508, COL_PANEL);
-    afc_text(device, ICON_PHONE, &bootstrap_icons_40, COL_ACCENT, 24, 24, 48);
-    afc_text(device, "DEVICE", FONT_CAPTION, COL_MUTED, 86, 33, 218);
-    afc_connection = afc_text(device, "Disconnected", FONT_H2,
-                              COL_TEXT, 24, 88, 280);
-    afc_trust_hint = afc_text(device, "", FONT_CAPTION, COL_MUTED, 24, 136, 280);
-    lv_obj_set_height(afc_trust_hint, 72);
+    afc_text(root, ICON_PHONE, &bootstrap_icons_32, COL_MUTED, 62, 157, 36);
+    afc_text(root, "Device", FONT_CAPTION, COL_MUTED, 110, 163, 100);
+    afc_box(root, 224, 169, 8, 8, COL_MUTED);
+    afc_connection = afc_text(root, "Disconnected", &inter_24,
+                              COL_TEXT, 244, 156, 500);
+    afc_trust_hint = afc_text(root, "", FONT_CAPTION, COL_MUTED, 224, 199, 536);
+    lv_obj_set_height(afc_trust_hint, 24);
     lv_label_set_long_mode(afc_trust_hint, LV_LABEL_LONG_DOT);
-    afc_sync_button(device, "Pair / Trust", UI_AFC_ACTION_PAIR, 24, 224, 280);
+    afc_text(root, "SD Card", FONT_CAPTION, COL_MUTED, 816, 163, 112);
+    afc_sd_text = afc_text(root, "", &inter_20, COL_MUTED, 944, 160, 272);
+    lv_obj_set_style_text_align(afc_sd_text, LV_TEXT_ALIGN_RIGHT, 0);
 
-    afc_box(device, 24, 312, 280, 1, COL_BORDER);
-    afc_text(device, ICON_SD_CARD, &bootstrap_icons_24, COL_MUTED, 24, 344, 28);
-    afc_text(device, "SD CARD", FONT_CAPTION, COL_MUTED, 64, 348, 240);
-    afc_sd_text = afc_text(device, "", FONT_CAPTION, COL_MUTED, 24, 392, 280);
-    afc_sd_bar = afc_bar(device, 24, 442, 280, 4);
-
-    lv_obj_t * library = afc_box(root, 384, 104, 864, 180, COL_PANEL);
-    afc_text(library, "LIBRARY", FONT_CAPTION, COL_MUTED, 24, 20, 300);
     const char * metrics[] = {"Albums", "Tracks", "Cached covers"};
     for(int i = 0; i < 3; i++) {
-        afc_metrics[i] = afc_text(library, "0", FONT_CLOCK_LG,
-                                 COL_TEXT, 24 + i * 280, 56, 256);
-        afc_text(library, metrics[i], FONT_CAPTION, COL_MUTED, 24 + i * 280, 100, 256);
+        afc_metrics[i] = afc_text(root, "0", &inter_tabular_54,
+                                 COL_TEXT, 160 + i * 352, 280, 312);
+        afc_text(root, metrics[i], FONT_CAPTION, COL_MUTED, 160 + i * 352, 342, 312);
     }
-    afc_library_updated = afc_text(library, "", FONT_CAPTION, COL_MUTED, 24, 144, 816);
+    afc_library_updated = afc_text(root, "", FONT_CAPTION, COL_DIM, 160, 384, 960);
+    lv_obj_set_style_text_align(afc_library_updated, LV_TEXT_ALIGN_CENTER, 0);
 
-    lv_obj_t * sync = afc_box(root, 384, 304, 864, 308, COL_PANEL);
-    afc_progress_title = afc_text(sync, "Ready to sync", FONT_H2, COL_TEXT, 24, 20, 718);
-    afc_pct_label = afc_text(sync, "", FONT_CLOCK_12, COL_ACCENT, 748, 22, 92);
+    afc_progress_title = afc_text(root, "Ready to sync", &inter_32, COL_TEXT, 160, 442, 960);
+    lv_obj_set_style_text_align(afc_progress_title, LV_TEXT_ALIGN_CENTER, 0);
+    afc_progress_detail = afc_text(root, "", FONT_CAPTION, COL_MUTED, 160, 496, 960);
+    lv_obj_set_style_text_align(afc_progress_detail, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_height(afc_progress_detail, 24);
+    lv_label_set_long_mode(afc_progress_detail, LV_LABEL_LONG_DOT);
+    afc_progress_bar = afc_bar(root, 160, 531, 960, 6);
+    afc_pct_label = afc_text(root, "", &inter_tabular_20, COL_ACCENT, 1144, 516, 72);
     lv_obj_set_style_text_align(afc_pct_label, LV_TEXT_ALIGN_RIGHT, 0);
-    afc_progress_detail = afc_text(sync, "", FONT_CAPTION, COL_MUTED, 24, 62, 816);
-    afc_progress_bar = afc_bar(sync, 24, 112, 816, 6);
-    afc_progress_album = afc_text(sync, "", FONT_CAPTION, COL_MUTED, 24, 136, 816);
+    afc_progress_album = afc_text(root, "", FONT_CAPTION, COL_MUTED, 160, 545, 960);
+    lv_obj_set_style_text_align(afc_progress_album, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_height(afc_progress_album, 24);
     lv_label_set_long_mode(afc_progress_album, LV_LABEL_LONG_DOT);
-    afc_sync_button(sync, "Sync", UI_AFC_ACTION_SYNC, 24, 192, 816);
-    afc_text(sync, "Refresh library database and missing covers", FONT_QUEUE_SUB,
-             COL_MUTED, 24, 260, 816);
 
-    afc_sync_button(root, "Exit", UI_AFC_ACTION_IPOD_MODE, 32, 642, 328);
+    afc_box(root, 64, 599, 1152, 1, COL_BORDER);
+    afc_sync_button(root, "Pair / Trust", UI_AFC_ACTION_PAIR, 64, 624, 224);
+    afc_sync_button(root, "Sync", UI_AFC_ACTION_SYNC, 520, 624, 240);
+    afc_sync_button(root, "Exit", UI_AFC_ACTION_IPOD_MODE, 1016, 624, 200);
+    afc_button_primary(UI_AFC_ACTION_SYNC, true);
     focus_select(0);
     afc_sync_update();
 }

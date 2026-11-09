@@ -31,7 +31,7 @@ static void print_usage(const char * argv0)
     printf("Usage: %s [options]\n\n", argv0);
     printf("  --zoom <factor>       Window zoom, e.g. 0.75 (default: 1.0)\n");
     printf("  --theme <0..2>        Gray, Aqua, or Windows 95\n");
-    printf("  --afc <state>         AFC: disconnected, ready, trust, syncing, done, error\n");
+    printf("  --afc <state>         AFC: disconnected, unpaired, trust, ready, nosd, preparing, syncing, done, error\n");
     printf("  --screenshot <path>   Render one frame to a PNG and exit\n");
     printf("  --wait <ms>           Wait before the screenshot (default: 1000)\n");
     printf("  --screen <1-6>        Start on a specific screen\n");
@@ -239,11 +239,13 @@ static void sim_afc_status(ui_afc_status_t * out)
     memset(out, 0, sizeof(*out));
     out->available = sim_afc_state != NULL;
     out->afc_mode = sim_afc_state != NULL;
-    out->sd_ready = out->sd_info_ready = true;
+    out->sd_ready = out->sd_info_ready = sim_afc_state && strcmp(sim_afc_state, "nosd") != 0;
     out->usb_connected = sim_afc_state && strcmp(sim_afc_state, "disconnected") != 0;
-    out->connected = out->pair_trusted = out->usb_connected && strcmp(sim_afc_state, "trust") != 0;
+    out->connected = out->pair_trusted = out->usb_connected &&
+        strcmp(sim_afc_state, "trust") != 0 && strcmp(sim_afc_state, "unpaired") != 0;
     out->pair_busy = sim_afc_state && strcmp(sim_afc_state, "trust") == 0;
-    out->job_active = sim_afc_state && strcmp(sim_afc_state, "syncing") == 0;
+    out->job_active = sim_afc_state && (strcmp(sim_afc_state, "syncing") == 0 ||
+                                      strcmp(sim_afc_state, "preparing") == 0);
     out->job_finished = sim_afc_state && (strcmp(sim_afc_state, "done") == 0 || strcmp(sim_afc_state, "error") == 0);
     out->job_failed = sim_afc_state && strcmp(sim_afc_state, "error") == 0;
     out->library_albums = 2096;
@@ -252,8 +254,8 @@ static void sim_afc_status(ui_afc_status_t * out)
     out->library_db_bytes = 1900000;
     out->sd_used_bytes = 872218624;
     out->sd_total_bytes = 31715491840ULL;
-    out->sync_phase = 2;
-    out->sync_total = 2096;
+    out->sync_phase = sim_afc_state && strcmp(sim_afc_state, "preparing") == 0 ? 1 : 2;
+    out->sync_total = out->sync_phase == 1 ? 0 : 2096;
     out->sync_attempted = 1372;
     out->sync_copied = 1372;
     out->job_kind = 2;

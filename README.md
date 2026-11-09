@@ -16,6 +16,8 @@ MFi identity.
 These contact sheets use the simulator's mock library and device data. Each
 shows Now Playing, Up Next, Albums, Artists, Songs, Playlists, Settings, and
 Library Sync. Click a sheet to view the screens at full resolution.
+Library Sync uses a compact status row, prominent library counts, and fixed
+**Pair / Trust**, **Sync**, and **Exit** controls along the bottom.
 
 **Gray (default)**
 
@@ -85,7 +87,7 @@ mkdir -p build/screenshots
 | `--menubar <left\|right>` | Choose the menubar side |
 | `--zoom <factor>` | Scale the window; default `1.0` |
 | `--keys <list>` | Inject comma-separated keys, such as `2,enter` or `context` |
-| `--afc <state>` | Preview AFC: `disconnected`, `ready`, `trust`, `syncing`, `done`, `error` |
+| `--afc <state>` | Preview AFC: `disconnected`, `unpaired`, `trust`, `ready`, `nosd`, `preparing`, `syncing`, `done`, `error` |
 | `--theme <0..2>` | Gray, Aqua, or Windows 95 |
 | `--screenshot <path>` | Save a PNG and exit |
 | `--wait <ms>` | Delay before capture; default `1000` |

@@ -2,8 +2,8 @@
 # Regenerate the Inter LVGL font subsets used by the UI.
 #
 # Inter is an open-source (SIL OFL 1.1) sans-serif that is visually close to
-# SF Pro. Regular text uses the default proportional figures; the two clock /
-# timer subsets enable Inter's `tnum` feature so digits stay equal-width.
+# SF Pro. Clock, timer and count subsets enable Inter's `tnum` feature so
+# digits stay equal-width. Large library counts need only digits and commas.
 #
 # Requirements: python3-fonttools, node/npx (lv_font_conv).
 set -euo pipefail
@@ -61,7 +61,7 @@ def instance(size, tabular):
 
 for size in sizes:
     instance(size, tabular=False)
-for size in (18, 20, 24, 28, 36):
+for size in (18, 20, 24, 28, 36, 54):
     instance(size, tabular=True)
 PY
 
@@ -76,6 +76,13 @@ for SIZE in 14 16 18 20 22 24 28 32 36 40; do
         -r 0x20-0x7F -r 0x2014 \
         -o "$OUT_DIR/inter_${SIZE}.c"
 done
+
+npx --yes lv_font_conv \
+    --font "$TMP_DIR/Inter-Tabular-54.ttf" \
+    --size 54 --bpp 4 --format lvgl \
+    --lv-font-name inter_tabular_54 --no-compress \
+    -r 0x2C -r 0x30-0x39 \
+    -o "$OUT_DIR/inter_tabular_54.c"
 
 for SIZE in 18 20 24 28 36; do
     npx --yes lv_font_conv \

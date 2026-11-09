@@ -76,6 +76,7 @@ set(UI_SOURCES
     app/ui/fonts/inter_tabular_24.c
     app/ui/fonts/inter_tabular_28.c
     app/ui/fonts/inter_tabular_36.c
+    app/ui/fonts/inter_tabular_54.c
 )
 
 add_executable(tab5_sim
