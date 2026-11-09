@@ -991,16 +991,23 @@ static lv_obj_t * make_page_header(lv_obj_t * parent, const char * title, int he
     return head;
 }
 
-/* One scrollbar spec for shared scroll views and the custom virtual lists.
- * LVGL positions the bar from the scroll container's right edge using this
- * part-specific padding. Keep it identical while idle and while scrolling. */
+/* Apply once, after the viewport's content padding is set. A 100%-wide LVGL
+ * object subtracts its margins: a negative right margin extends the viewport
+ * through its parent's padding to the visible column edge. Move that padding
+ * inside the viewport so text and row widths stay unchanged. The scrollbar
+ * then sits 8 px from the visible edge, rather than 8 px plus the column pad. */
 static void ui_style_scrollbar(lv_obj_t *obj)
 {
+    lv_obj_t *parent = lv_obj_get_parent(obj);
+    int32_t column_pad = lv_obj_get_style_pad_right(parent, LV_PART_MAIN);
+    lv_obj_set_style_margin_right(obj, -column_pad, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(obj,
+        lv_obj_get_style_pad_right(obj, LV_PART_MAIN) + column_pad, LV_PART_MAIN);
     const lv_style_selector_t selectors[] = {
         LV_PART_SCROLLBAR, LV_PART_SCROLLBAR | LV_STATE_SCROLLED
     };
     for(unsigned i=0;i<sizeof(selectors)/sizeof(selectors[0]);i++) {
-        lv_obj_set_style_pad_right(obj,6,selectors[i]);
+        lv_obj_set_style_pad_right(obj,8,selectors[i]);
         lv_obj_set_style_radius(obj,0,selectors[i]);
     }
 }
@@ -1008,12 +1015,12 @@ static void ui_style_scrollbar(lv_obj_t *obj)
 static lv_obj_t * make_panel_content(lv_obj_t * panel, int pad)
 {
     lv_obj_t * content = lv_obj_create(panel);
-    ui_style_scrollbar(content);
     lv_obj_set_size(content, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_radius(content, 0, 0);
     lv_obj_set_style_pad_all(content, pad, 0);
+    ui_style_scrollbar(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -1021,7 +1028,7 @@ static lv_obj_t * make_panel_content(lv_obj_t * panel, int pad)
     return content;
 }
 
-static lv_obj_t * make_scroll(lv_obj_t * parent)
+static lv_obj_t * make_scroll(lv_obj_t * parent, int pad_right)
 {
     lv_obj_t * list = lv_obj_create(parent);
     lv_obj_set_width(list, LV_PCT(100));
@@ -1029,6 +1036,7 @@ static lv_obj_t * make_scroll(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_right(list, pad_right, 0);
     lv_obj_set_style_pad_row(list, LIST_ROW_GAP, 0);
     ui_style_scrollbar(list);
     if(g_theme->id != UI_THEME_GRAY) {
@@ -4080,10 +4088,9 @@ static void np_create(lv_obj_t * parent)
         lv_obj_set_scrollable(queue_head, false);
         make_label(queue_head, "Up Next", FONT_H2, COL_TEXT);
 
-        np_queue_list = make_scroll(right);
+        np_queue_list = make_scroll(right, 0);
         lv_obj_set_flex_grow(np_queue_list, 0);
         lv_obj_set_height(np_queue_list, NP_QUEUE_LIST_H);
-        lv_obj_set_style_pad_right(np_queue_list, 0, 0);
         lv_obj_set_style_pad_row(np_queue_list, 0, 0);
         int total = player_queue_count();
         np_queue_fill_current = player_queue_index();
@@ -4901,11 +4908,10 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
         albums_play_focus = -1;
     }
 
-    lv_obj_t * track_list = make_scroll(parent);
+    lv_obj_t * track_list = make_scroll(parent, 14);
     lv_obj_set_flex_grow(track_list, 0);
     lv_obj_set_height(track_list, ALBUM_TRACK_LIST_H);
     lv_obj_set_style_pad_row(track_list, 0, 0);
-    lv_obj_set_style_pad_right(track_list, 14, 0);
     lv_obj_add_event_cb(track_list, albums_track_scroll_end_cb,
                         LV_EVENT_SCROLL_END, NULL);
     int track_count = player_album_track_count(album.id);
@@ -5605,11 +5611,10 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
         artists_play_focus = -1;
     }
 
-    lv_obj_t * album_list = make_scroll(parent);
+    lv_obj_t * album_list = make_scroll(parent, 14);
     lv_obj_set_flex_grow(album_list, 0);
     lv_obj_set_height(album_list, ARTIST_DETAIL_LIST_H);
     lv_obj_set_style_pad_row(album_list, 0, 0);
-    lv_obj_set_style_pad_right(album_list, 14, 0);
     lv_obj_add_event_cb(album_list, albums_track_scroll_end_cb,
                         LV_EVENT_SCROLL_END, NULL);
 
@@ -5789,7 +5794,7 @@ static void artists_create(lv_obj_t * parent)
     counter_create(head, &artists_counter);
     artists_update_count();
 
-    lv_obj_t * list = make_scroll(left);
+    lv_obj_t * list = make_scroll(left, 0);
     /* The pooled rows are positioned absolutely over a spacer, so the list
      * itself must not run a flex layout (the spacer would push every row
      * below the viewport). */
@@ -6947,11 +6952,10 @@ static void playlists_render_detail(lv_obj_t * parent, bool interactive)
         playlists_play_focus = -1;
     }
 
-    lv_obj_t * track_list = make_scroll(parent);
+    lv_obj_t * track_list = make_scroll(parent, 14);
     lv_obj_set_flex_grow(track_list, 0);
     lv_obj_set_height(track_list, PLAYLIST_TRACK_LIST_H);
     lv_obj_set_style_pad_row(track_list, 0, 0);
-    lv_obj_set_style_pad_right(track_list, 14, 0);
     int count = player_playlist_track_count(playlists_selected);
     /* The preview stays short; the opened detail shows the whole playlist. */
     int max_tracks = interactive ? count : DETAIL_PREVIEW_MAX_TRACKS;
@@ -7041,7 +7045,7 @@ static void playlists_create(lv_obj_t * parent)
     lv_obj_t * head = make_page_header(left, "Playlists", 56);
     counter_create(head, &playlists_counter);
 
-    lv_obj_t * list = make_scroll(left);
+    lv_obj_t * list = make_scroll(left, 0);
     lv_obj_set_flex_grow(list, 0);
     lv_obj_set_height(list, PLAYLISTS_LIST_H);
     lv_obj_set_style_pad_row(list, 0, 0);
@@ -7212,7 +7216,7 @@ static void ble_create(lv_obj_t * parent)
     lv_obj_t * head = make_page_header(root, "Bluetooth Remote", 48);
     make_label(head, status, FONT_H2, scanning ? COL_ACCENT : COL_MUTED);
 
-    lv_obj_t * list = make_scroll(root);
+    lv_obj_t * list = make_scroll(root, 0);
     lv_obj_set_style_pad_row(list, 4, 0);
 
     lv_obj_t * pair_row = make_row(list, 64);
@@ -9293,7 +9297,7 @@ static void settings_create(lv_obj_t * parent)
     settings_update_count();
 
     /* Keep the heading fixed while the settings rows scroll independently. */
-    lv_obj_t * list = make_scroll(left);
+    lv_obj_t * list = make_scroll(left, 0);
     lv_obj_set_style_pad_row(list, 0, 0);
     settings_left_list = list;
     for(int i = 0; i < SETTING_COUNT; i++) {

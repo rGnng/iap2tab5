@@ -79,16 +79,29 @@ static void audit_scrollbars(lv_obj_t *obj)
             if(state)lv_obj_add_state(obj,LV_STATE_SCROLLED);
             else lv_obj_remove_state(obj,LV_STATE_SCROLLED);
             if(lv_obj_get_style_radius(obj,LV_PART_SCROLLBAR)!=0 ||
-               lv_obj_get_style_pad_right(obj,LV_PART_SCROLLBAR)!=6)
+               lv_obj_get_style_pad_right(obj,LV_PART_SCROLLBAR)!=8)
                 fprintf(stderr,"Scrollbar style failure: screen=%d width=%ld height=%ld state=%d\n",
                     g_current_screen,(long)lv_obj_get_width(obj),(long)lv_obj_get_height(obj),state);
             check(lv_obj_get_style_radius(obj,LV_PART_SCROLLBAR)==0,"Every scrollbar must have square corners");
-            check(lv_obj_get_style_pad_right(obj,LV_PART_SCROLLBAR)==6,"Every scrollbar must have a six-pixel right inset");
+            check(lv_obj_get_style_pad_right(obj,LV_PART_SCROLLBAR)==8,"Every scrollbar must have an eight-pixel right inset");
             if(lv_obj_get_scroll_dir(obj)&LV_DIR_VER) {
-                lv_area_t horizontal,vertical,bounds;
-                lv_obj_get_scrollbar_area(obj,&horizontal,&vertical);lv_obj_get_coords(obj,&bounds);
+                lv_area_t horizontal,vertical,bounds,column;
+                lv_obj_get_scrollbar_area(obj,&horizontal,&vertical);
+                lv_obj_get_coords(obj,&bounds);
+                /* The parent spans the visible column, including its padding.
+                 * Measuring only the list's bounds would miss the old extra
+                 * 16 px (22 px on Bluetooth) between list and column edges. */
+                lv_obj_get_coords(lv_obj_get_parent(obj),&column);
                 check(vertical.x2>=vertical.x1,"A forced vertical scrollbar must have a real draw area");
-                check(bounds.x2-vertical.x2==6,"Actual scrollbar geometry must be six pixels inside its container");
+                check(bounds.x2==column.x2,"The scrolling viewport must reach the visible column edge");
+                check(column.x2-vertical.x2==8,"Actual scrollbar geometry must be eight pixels inside the visible column");
+                if(state) {
+                    pump(300); /* Complete the theme's opacity transition. */
+                    int y=(vertical.y1+vertical.y2)/2;
+                    uint32_t color=lv_color_to_u32(lv_obj_get_style_bg_color(obj,LV_PART_SCROLLBAR))&0xffffff;
+                    check((frame[y][vertical.x2]&0xffffff)==color,
+                          "The scrollbar must render at the column inset without being clipped by old list bounds");
+                }
             }
         }
         if(!was_scrolled)lv_obj_remove_state(obj,LV_STATE_SCROLLED);
@@ -98,14 +111,29 @@ static void audit_scrollbars(lv_obj_t *obj)
 }
 static void scrollbar_views(void)
 {
-    for(int screen=SCR_ALBUMS;screen<SCR_COUNT;screen++) {
-        ui_select_screen(screen);pump(600);audit_scrollbars(lv_screen_active());
-        if(screen==SCR_ALBUMS) { albums_open((void *)(intptr_t)0);pump(200);audit_scrollbars(lv_screen_active()); }
-        if(screen==SCR_ARTISTS) { artists_open((void *)(intptr_t)0);pump(200);audit_scrollbars(lv_screen_active()); }
+    for(int side=0;side<2;side++) {
+        ui_set_menubar_left(side==0);pump(100);
+        for(int screen=SCR_ALBUMS;screen<SCR_COUNT;screen++) {
+            ui_select_screen(screen);pump(600);audit_scrollbars(lv_screen_active());
+            lv_obj_t *master=screen==SCR_ALBUMS?albums_left_list:
+                screen==SCR_ARTISTS?artists_left_list:
+                screen==SCR_PLAYLISTS?playlists_left_list:
+                screen==SCR_SETTINGS?settings_left_list:NULL;
+            if(master)check(lv_obj_get_content_width(master)==SIDE_PANEL_W-32,
+                           "Moving the scrollbar must preserve master-list content and row widths");
+            if(screen==SCR_SONGS)check(lv_obj_get_content_width(songs_list)==CONTENT_W-32-14,
+                                      "Moving the Songs scrollbar must preserve its text and row widths");
+            if(screen==SCR_ALBUMS)albums_open((void *)(intptr_t)0);
+            if(screen==SCR_ARTISTS)artists_open((void *)(intptr_t)0);
+            if(screen==SCR_PLAYLISTS)playlists_open((void *)(intptr_t)0);
+            if(screen==SCR_SETTINGS)settings_open((void *)(intptr_t)SETTING_FAST_SCROLL);
+            pump(200);audit_scrollbars(lv_screen_active());
+        }
+        ui_select_screen(SCR_NOW_PLAYING);pump(300);np_toggle_queue();pump(600);
+        audit_scrollbars(lv_screen_active());np_toggle_queue();pump(300);
     }
-    ui_select_screen(SCR_NOW_PLAYING);pump(300);np_toggle_queue();pump(600);
-    audit_scrollbars(lv_screen_active());np_toggle_queue();pump(300);
-    check(audited_scrollbars>=10,"Audit must cover virtual lists, detail panes, Settings and Up Next");
+    ui_set_menubar_left(true);pump(100);
+    check(audited_scrollbars>=30,"Audit must cover virtual lists, detail panes, Settings and Up Next with either menu position");
 }
 
 static void fast_navigation(void)
@@ -216,6 +244,6 @@ int main(int argc,char **argv)
     ui_apply_saved_settings(&config);ui_init();pump(600);
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
     alpha_fade();artist_viewport();scrollbar_views();fast_navigation();
-    puts("PASS: transparent text fade, Artists viewport restoration, page scrolling and theme cursor feedback");
+    puts("PASS: transparent text fade, Artists viewport restoration, column scrollbar geometry, page scrolling and theme cursor feedback");
     return 0;
 }
