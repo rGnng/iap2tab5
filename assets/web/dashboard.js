@@ -7,6 +7,7 @@ function toast(msg, bad) {
   $('toast').textContent = msg; $('toast').className = 'on' + (bad ? ' bad' : '');
   clearTimeout(toast.timer); toast.timer = setTimeout(function () { $('toast').className = ''; }, 4000);
 }
+var btPanel = T.bluetoothPanel($('bluetooth'), toast);
 function value(id) { var e = $(id); return e.type === 'checkbox' ? e.checked : e.value; }
 function same(a,b) { return String(a) === String(b); }
 function setVal(id,v) {
@@ -39,6 +40,7 @@ function key(k) {
 }
 function render(s,c,p) {
   S=s; C=c;
+  btPanel.render(s.bluetooth);
   $('chips').innerHTML = T.chip('Device',s.iap2_mode ? (s.iap2_identified ? 'Linked' : 'Waiting') : 'Library Sync',s.iap2_identified ? 'ok' : '') +
     T.chip('SD',s.sd_ready ? 'Ready' : 'Missing',s.sd_ready ? 'ok' : 'bad') + T.chip('WiFi',s.ip || '—','ok');
   $('np_title').textContent=s.title || 'No track'; $('np_artist').textContent=s.artist || '—'; $('np_album').textContent=s.album || '';

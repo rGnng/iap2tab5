@@ -25,6 +25,32 @@ bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
 void ulanzi_d100h_encode_ble(const uint8_t * plain, size_t len,
                              uint8_t out[20]);
 
+typedef enum {
+    ULANZI_STATUS_HEARTBEAT,
+    ULANZI_STATUS_SLEEP_READ,
+    ULANZI_STATUS_SLEEP_WRITE,
+    ULANZI_STATUS_BATTERY,
+    ULANZI_STATUS_STANDBY_READ,
+    ULANZI_STATUS_STANDBY_WRITE,
+    ULANZI_STATUS_STANDBY_STATE,
+} ulanzi_status_kind_t;
+
+typedef struct {
+    ulanzi_status_kind_t kind;
+    uint32_t sleep_seconds;
+    uint16_t voltage_raw;
+    uint8_t battery_percent;
+    uint8_t low_battery;
+    bool charging;
+    bool charge_full;
+    bool power_off;
+    bool standby;
+} ulanzi_d100h_status_t;
+
+/* Decode vendor status separately from controls; never emit a key for it. */
+bool ulanzi_d100h_decode_ble_status(const uint8_t * data, size_t len,
+                                   ulanzi_d100h_status_t * out);
+
 void ulanzi_d100h_heartbeat(uint8_t out[64]);
 
 /* Shared USB/BLE top-right gesture. Poll at the deadline to fire while held;

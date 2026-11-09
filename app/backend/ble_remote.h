@@ -25,6 +25,33 @@ typedef struct {
     int rssi;
 } ble_remote_device_t;
 
+typedef struct {
+    bool connected;
+    bool battery_valid;
+    uint8_t battery_percent;
+    bool charging;
+    bool charge_full;
+    bool sleep_disabled;
+    bool standby_time_valid;
+    uint32_t standby_seconds;
+    bool standby_state_valid;
+    bool standby;
+} ble_remote_info_t;
+
+/* Live information for this address only. Battery becomes unknown on loss. */
+void ble_remote_get_info(const char * addr, ble_remote_info_t * out);
+
+typedef struct {
+    uint32_t notifications;
+    uint32_t heartbeat_replies;
+    uint32_t link_checks;
+    int64_t notification_age_ms;
+    int64_t heartbeat_age_ms;
+    int last_disconnect_reason;
+    char last_recovery[80];
+} ble_remote_link_stats_t;
+void ble_remote_get_link_stats(ble_remote_link_stats_t * out);
+
 void ble_remote_start(void);
 void ble_remote_scan_start(void);
 void ble_remote_scan_stop(void);

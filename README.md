@@ -145,6 +145,21 @@ releasing after a held turn does not activate the selected item. This works
 over USB and BLE. Rapid rotation filters isolated reverse glitches before
 navigation; a deliberate single reverse notch is delivered within 120 ms.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
+Paired-device rows show the reported percentage as `BATT <percent>%`, with
+`CHG` appended while charging, or `disconnect` when disconnected. `BATT --%`
+means connected but awaiting a battery report. The BLE driver reads the D100H
+sleep timer and separate standby timer on every connection, writes zero only
+when needed, and confirms each by readback. Unsupported standby controls do
+not disconnect a responsive dial. It sends an immediate heartbeat and keeps it running once per
+second. Reconnect attempts continue while Bluetooth is on, with delays
+increasing from 3 to 15 seconds. After 10 seconds without vendor notifications,
+the driver checks the GATT connection and refreshes its notification
+subscription. A responsive idle controller stays connected. A probe timeout,
+repeated GATT/write failures, or stalled setup causes a disconnect and retry.
+Turning Bluetooth off or forgetting the device cancels pending work.
+The dashboard and `/debug` web page also provide a **Bluetooth controllers**
+panel with enable/disable, scanning, Pair, Connect and Delete controls. Battery
+percentage, charging and sleep-disable confirmation update automatically.
 
 **Settings → Fast Scroll** starts with an **Enabled / Disabled** control
 (default: Enabled), followed by **Start Fast Scrolling After** (1–5 pages per
@@ -520,7 +535,7 @@ command above to change reset behavior, baud rate, or flash settings.
 4. Look for **`C6 firmware 2.13.1`** in the current application's log, successful
    SDIO initialization, and no host/co-processor `Version mismatch` warning.
    `BT controller init RPC failed` should no longer appear.
-5. With no station credentials configured, connect to **Tab5-Debug** and open
+5. With no station credentials configured, connect to **IAP2TAB5** and open
    **http://192.168.4.1**. Open **Settings → Bluetooth** and confirm that scanning
    finds the D100H when the remote is in pairing mode.
 
@@ -559,7 +574,7 @@ cannot mount, or `wifi.txt` is missing or unusable, station mode uses that backu
 so the web debugger remains reachable. Unchanged credentials cause no NVS writes.
 
 With no usable SD or NVS credentials, the default configuration starts an open
-**Tab5-Debug** access point at **http://192.168.4.1**. Failed station connections
+**IAP2TAB5** access point at **http://192.168.4.1**. Failed station connections
 are retried. AP mode can also be selected explicitly in `config.json`.
 
 Open the Tab5's address in a browser to configure settings, upload a library or

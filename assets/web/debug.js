@@ -5,6 +5,7 @@ function toast(msg,bad) {
   $('toast').textContent=msg; $('toast').className='on'+(bad ? ' bad' : '');
   clearTimeout(toast.timer); toast.timer=setTimeout(function() { $('toast').className=''; },4000);
 }
+var btPanel=T.bluetoothPanel($('bluetooth'),toast);
 function buttons(id,items) {
   items.forEach(function(item) { var b=document.createElement('button'); b.textContent=item[0]; b.dataset.key=item[1]; $(id).appendChild(b); });
 }
@@ -92,6 +93,7 @@ async function markFlicker() {
   finally { $('mark_flicker').disabled=false; }
 }
 function render(s,c,p) {
+  btPanel.render(s.bluetooth);
   if(s.uptime_s<uptime) {
     lastId=0; lines.push('— Device restarted —'); if(!paused) connectLog();
   }

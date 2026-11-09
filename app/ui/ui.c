@@ -8913,21 +8913,26 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                 if(!ble_remote_paired_get(i, &dev)) continue;
                 lv_obj_t * device = make_row(parent, SETTINGS_ROW_H);
                 lv_obj_set_style_pad_left(device, 16, 0);
-                lv_obj_t * icon = make_label(device, ICON_BLUETOOTH,
-                                             &bootstrap_icons_24, COL_ACCENT);
-                lv_obj_set_width(icon, 28);
                 lv_obj_t * name = make_label(device,
                                              dev.name[0] ? dev.name : dev.addr,
                                              FONT_H2, COL_TEXT);
                 lv_obj_set_flex_grow(name, 1);
                 ui_text_fade(name);
-                bool connected = state == BLE_REMOTE_CONNECTED;
-                lv_obj_t * status = make_label(
-                    device, connected ? "Connected" : "Disconnected",
-                    FONT_H2, connected ? COL_GREEN : COL_MUTED);
-                lv_obj_set_width(status, 170);
-                lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_RIGHT, 0);
-                ui_text_fade(status);
+                ble_remote_info_t info;
+                ble_remote_get_info(dev.addr, &info);
+                uint32_t color = !info.connected ? COL_MUTED :
+                    info.charging || info.charge_full ? COL_GREEN : COL_TEXT;
+                char battery[24] = "disconnect";
+                if(info.connected) {
+                    if(info.battery_valid) {
+                        snprintf(battery, sizeof(battery), "BATT %u%%%s",
+                                 info.battery_percent, info.charging ? " CHG" : "");
+                    }
+                    else {
+                        snprintf(battery, sizeof(battery), "BATT --%%");
+                    }
+                }
+                make_label(device, battery, FONT_H2, color);
                 if(interactive) {
                     focus_add_clickable(device, settings_ble_device_action,
                                         NULL, (void *)(intptr_t)i, true);
@@ -8949,10 +8954,6 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                 if(!ble_remote_scan_get(i, &dev)) continue;
                 lv_obj_t * device = make_row(parent, SETTINGS_ROW_H);
                 lv_obj_set_style_pad_left(device, 16, 0);
-                lv_obj_t * icon = make_label(device, ICON_BLUETOOTH,
-                                             &bootstrap_icons_24,
-                                             COL_MUTED);
-                lv_obj_set_width(icon, 28);
                 lv_obj_t * name = make_label(device,
                                              dev.name[0] ? dev.name
                                                          : dev.addr,

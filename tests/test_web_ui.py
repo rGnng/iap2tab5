@@ -47,6 +47,14 @@ class WebUITests(unittest.TestCase):
         self.config = dict(volume=65, brightness=70, screen_off_minutes=0, theme=0,
                            sound_mode=2, debug_log=False, iap2_mode=True, usb_mode=2,
                            screen_flip=0, wifi_mode=0, ap_ssid='Tab5', charge_enabled=True, qc_high=False)
+        self.status['bluetooth'] = dict(enabled=True, supported=True, scanning=False,
+            revision=1, uptime_s=100, status='Connected: Ulanzi Dial', devices=[
+                dict(name='Ulanzi Dial', addr='CA:63:45:81:8C:B9', connected=True,
+                     battery=90, charging=True, charge_full=False, sleep_disabled=True),
+                dict(name='Second controller', addr='CA:63:45:81:8C:BA', connected=False,
+                     battery=None, charging=None, charge_full=None, sleep_disabled=False)],
+            discovered=[dict(name='Nearby Dial', addr='CA:63:45:81:8C:BB', rssi=-46)])
+        self.bt_failure = False
         self.power = dict(ina226_ok=True, bus_mv=7900, current_ma=-550, chg_en=True)
         self.page.route('**/api/**', self.api)
         self.page.route('**/debug', lambda route: route.fulfill(path=str(ROOT / 'assets/web/debug.html'), content_type='text/html'))
@@ -60,6 +68,32 @@ class WebUITests(unittest.TestCase):
         path = request.url.split('/api/', 1)[1]
         if request.method == 'POST':
             self.writes.append((path, request.post_data))
+            if path == 'bluetooth':
+                if self.bt_failure:
+                    route.fulfill(status=503, body='Bluetooth request failed')
+                    return
+                command = json.loads(request.post_data)
+                bt = self.status['bluetooth']
+                action = command['action']
+                if action == 'enable':
+                    bt['enabled'] = command['enabled']
+                    bt['status'] = 'Idle' if bt['enabled'] else 'Bluetooth off'
+                elif action in ('scan', 'stop_scan'):
+                    bt['scanning'] = action == 'scan'
+                elif action == 'forget':
+                    bt['devices'] = [d for d in bt['devices'] if d['addr'] != command['addr']]
+                elif action == 'pair':
+                    device = next(d for d in bt['discovered'] if d['addr'] == command['addr'])
+                    bt['discovered'].remove(device)
+                    bt['devices'].append(dict(device, connected=True, battery=None,
+                                              charging=None, sleep_disabled=False))
+                elif action == 'connect':
+                    for device in bt['devices']:
+                        device['connected'] = device['addr'] == command['addr']
+                bt['revision'] += 1
+                route.fulfill(json=dict(bt, message='Bluetooth updated'))
+                return
+
             if path == 'display/mark':
                 self.status['display'].update(marker=1, marker_uptime_ms=100000)
                 route.fulfill(json=self.status['display'])
@@ -176,6 +210,84 @@ class WebUITests(unittest.TestCase):
         self.page.set_viewport_size({'width': 390, 'height': 844})
         self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
         self.assertFalse(self.errors)
+
+    def test_bluetooth_status_and_text_safety_on_both_pages(self):
+        bt = self.status['bluetooth']
+        bt['devices'][1]['name'] = '<img src=x onerror="window.injected=1">'
+        bt['discovered'].append(dict(bt['devices'][0], rssi=-50))
+        for path in ['/', '/debug']:
+            self.open(path)
+            self.assertIn('BATT 90% CHG', self.page.locator('#bt_paired').inner_text())
+            self.assertIn('Sleep: disabled', self.page.locator('#bt_paired').inner_text())
+            self.assertIn('disconnect', self.page.locator('#bt_paired').inner_text())
+            self.assertIn('<img', self.page.locator('#bt_paired').inner_text())
+            self.assertEqual(self.page.locator('#bt_paired img').count(), 0)
+            self.assertFalse(self.page.evaluate('!!window.injected'))
+            self.assertEqual(self.page.locator('#bt_discovered .bt-device').count(), 1)
+            self.assertIn('-46 dBm', self.page.locator('#bt_discovered').inner_text())
+        bt['devices'][0].update(battery=60, charging=False)
+        self.page.evaluate('refresh()')
+        self.page.wait_for_function('document.getElementById("bt_paired").textContent.includes("BATT 60%")')
+        self.assertNotIn('CHG', self.page.locator('#bt_paired').inner_text())
+        bt['devices'][0].update(battery=None, charging=None)
+        self.page.evaluate('refresh()')
+        self.page.wait_for_function('document.getElementById("bt_paired").textContent.includes("BATT --%")')
+        for width in [1440, 1024, 768, 390]:
+            self.page.set_viewport_size({'width': width, 'height': 844})
+            self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width)
+        self.assertFalse(self.errors)
+
+    def test_bluetooth_scan_pair_connect_delete_and_toggle(self):
+        self.open()
+        self.page.locator('#bt_scan').click()
+        self.page.wait_for_function('document.getElementById("bt_scan").textContent==="Stop scanning"')
+        self.page.locator('#bt_scan').click()
+        self.page.wait_for_function('document.getElementById("bt_scan").textContent==="Scan for controllers"')
+        self.page.get_by_role('button', name='Connect Second controller', exact=True).click()
+        self.page.wait_for_function('!document.getElementById("bt_toggle").disabled')
+        self.page.get_by_role('button', name='Pair Nearby Dial', exact=True).click()
+        self.page.wait_for_function('document.getElementById("bt_paired").textContent.includes("Nearby Dial")')
+        self.page.get_by_role('button', name='Delete Nearby Dial', exact=True).click()
+        self.page.wait_for_function('!document.getElementById("bt_paired").textContent.includes("Nearby Dial")')
+        self.page.locator('#bt_toggle').click()
+        self.page.wait_for_function('document.getElementById("bt_toggle").textContent==="Enable Bluetooth"')
+        self.assertTrue(self.page.locator('#bt_scan').is_disabled())
+        self.assertFalse(self.page.get_by_role('button', name='Delete Ulanzi Dial', exact=True).is_disabled())
+        self.page.locator('#bt_toggle').click()
+        self.page.wait_for_function('document.getElementById("bt_toggle").textContent==="Disable Bluetooth"')
+        commands=[json.loads(body) for path,body in self.writes if path=='bluetooth']
+        self.assertEqual(commands, [dict(action='scan'), dict(action='stop_scan'),
+            dict(action='connect', addr='CA:63:45:81:8C:BA'),
+            dict(action='pair', addr='CA:63:45:81:8C:BB'),
+            dict(action='forget', addr='CA:63:45:81:8C:BB'),
+            dict(action='enable', enabled=False), dict(action='enable', enabled=True)])
+        self.assertFalse(self.errors)
+
+    def test_bluetooth_poll_focus_errors_and_double_click(self):
+        self.open()
+        button=self.page.get_by_role('button', name='Connect Second controller', exact=True)
+        button.focus()
+        self.page.evaluate('refresh()')
+        self.assertTrue(button.evaluate('el=>el===document.activeElement'))
+        self.bt_failure=True
+        button.evaluate('el=>{el.click();el.click();}')
+        self.page.wait_for_function('document.getElementById("toast").className.includes("bad")')
+        self.assertIn('Bluetooth request failed', self.page.locator('#toast').inner_text())
+        self.assertEqual(len(self.writes), 1)
+        self.page.wait_for_function('!document.getElementById("bt_toggle").disabled')
+        self.assertFalse(button.is_disabled())
+        self.assertIn('BATT 90% CHG', self.page.locator('#bt_paired').inner_text())
+        self.assertFalse(self.errors)
+
+    def test_bluetooth_ignores_stale_poll_but_accepts_reboot(self):
+        self.open()
+        bt=self.status['bluetooth']
+        newer=dict(bt, revision=20, uptime_s=120, status='New state')
+        self.page.evaluate('bt=>btPanel.render(bt)', newer)
+        self.page.evaluate('bt=>btPanel.render(bt)', dict(bt, revision=19, uptime_s=120, status='Stale state'))
+        self.assertEqual(self.page.locator('#bt_status').inner_text(), 'New state')
+        self.page.evaluate('bt=>btPanel.render(bt)', dict(bt, revision=1, uptime_s=10, status='Restarted'))
+        self.assertEqual(self.page.locator('#bt_status').inner_text(), 'Restarted')
 
     def test_debug_library_buttons_follow_availability(self):
         self.status['iap2_identified'] = False

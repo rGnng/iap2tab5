@@ -1,5 +1,83 @@
 # D100H BLE remote: handover and driver-analysis brief
 
+## Official driver power controls (2026-11-09)
+
+For current sleep/standby behavior, use the supplied local Ulanzi Studio
+3.4.8 binary rather than the `kriomant/ulanzi-d100h` interpretation. The older
+third-party references below remain bring-up history.
+
+Local source: `/home/aki/ws/ulanzidriver/analysis/extracted/Ulanzi Studio.app/Contents/`.
+The installer SHA256 is
+`482f482725b5accbae89c007ce555af4f54a3b28b033627ce52f29c023e6d21c`.
+Static ARM64 analysis of `Frameworks/Ulanzi_Studio.dylib` identifies:
+
+| Control | Read plaintext | Set plaintext | Native helper addresses |
+| --- | --- | --- | --- |
+| Sleep timer | `01 01 42 01` | `01 01 42 02 <int32 LE>` | `0x207fc`, `0x20874` |
+| Standby timer | `01 01 2c 01` | `01 01 2c 02 <int32 LE>` | `0x20710`, `0x20788` |
+| Standby state | `01 01 0d 01` | `01 01 0d 00 <bool>` | `0x1f3e0`, `0x1f458` |
+
+The native parser loads all four timer bytes. `MacOS/UlanziDeck`'s
+`SettingDialog` constructor assigns its five sleep buttons the values
+3600, 7200, 10800, 14400 and 0. Its last button (`this+0x278`) is labeled
+`关` (Off), and `onSleepTimeChanged(int)` forwards its value unchanged to
+`setDeviceSleepTime`. Thus sleep timer zero is confirmed by the official app.
+
+Live read-only queries on firmware `bt-official-power-query` returned sleep
+**0 seconds**, standby **180 seconds**, standby state **false**. Three repeated
+reads agreed. This separates sleep from the three-minute standby interval;
+sleep zero alone does not establish that the dial will remain immediately
+responsive after idle.
+
+The follow-up firmware reads standby first, sets its timer to zero only if
+the read succeeds and is nonzero, then requires an acknowledged write and
+separate zero readback. Unsupported/failed standby setup is bounded and does
+not disconnect an otherwise responsive peer.
+
+Live OTA `bt-standby-off` confirmed standby read 180 at 16848 ms, write ack 0
+at 16948 ms and separate readback 0 at 17247 ms. Standby state read false at
+17398 ms. At uptime 275 seconds (over four minutes after connection), the dial
+had sent 262 heartbeat replies, the latest 855 ms earlier, with no disconnect,
+recovery or liveness probe. At uptime 456 seconds (over seven idle minutes),
+443 heartbeat replies had arrived, the latest 141 ms earlier; there were still
+no disconnects, recovery attempts or probes. This differs from the prior
+timer-180 run, where vendor replies stopped at approximately three minutes.
+The user confirmed that one physical knob notch now produces an immediate
+Tab5 response after the idle period, without pressing the knob first.
+
+Codec tests cover the complete 32-bit timer fields. Lifecycle tests cover
+standby write ack/readback, skipping writes for an already-zero timer, bounded
+unsupported reads and missing write acknowledgments without disconnecting a
+healthy peer. A separate HTTP regression test covers the borrowed log-header
+pointer bug that previously replaced `X-Log-Seq` with the dropped-line count
+and caused diagnostic pagination to repeat old pages.
+
+## Idle recovery update (2026-11-09)
+
+The heartbeat-only watchdog initiated a disconnect at 366634 ms after ten
+seconds without a recognized heartbeat reply. The log had confirmed sleep
+timer zero at 45012 ms; the disconnect completed locally with reason `0x216`.
+This is evidence of a host-initiated recovery, not proof of device sleep.
+
+Recovery now counts every vendor notification as activity. A quiet channel
+triggers a GATT CCCD read followed by an acknowledged subscription refresh;
+a responsive idle link remains connected. Probe timeouts and repeated GATT
+errors still trigger persistent reconnection. Late probe callbacks cannot
+affect a later connection or probe. `/api/bluetooth` exposes counters and the
+last recovery/disconnect cause under `link`.
+
+Host tests cover twelve simulated minutes without heartbeat replies while
+GATT remains responsive, vendor traffic without recognized heartbeat replies,
+stale probe callbacks, failed probes and disabled Bluetooth.
+
+The `bt-idle-link-probe` live build also remained connected for seven minutes
+while 25 acknowledged GATT checks succeeded. Vendor heartbeat replies stopped
+about 180 seconds after connection; the user then reported needing 3–5 knob
+notches before response. A responsive GATT link therefore does not prove the
+vendor processor remains awake.
+
+## Bring-up history
+
 Status: **vendor mode working end-to-end**. The current firmware uses
 ESP-IDF 5.5.6; the 5.4.2 references in the historical sections below describe
 the original bring-up. Key and knob events are decoded

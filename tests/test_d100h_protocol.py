@@ -25,6 +25,13 @@ class KnobState(ctypes.Structure):
 class BackState(ctypes.Structure):
     _fields_ = [('down', ctypes.c_bool)]
 
+class VendorStatus(ctypes.Structure):
+    _fields_ = [('kind', ctypes.c_int), ('sleep_seconds', ctypes.c_uint32),
+                ('voltage_raw', ctypes.c_uint16), ('battery_percent', ctypes.c_uint8),
+                ('low_battery', ctypes.c_uint8), ('charging', ctypes.c_bool),
+                ('charge_full', ctypes.c_bool), ('power_off', ctypes.c_bool),
+                ('standby', ctypes.c_bool)]
+
 
 # Public gesture event/action enums from ulanzi_d100h.h.
 DOWN, UP, POLL, CANCEL = range(4)
@@ -72,6 +79,9 @@ class D100HProtocolTests(unittest.TestCase):
             ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
             ctypes.POINTER(ctypes.c_uint8)]
         cls.lib.ulanzi_d100h_encode_ble.restype = None
+        cls.lib.ulanzi_d100h_decode_ble_status.argtypes = [
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(VendorStatus)]
+        cls.lib.ulanzi_d100h_decode_ble_status.restype = ctypes.c_bool
         cls.lib.ulanzi_top_right_update.argtypes = [
             ctypes.POINTER(TopRightState), ctypes.c_int, ctypes.c_int64]
         cls.lib.ulanzi_top_right_update.restype = ctypes.c_int
@@ -310,6 +320,57 @@ class D100HProtocolTests(unittest.TestCase):
         packet = (ctypes.c_uint8 * 64)()
         self.lib.ulanzi_d100h_heartbeat(packet)
         self.assertEqual(bytes(packet), bytes.fromhex('24569ef228e145a1') + ZERO_BLOCK * 7)
+
+    def status(self, plain):
+        src = (ctypes.c_uint8 * len(plain)).from_buffer_copy(plain)
+        wire = (ctypes.c_uint8 * 20)()
+        self.lib.ulanzi_d100h_encode_ble(src, len(plain), wire)
+        status = VendorStatus()
+        return self.lib.ulanzi_d100h_decode_ble_status(wire, 20, ctypes.byref(status)), status, bytes(wire)
+
+    def test_battery_power_change_capture_fields(self):
+        for raw, charging in [(4125, False), (4124, True), (4136, False)]:
+            ok, st, wire = self.status(bytes([0x0b, 0x7b, raw & 255, raw >> 8, 8 if charging else 0, 100]))
+            self.assertTrue(ok)
+            self.assertEqual((st.kind, st.voltage_raw, st.battery_percent, st.charging), (3, raw, 100, charging))
+            self.assertFalse(st.charge_full)
+            self.assertFalse(self.decode('ulanzi_d100h_decode_ble', wire)[0])
+
+    def test_status_flags_and_invalid_percentage(self):
+        ok, st, _ = self.status(bytes.fromhex('0b7b00101f19'))
+        self.assertTrue(ok)
+        self.assertEqual((st.low_battery, st.power_off, st.charging, st.charge_full), (3, True, True, True))
+        self.assertFalse(self.status(bytes.fromhex('0b7b00100065'))[0])
+
+    def test_sleep_replies_and_heartbeat_are_not_controls(self):
+        for plain, kind, seconds in [('01014211201c', 1, 7200), ('010142120000', 2, 0),
+                                     ('0601231001', 0, 0), ('0601231000', 0, 0)]:
+            ok, st, wire = self.status(bytes.fromhex(plain))
+            self.assertTrue(ok)
+            self.assertEqual((st.kind, st.sleep_seconds), (kind, seconds))
+            self.assertFalse(self.decode('ulanzi_d100h_decode_ble', wire)[0])
+            out = VendorStatus()
+            self.assertFalse(self.lib.ulanzi_d100h_decode_ble_status(
+                (ctypes.c_uint8 * 20).from_buffer_copy(wire), 19, ctypes.byref(out)))
+        self.assertFalse(self.status(bytes.fromhex('010142010000'))[0])
+        self.assertFalse(self.status(bytes.fromhex('8b100101'))[0])
+
+    def test_official_sdk_power_fields_use_all_four_bytes(self):
+        for command, kind in [(0x42, 1), (0x2c, 4)]:
+            plain = bytes([1, 1, command, 0x11]) + (0x1020304).to_bytes(4, 'little')
+            ok, st, wire = self.status(plain)
+            self.assertTrue(ok)
+            self.assertEqual((st.kind, st.sleep_seconds), (kind, 0x1020304))
+            self.assertFalse(self.decode('ulanzi_d100h_decode_ble', wire)[0])
+        ok, st, _ = self.status(bytes.fromhex('01012c1200000000'))
+        self.assertTrue(ok)
+        self.assertEqual((st.kind, st.sleep_seconds), (5, 0))
+        for opcode in (0x10, 0x11):
+            for value in (0, 1):
+                ok, st, _ = self.status(bytes([1, 1, 0x0d, opcode, value]))
+                self.assertTrue(ok)
+                self.assertEqual((st.kind, st.standby), (6, bool(value)))
+        self.assertFalse(self.status(bytes.fromhex('01010d1102'))[0])
 
 
 if __name__ == '__main__':

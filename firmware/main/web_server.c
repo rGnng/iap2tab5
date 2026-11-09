@@ -4,9 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "app_config.h"
+#include "ble_remote.h"
 #include "screen_brightness.h"
 #include "charge.h"
 #include "cJSON.h"
@@ -173,14 +175,14 @@ static esp_err_t log_get(httpd_req_t * req)
     uint32_t dropped = 0;
     uint32_t next = debug_log_read_text(since, buf, cap, &len, &dropped);
 
-    char header[24];
+    char header[24], dropped_header[24];
     snprintf(header, sizeof(header), "%u", (unsigned)next);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "X-Log-Seq", header);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if(dropped > 0) {
-        snprintf(header, sizeof(header), "%u", (unsigned)dropped);
-        httpd_resp_set_hdr(req, "X-Log-Dropped", header);
+        snprintf(dropped_header, sizeof(dropped_header), "%u", (unsigned)dropped);
+        httpd_resp_set_hdr(req, "X-Log-Dropped", dropped_header);
     }
 
     esp_err_t err = httpd_resp_send(req, buf, (ssize_t)len);
@@ -961,6 +963,191 @@ static esp_err_t display_trace_get(httpd_req_t *req)
     return err == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : err;
 }
 
+static cJSON * bluetooth_json(void)
+{
+    cJSON * bt = cJSON_CreateObject();
+    if(bt == NULL) return NULL;
+    ble_remote_state_t state;
+    char text[80];
+    ble_remote_status(&state, text, sizeof(text));
+    cJSON_AddBoolToObject(bt, "enabled", ble_remote_enabled());
+    cJSON_AddBoolToObject(bt, "supported", ble_remote_is_supported());
+    cJSON_AddBoolToObject(bt, "scanning", state == BLE_REMOTE_SCANNING);
+    cJSON_AddNumberToObject(bt, "revision", ble_remote_revision());
+    cJSON_AddNumberToObject(bt, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    cJSON_AddNumberToObject(bt, "state", state);
+    cJSON_AddStringToObject(bt, "status", text);
+    ble_remote_link_stats_t stats;
+    ble_remote_get_link_stats(&stats);
+    cJSON * link = cJSON_AddObjectToObject(bt, "link");
+    cJSON_AddNumberToObject(link, "notifications", stats.notifications);
+    cJSON_AddNumberToObject(link, "heartbeat_replies", stats.heartbeat_replies);
+    cJSON_AddNumberToObject(link, "responsive_link_checks", stats.link_checks);
+    cJSON_AddNumberToObject(link, "notification_age_ms", (double)stats.notification_age_ms);
+    cJSON_AddNumberToObject(link, "heartbeat_age_ms", (double)stats.heartbeat_age_ms);
+    cJSON_AddNumberToObject(link, "last_disconnect_reason", stats.last_disconnect_reason);
+    cJSON_AddStringToObject(link, "last_recovery", stats.last_recovery);
+    cJSON * devices = cJSON_AddArrayToObject(bt, "devices");
+    for(int i = 0; i < ble_remote_paired_count(); i++) {
+        ble_remote_device_t dev;
+        if(!ble_remote_paired_get(i, &dev)) continue;
+        ble_remote_info_t info;
+        ble_remote_get_info(dev.addr, &info);
+        cJSON * item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", dev.name);
+        cJSON_AddStringToObject(item, "addr", dev.addr);
+        cJSON_AddBoolToObject(item, "connected", info.connected);
+        if(info.battery_valid) {
+            cJSON_AddNumberToObject(item, "battery", info.battery_percent);
+            cJSON_AddBoolToObject(item, "charging", info.charging);
+            cJSON_AddBoolToObject(item, "charge_full", info.charge_full);
+        }
+        else {
+            cJSON_AddNullToObject(item, "battery");
+            cJSON_AddNullToObject(item, "charging");
+            cJSON_AddNullToObject(item, "charge_full");
+        }
+        cJSON_AddBoolToObject(item, "sleep_disabled", info.sleep_disabled);
+        if(info.standby_time_valid)
+            cJSON_AddNumberToObject(item, "standby_seconds", info.standby_seconds);
+        else cJSON_AddNullToObject(item, "standby_seconds");
+        if(info.standby_state_valid)
+            cJSON_AddBoolToObject(item, "standby", info.standby);
+        else cJSON_AddNullToObject(item, "standby");
+        cJSON_AddItemToArray(devices, item);
+    }
+    cJSON * discovered = cJSON_AddArrayToObject(bt, "discovered");
+    for(int i = 0; i < ble_remote_scan_count(); i++) {
+        ble_remote_device_t dev;
+        if(!ble_remote_scan_get(i, &dev)) continue;
+        bool paired = false;
+        for(int j = 0; j < ble_remote_paired_count(); j++) {
+            ble_remote_device_t saved;
+            if(ble_remote_paired_get(j, &saved) && strcasecmp(dev.addr, saved.addr) == 0) {
+                paired = true;
+                break;
+            }
+        }
+        if(paired) continue;
+        cJSON * item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "name", dev.name);
+        cJSON_AddStringToObject(item, "addr", dev.addr);
+        cJSON_AddNumberToObject(item, "rssi", dev.rssi);
+        cJSON_AddItemToArray(discovered, item);
+    }
+    return bt;
+}
+
+static esp_err_t bluetooth_reply(httpd_req_t * req, const char * message)
+{
+    cJSON * bt = bluetooth_json();
+    if(bt == NULL) return httpd_resp_send_500(req);
+    if(message != NULL) cJSON_AddStringToObject(bt, "message", message);
+    char * text = cJSON_PrintUnformatted(bt);
+    cJSON_Delete(bt);
+    if(text == NULL) return httpd_resp_send_500(req);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t err = httpd_resp_sendstr(req, text);
+    cJSON_free(text);
+    return err;
+}
+
+static esp_err_t bluetooth_get(httpd_req_t * req)
+{
+    return bluetooth_reply(req, NULL);
+}
+
+static bool bluetooth_known(const char * addr, bool paired)
+{
+    int count = paired ? ble_remote_paired_count() : ble_remote_scan_count();
+    for(int i = 0; i < count; i++) {
+        ble_remote_device_t dev;
+        bool ok = paired ? ble_remote_paired_get(i, &dev) : ble_remote_scan_get(i, &dev);
+        if(ok && strcasecmp(addr, dev.addr) == 0) return true;
+    }
+    return false;
+}
+
+static esp_err_t bluetooth_post(httpd_req_t * req)
+{
+    if(req->content_len <= 0 || req->content_len > 256)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad length");
+    char body[257];
+    int received = 0;
+    while(received < req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if(n <= 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
+        received += n;
+    }
+    body[received] = '\0';
+    cJSON * root = cJSON_ParseWithOpts(body, NULL, true);
+    const cJSON * action = cJSON_GetObjectItemCaseSensitive(root, "action");
+    if(!cJSON_IsObject(root) || !cJSON_IsString(action)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "action required");
+    }
+    const char * command = action->valuestring;
+    const char * message = NULL;
+    const char * error = NULL;
+    httpd_err_code_t error_code = HTTPD_400_BAD_REQUEST;
+    if(strcmp(command, "enable") == 0) {
+        const cJSON * enabled = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+        if(!cJSON_IsBool(enabled)) error = "enabled must be a boolean";
+        else {
+            g_app_config.ble_enabled = cJSON_IsTrue(enabled);
+            ble_remote_set_enabled(g_app_config.ble_enabled);
+            bool saved = app_config_save() == ESP_OK;
+            if(s_apply_cb != NULL) s_apply_cb();
+            message = saved ? (g_app_config.ble_enabled ? "Bluetooth enabled" : "Bluetooth disabled")
+                            : "Bluetooth updated; setting could not be saved to SD";
+        }
+    }
+    else if(strcmp(command, "scan") == 0 || strcmp(command, "stop_scan") == 0) {
+        if(!ble_remote_enabled()) {
+            cJSON_Delete(root);
+            httpd_resp_set_status(req, "409 Conflict");
+            return httpd_resp_sendstr(req, "Enable Bluetooth first");
+        }
+        if(strcmp(command, "scan") == 0) {
+            ble_remote_scan_start();
+            message = "Scanning for controllers";
+        }
+        else {
+            ble_remote_scan_stop();
+            message = "Scan stopped";
+        }
+    }
+    else if(strcmp(command, "connect") == 0 || strcmp(command, "pair") == 0 ||
+            strcmp(command, "forget") == 0) {
+        const cJSON * address = cJSON_GetObjectItemCaseSensitive(root, "addr");
+        if(!cJSON_IsString(address) || strlen(address->valuestring) != 17) error = "valid addr required";
+        else {
+            const char * addr = address->valuestring;
+            bool forget = strcmp(command, "forget") == 0;
+            bool pair = strcmp(command, "pair") == 0;
+            if(!bluetooth_known(addr, !pair)) {
+                error = pair ? "Controller not found; scan again" : "Paired controller not found";
+                error_code = HTTPD_404_NOT_FOUND;
+            }
+            else if(!forget && !ble_remote_enabled()) {
+                cJSON_Delete(root);
+                httpd_resp_set_status(req, "409 Conflict");
+                return httpd_resp_sendstr(req, "Enable Bluetooth first");
+            }
+            else if(forget ? !ble_remote_unpair(addr) : !ble_remote_connect(addr)) {
+                error = "Bluetooth request failed";
+                error_code = HTTPD_500_INTERNAL_SERVER_ERROR;
+            }
+            else message = forget ? "Controller deleted" : pair ? "Pairing requested" : "Connection requested";
+        }
+    }
+    else error = "Unknown Bluetooth action";
+    cJSON_Delete(root);
+    if(error != NULL) return httpd_resp_send_err(req, error_code, error);
+    return bluetooth_reply(req, message);
+}
+
 static esp_err_t status_get(httpd_req_t * req)
 {
     cJSON * root = cJSON_CreateObject();
@@ -969,6 +1156,7 @@ static esp_err_t status_get(httpd_req_t * req)
     const esp_app_desc_t * app = esp_app_get_description();
     cJSON_AddStringToObject(root, "firmware", app->version);
     cJSON_AddStringToObject(root, "build", __DATE__ " " __TIME__);
+    cJSON_AddItemToObject(root, "bluetooth", bluetooth_json());
     cJSON_AddNumberToObject(root, "reset_reason", (int)esp_reset_reason());
     time_t now = time(NULL);
     cJSON_AddNumberToObject(root, "epoch", (double)now);
@@ -1429,7 +1617,7 @@ void web_server_set_network_info(const char * status, const char * ip)
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 32;
+    config.max_uri_handlers = 40;
     config.stack_size = 12288;
     config.lru_purge_enable = true;
 
@@ -1462,6 +1650,12 @@ esp_err_t web_server_start(void)
     const httpd_uri_t status = {
         .uri = "/api/status", .method = HTTP_GET, .handler = status_get,
     };
+    const httpd_uri_t bluetooth_routes[] = {
+        {.uri="/api/bluetooth", .method=HTTP_GET, .handler=bluetooth_get},
+        {.uri="/api/bluetooth", .method=HTTP_POST, .handler=bluetooth_post},
+    };
+    for(size_t i=0; i < sizeof(bluetooth_routes)/sizeof(bluetooth_routes[0]); i++)
+        ESP_ERROR_CHECK(httpd_register_uri_handler(server, &bluetooth_routes[i]));
     const httpd_uri_t time_sync = {
         .uri = "/api/time", .method = HTTP_POST, .handler = time_post,
     };

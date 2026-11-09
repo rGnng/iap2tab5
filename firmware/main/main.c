@@ -428,7 +428,7 @@ static void apply_runtime_config(void)
 static void web_apply_runtime_config(void)
 {
     /* The web task shares idle state and display settings with LVGL. */
-    if(bsp_display_lock(0)) {
+    if(bsp_display_lock(1000)) {
         apply_runtime_config();
         bsp_display_unlock();
     }

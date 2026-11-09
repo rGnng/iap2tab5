@@ -113,15 +113,61 @@ bool ulanzi_d100h_decode(const uint8_t * data, size_t len,
     return true;
 }
 
-bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
-                             uint8_t * id, bool * down)
+static bool decode_ble_plain(const uint8_t * data, size_t len, uint8_t p[20])
 {
-    if(data == NULL || id == NULL || down == NULL || len != 20) return false;
-
-    uint8_t p[20];
+    if(data == NULL || len != 20) return false;
     memcpy(p, data, 20);
     tea_decrypt_block(p);
     tea_decrypt_block(p + 8);
+    return true;
+}
+
+bool ulanzi_d100h_decode_ble_status(const uint8_t * data, size_t len,
+                                   ulanzi_d100h_status_t * out)
+{
+    uint8_t p[20];
+    if(out == NULL || !decode_ble_plain(data, len, p)) return false;
+    ulanzi_d100h_status_t st = {0};
+    if(p[0] == 0x0b && p[1] == 0x7b) {
+        if(p[5] > 100) return false;
+        st.kind = ULANZI_STATUS_BATTERY;
+        st.voltage_raw = p[2] | ((uint16_t)p[3] << 8);
+        st.low_battery = p[4] & 3;
+        st.power_off = (p[4] & 4) != 0;
+        st.charging = (p[4] & 8) != 0;
+        st.charge_full = (p[4] & 16) != 0;
+        st.battery_percent = p[5];
+    }
+    else if(p[0] == 0x06 && p[1] == 0x01 && p[2] == 0x23 &&
+            p[3] == 0x10 && p[4] <= 1) {
+        st.kind = ULANZI_STATUS_HEARTBEAT;
+    }
+    else if(p[0] == 0x01 && p[1] == 0x01 &&
+            (p[2] == 0x42 || p[2] == 0x2c) &&
+            (p[3] == 0x11 || p[3] == 0x12)) {
+        if(p[2] == 0x42)
+            st.kind = p[3] == 0x11 ? ULANZI_STATUS_SLEEP_READ : ULANZI_STATUS_SLEEP_WRITE;
+        else
+            st.kind = p[3] == 0x11 ? ULANZI_STATUS_STANDBY_READ : ULANZI_STATUS_STANDBY_WRITE;
+        /* Ulanzi Studio's MessageHelper and parser use a 32-bit LE integer. */
+        st.sleep_seconds = (uint32_t)p[4] | ((uint32_t)p[5] << 8) |
+                           ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+    }
+    else if(p[0] == 0x01 && p[1] == 0x01 && p[2] == 0x0d &&
+            (p[3] == 0x10 || p[3] == 0x11) && p[4] <= 1) {
+        st.kind = ULANZI_STATUS_STANDBY_STATE;
+        st.standby = p[4] != 0;
+    }
+    else return false;
+    *out = st;
+    return true;
+}
+
+bool ulanzi_d100h_decode_ble(const uint8_t * data, size_t len,
+                             uint8_t * id, bool * down)
+{
+    uint8_t p[20];
+    if(id == NULL || down == NULL || !decode_ble_plain(data, len, p)) return false;
 
     if(p[0] != 0x8b || p[1] != 0x10) return false;
     if(p[2] < 1 || p[2] > 12) return false;

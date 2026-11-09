@@ -119,6 +119,16 @@ section > h2 .spacer { flex: 1; }
 .row .v.bad { color: var(--err); }
 .row .v.warn { color: var(--warn); }
 
+/* ---- Bluetooth controllers ---- */
+#bluetooth h3 { margin: 18px 0 8px; color: var(--text-3); font-size: var(--fs-meta); font-weight: 500; }
+.bt-device { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+.bt-device:last-child { border-bottom: 0; }
+.bt-device-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; }
+.bt-device-head strong { min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+.bt-battery { margin-left: auto; white-space: nowrap; color: var(--text-2); }
+.bt-battery.ok { color: var(--ok); }
+.bt-meta { margin-top: 4px; color: var(--text-4); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+
 /* ---- controls ---- */
 button {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;

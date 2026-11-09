@@ -46,7 +46,7 @@ app_config_t g_app_config = {
     .sound_enabled = true,
     .sound_mode = 2,
     .volume = 65,
-    .ap_ssid = "Tab5-Debug",
+    .ap_ssid = "IAP2TAB5",
     .clock_12h = false,
     .sort_field = 0,
     .sort_desc = true,
@@ -471,7 +471,7 @@ static void set_defaults(void)
     g_app_config.sound_enabled = true;
     g_app_config.sound_mode = 2;
     g_app_config.volume = 65;
-    snprintf(g_app_config.ap_ssid, sizeof(g_app_config.ap_ssid), "Tab5-Debug");
+    snprintf(g_app_config.ap_ssid, sizeof(g_app_config.ap_ssid), "IAP2TAB5");
     g_app_config.clock_12h = false;
     g_app_config.sort_field = 0;
     g_app_config.sort_desc = true;

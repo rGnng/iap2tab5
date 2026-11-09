@@ -61,6 +61,96 @@ window.Tab5 = (function () {
   function state(name, down) {
     return api('/api/keystate?k=' + encodeURIComponent(name) + '&down=' + (down ? 1 : 0), {method:'POST'});
   }
+  function bluetoothPanel(root, notify) {
+    var latest=null, busy=false, signature='';
+    root.innerHTML='<h2>Bluetooth controllers</h2><div class="body">'+
+      '<div id="bt_status" class="hint" role="status" aria-live="polite">Loading…</div>'+
+      '<div class="actions"><button id="bt_toggle" data-bt-action="enable" disabled>Enable Bluetooth</button>'+
+      '<button id="bt_scan" data-bt-action="scan" disabled>Scan for controllers</button></div>'+
+      '<h3>Paired controllers</h3><div id="bt_paired"></div>'+
+      '<h3>Nearby controllers</h3><div id="bt_discovered"></div>'+
+      '<div class="hint">Put the controller in pairing mode, scan, then choose Pair. Delete forgets its saved pairing.</div></div>';
+    function find(id) { return root.querySelector('#'+id); }
+    function button(parent, text, action, dev, disabled) {
+      var b=document.createElement('button');
+      b.textContent=text; b.dataset.btAction=action; b.dataset.addr=dev.addr;
+      b.setAttribute('aria-label',text+' '+(dev.name || dev.addr));
+      b.disabled=disabled; if(action==='forget') b.className='danger';
+      parent.appendChild(b);
+    }
+    function list(id, devices, paired, bt) {
+      var container=find(id); container.replaceChildren();
+      if(!devices.length) {
+        var hint=document.createElement('div'); hint.className='hint';
+        hint.textContent=paired ? 'No paired controllers.' : !bt.enabled ? 'Enable Bluetooth to search.' :
+          bt.scanning ? 'Searching… Put the controller in pairing mode.' : 'Scan to find controllers.';
+        container.appendChild(hint); return;
+      }
+      devices.forEach(function(dev) {
+        var card=document.createElement('div'); card.className='bt-device';
+        var head=document.createElement('div'); head.className='bt-device-head';
+        var name=document.createElement('strong'); name.textContent=dev.name || dev.addr; head.appendChild(name);
+        if(paired) {
+          var battery=document.createElement('span'); battery.className='bt-battery';
+          var valid=Number.isFinite(dev.battery) && dev.battery>=0 && dev.battery<=100;
+          battery.textContent=!dev.connected ? 'disconnect' : 'BATT '+(valid ? dev.battery : '--')+'%'+
+            (valid && dev.charging ? ' CHG' : '');
+          if(dev.connected && dev.charging) battery.classList.add('ok');
+          head.appendChild(battery);
+        }
+        card.appendChild(head);
+        var meta=document.createElement('div'); meta.className='bt-meta';
+        meta.textContent=dev.addr+(paired ? (dev.connected ? ' · Sleep: '+(dev.sleep_disabled ? 'disabled' : 'checking…') : '') :
+          Number.isFinite(dev.rssi) ? ' · '+dev.rssi+' dBm' : '');
+        card.appendChild(meta);
+        var actions=document.createElement('div'); actions.className='actions';
+        button(actions,paired ? 'Connect' : 'Pair',paired ? 'connect' : 'pair',dev,!bt.enabled || !!dev.connected);
+        if(paired) button(actions,'Delete','forget',dev,false);
+        card.appendChild(actions); container.appendChild(card);
+      });
+    }
+    function draw() {
+      var bt=latest, toggle=find('bt_toggle'), scan=find('bt_scan');
+      find('bt_status').textContent=bt ? bt.status || (bt.enabled ? 'Bluetooth on' : 'Bluetooth off') : 'Bluetooth unavailable';
+      toggle.textContent=bt && bt.enabled ? 'Disable Bluetooth' : 'Enable Bluetooth';
+      toggle.disabled=busy || !bt;
+      scan.textContent=bt && bt.scanning ? 'Stop scanning' : 'Scan for controllers';
+      scan.dataset.btAction=bt && bt.scanning ? 'stop_scan' : 'scan';
+      scan.disabled=busy || !bt || !bt.enabled;
+      if(!bt) return;
+      var devices=Array.isArray(bt.devices) ? bt.devices : [];
+      var addresses=new Set(devices.map(function(d) { return d.addr.toLowerCase(); }));
+      var discovered=(bt.enabled && Array.isArray(bt.discovered) ? bt.discovered : []).filter(function(d) {
+        return !addresses.has(d.addr.toLowerCase());
+      });
+      var next=JSON.stringify([bt.enabled,bt.scanning,devices,discovered]);
+      if(!busy && next!==signature) {
+        list('bt_paired',devices,true,bt); list('bt_discovered',discovered,false,bt); signature=next;
+      }
+      root.querySelectorAll('.bt-device button').forEach(function(b) {
+        b.disabled=busy || (b.dataset.btAction!=='forget' && (!bt.enabled ||
+          devices.some(function(d) { return d.addr===b.dataset.addr && d.connected; })));
+      });
+    }
+    function render(bt) {
+      if(bt && latest && Number.isFinite(bt.revision) && Number.isFinite(latest.revision) &&
+         bt.uptime_s>=latest.uptime_s && bt.revision<latest.revision) return;
+      latest=bt || null; draw();
+    }
+    root.addEventListener('click',function(event) {
+      var b=event.target.closest('button[data-bt-action]');
+      if(!b || b.disabled || busy || !latest) return;
+      var body={action:b.dataset.btAction};
+      if(body.action==='enable') body.enabled=!latest.enabled;
+      if(b.dataset.addr) body.addr=b.dataset.addr;
+      busy=true; draw();
+      api('/api/bluetooth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+        .then(JSON.parse).then(function(bt) { render(bt); notify(bt.message || 'Bluetooth updated'); })
+        .catch(function(e) { notify(e.message,true); })
+        .finally(function() { busy=false; draw(); });
+    });
+    return {render:render};
+  }
   function poll(onData, onError) {
     var busy = null, again = false, timer;
     function refresh() {
@@ -87,5 +177,5 @@ window.Tab5 = (function () {
     return refresh;
   }
   return {escape:escape,row:row,chip:chip,bytes:bytes,time:time,hex:hex,reset:reset,
-    usb:usb,power:power,api:api,json:json,key:key,state:state,poll:poll};
+    usb:usb,power:power,api:api,json:json,key:key,state:state,poll:poll,bluetoothPanel:bluetoothPanel};
 }());

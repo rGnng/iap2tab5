@@ -165,7 +165,7 @@ live in `../docs/sd/`. Two files are used:
   "sound_enabled": true,
   "debug_log": false,
   "volume": 65,
-  "ap_ssid": "Tab5-Debug",
+  "ap_ssid": "IAP2TAB5",
   "clock_12h": false,
   "sort_field": 0,
   "sort_desc": true,
@@ -230,7 +230,7 @@ in either location, firmware starts the open AP fallback.
 
 Wi-Fi starts in AP mode when no station credentials are available:
 
-- SSID: `Tab5-Debug` (open, no password)
+- SSID: `IAP2TAB5` (open, no password)
 - Address: <http://192.168.4.1>
 
 The page shows uptime/heap/SD/Wi-Fi state, edits the config above, reboots, and
@@ -246,6 +246,8 @@ Useful endpoints:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/status` | JSON status (build time, USB mode, iAP2, heap, SD) |
+| `GET /api/bluetooth` | Bluetooth state, paired controllers, battery/charging, sleep confirmation and scan results |
+| `POST /api/bluetooth` | JSON action: `enable` (boolean `enabled`), `scan`, `stop_scan`, `pair`, `connect` or `forget` (device `addr`) |
 | `GET /api/display` | actual backlight PWM registers, VSYNC/DMA/render counters and internal memory |
 | `GET /api/display/trace?since=N` | CSV of up to 1024 recent samples at 100 ms intervals; `X-Diag-Next` resumes collection |
 | `POST /api/display/mark` | timestamp an observed flicker in the live/SD log |
@@ -265,6 +267,16 @@ Useful endpoints:
 | `POST /api/charge?en=0\|1` | enable/disable the IP2326 charger and persist it |
 | `POST /api/reboot` | reboot |
 | `POST /api/ota` | raw firmware image upload; verified over WiFi |
+
+`/api/bluetooth` and the `bluetooth` object in `/api/status` include a `link`
+object with notification/heartbeat counters, their ages, successful GATT
+liveness checks, the last disconnect reason and the last local recovery cause.
+An age of `-1` means no report has arrived on the current connection.
+Each controller also includes `standby_seconds` and `standby`, with `null`
+until its separate standby timer/state has been read. The official Ulanzi
+Studio driver defines standby separately from sleep; the observed D100H had
+sleep set to zero while its standby timer remained 180 seconds. Connection
+setup now requests zero for both timers and verifies separate readbacks.
 
 The debug page's **Mark flicker + save** button marks the observation and
 downloads the preceding display trace. The recorder uses a bounded PSRAM ring
