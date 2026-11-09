@@ -39,8 +39,8 @@ read 16 bytes from MediaLibrary.sqlitedb OK
 
 Enter AFC mode, connect the Apple device to USB-A, and choose **Pair / Trust**. Unlock the Apple device, tap **Trust**, and enter its passcode if asked.
 The Tab5 generates its own RSA host identity; no computer or exported pair
-record is needed. The connection panel shows USB connection, approved trust,
-and ready file access separately. Approval is polled for up to two minutes;
+record is needed. The Device row shows attachment, pairing, connecting, and
+ready states. Approval is polled for up to two minutes;
 denial, timeout, disconnection, and save failures leave the previous record
 intact and allow a retry. Keep the device connected while pairing runs.
 
@@ -72,22 +72,46 @@ the active record. The embedded iAP2/MFi identity is separate and is reused.
 
 ## Sync screen
 
-The square layout follows Gray, Aqua, and Windows 95. A narrow left column
-shows one Device state, **Pair / Trust**, and SD usage, with **Exit** below it.
-Pairing instructions appear only when needed. The wider right area contains
-library counts and sync progress; the redundant USB/trust/file-access checklist
-has been removed.
+The implemented layout is **04 Bottom controls**, at 1280 × 720, with square
+corners in Gray, Aqua, and Windows 95. See the current simulator captures:
+[Gray](previews/afc-bottom-gray.png), [Aqua](previews/afc-bottom-aqua.png),
+and [Windows 95](previews/afc-bottom-win95.png).
+
+- **Library Sync** sits above a full-width divider. One compact row shows
+  **Device** and its connection state on the left, with **SD Card** and used /
+  total capacity on the right. A short pairing hint appears only when needed.
+- Three large, grouped counts show **Albums**, **Tracks**, and **Cached covers**,
+  with the last library-import time underneath. Updating the database snapshot
+  alone does not change this import timestamp.
+- Sync status is centered below the counts. Known progress adds processed /
+  total counts, a 6 px progress track, percentage, and the current album.
+  Ready, pairing, disconnected, missing-card, and unknown-total preparation
+  states do not show a misleading empty track or percentage.
+- The three 64 px high actions stay at the same positions in every state:
+
+  | Action | X | Y | Width |
+  | --- | ---: | ---: | ---: |
+  | Pair / Trust | 64 | 624 | 224 |
+  | Sync | 520 | 624 | 240 |
+  | Exit | 1016 | 624 | 200 |
+
+  Coordinates use the screen's top-left origin. **Sync** uses the regular
+  theme button fill, matching **Exit**; focus borders and touch-pressed
+  feedback remain visible. **Pair / Trust** is emphasized when pairing is
+  available. No AFC badge, numbered stages, or permanent explanatory footer
+  occupies the content area.
 
 **Pair / Trust** is disabled once trust is approved or AFC is connected. It
 remains available for an attached device that still needs trust approval.
 
 - **Sync:** refreshes the database snapshot and incrementally caches missing
   album art. There is one sync action; no separate Quick/Full choice.
-- The panel shows live status, progress, and the current album, without numbered
+- The screen shows live status, progress, and the current album, without numbered
   stage labels. Artwork normally downloads, decodes, and writes in one pass.
-- Existing covers are reused. Copying a database snapshot does not rebuild the
-  browsable `library.bin`; the desktop import step is still required for new
-  tracks or albums.
+- Existing covers are reused. Sync refreshes the on-device `afc_index.bin`
+  for dates, track ordering, AFC membership and artwork versions. It does not
+  rewrite a manually imported `library.bin`; that optional workflow still uses
+  the host converter. New catalog entries can arrive independently over iAP2.
 - Sync requires AFC access and an SD card. Pairing, repeat sync, and leaving AFC
   are disabled while an operation runs. Results stay visible when sync finishes;
   focus moves to **Exit** once at completion, and **Exit** restarts in iAP2 mode.

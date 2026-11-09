@@ -505,22 +505,23 @@ also yields to the idle task periodically so the task watchdog stays happy.
   reboots. The USB HID keyboard/D100H driver runs in both modes.
 - The shared UI is wired to iAP2 for Now Playing metadata, play/pause,
   next/previous, shuffle/repeat, battery and device name.
-- The real media library is loaded from `/sdcard/library.bin` (20,688
-  tracks / 2,096 albums / 1,067 artists from the AFC SQLite database).
-  Album/artist/track selection maps to iAP2 `PlayMediaLibraryItems`.
+- The real media library combines a per-library live iAP2 catalog with AFC
+  metadata and an optional imported `library.bin`. New iAP2 items appear
+  without host conversion; AFC refreshes dates, track order and artwork
+  versions. Album/artist/track selection maps to iAP2 `PlayMediaLibraryItems`.
 - Japanese text uses M PLUS 1p Regular from `/sdcard/JPFONT.TTF` through
   LVGL TinyTTF; Inter remains the tabular numeric/clock face. See
   `docs/media-library-import.md`.
 - The binary library and font can be uploaded over serial with `Q`/`B`;
   `T`/`W` dump the SQLite DB/WAL for the host-side converter.
-- Album artwork is synced over AFC with `C` (first 64 albums) or `E`
-  (all). It writes the original image plus `<id>.thm` (54x54) and
-  `<id>.cov` (360x360) RGB565 caches under `/sdcard/covers/`. The UI keeps
-  a 48-entry list thumbnail cache plus dedicated mini-player/detail
-  thumbnails, and a single 360 cover descriptor, all 64-byte aligned for
-  the PPA draw path. FATFS long filenames are enabled, but the cache files
-  keep the short `.thm` / `.cov` names for compatibility with older cards.
-  See `docs/media-library-import.md`.
+- Album artwork is synced with **Sync** in AFC mode, `POST /api/sync`, or the
+  equivalent serial aliases `C` / `E`. Each refreshes the database and AFC
+  index before incrementally filling missing packed 54x54 thumbnails under
+  `/sdcard/lib/<short8>/`. There is no 64-album Quick Sync option. The UI keeps
+  a 48-entry list thumbnail cache plus dedicated mini-player/detail slots.
+  Originals are decoded in memory on the one-pass path; they are not retained
+  as a full-size SD cover collection. See
+  [the sync guide](../docs/afc-bringup.md#sync-screen).
 - TJPGD and the hardware decoder handle the fast baseline JPEG path.
   Progressive and unsupported baseline layouts use libjpeg-turbo, including
   CMYK support and temporary SD coefficient storage when PSRAM is insufficient.
@@ -533,22 +534,25 @@ also yields to the idle task periodically so the task watchdog stays happy.
   captured at Setup so a track change cannot misattribute the cover.
 - `# <id>` syncs one album's cover over AFC, which is useful when testing
   a specific iAP2 track without running the full library sync.
-- **Settings > iOS Device** provides Pair/Connect, Quick sync,
-  Full sync, switch-to-iAP2, cached album count, cache size,
-  thumbnail/cover counts, USB mode and AFC/sync status. Quick/full sync store a one-shot NVS job,
-  reboot to AFC, wait for the iPod, run the artwork sync, then switch back
-  to iAP2 and reboot automatically. The page is at
-  `docs/screenshots/tab5-settings-afc.png`.
-- Original artwork files are removed once both the `.thm` and `.cov`
-  caches exist; this keeps a full sync around 600 MB instead of several
-  GB. Interrupted older runs leave originals that are cleaned as their
-  albums are processed.
+- The AFC **Library Sync** screen uses the selected **04 Bottom controls**
+  layout: one Device/SD status row, three library counts, centered progress,
+  and fixed **Pair / Trust**, **Sync**, **Exit** buttons. Sync uses the regular
+  theme button fill. Unknown-total preparation hides the progress track and
+  percentage. Results remain visible, and completion focuses Exit only once;
+  selecting Exit returns to iAP2 with an explicit reboot.
 - The system has two boot modes:
   - **iAP2** (default): normal media UI, USB config 2.
   - **AFC Sync**: dedicated sync-only UI, USB config 4, no media controls.
-    It shows connection state, cached count/size, progress, and Quick sync /
-    Full sync / Exit to iAP2 buttons. See
-    `docs/screenshots/tab5-afc-sync.png`.
+    Pairing, repeated sync and Exit are gated while an operation is running.
+    Current screenshots: [Gray](../docs/previews/afc-bottom-gray.png),
+    [Aqua](../docs/previews/afc-bottom-aqua.png),
+    [Windows 95](../docs/previews/afc-bottom-win95.png).
+- The D100H direction filter runs before UI dispatch for USB and BLE.
+  Same-direction steps are immediate; reverse candidates wait 50 ms normally
+  or 120 ms when arriving within 80 ms of the previous accepted notch.
+  Three reverse reports confirm early. Input arrival timestamps are preserved;
+  the configurable Fast Scroll hold timer is independent. Paired-device rows
+  use **Inactive** when disconnected, on the device and both web pages.
 - The AFC job worker stack is in PSRAM and is only created when a job is
   pending. This avoids exhausting internal DMA memory before usbmux/AFC
   starts; an earlier 24 KB internal stack caused AFC to remain

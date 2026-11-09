@@ -164,6 +164,14 @@ Now Playing 直接显示正常播放布局，不显示加载页或页面标题�
 - Settings 的 Touch input 行显示 `On/Off`；界面其它位置不显示触摸状态；
 - 关闭状态写入 NVS，重启后保持。
 
+### 3.6 D100H 旋钮方向过滤
+
+- USB 与 BLE 共用输入层过滤逻辑，各输入源独立保存方向和待确认事件；不在 UI 列表层丢弃反向输入。
+- 同方向每格立即发送。反向报告与上一条已接受报告相隔超过 80 ms 时，等待 50 ms；相隔不超过 80 ms 时，保留 120 ms 的快速旋转噪声过滤窗口。
+- 截止前恢复原方向，则丢弃暂存的一至两条反向报告；否则到期发送所有暂存格数。连续三条反向报告提前确认真实反转，不丢格数。
+- 截止时间从第一条反向报告到达时计算，第二条不会延长窗口。使用物理到达时间，保留首尾时间戳，避免 UI 繁忙改变速度判断。
+- 后续操作键先提交暂存移动再激活选择；断开输入设备只取消该来源的暂存事件。这个过滤窗口与 Fast Scroll 的触发时间、默认 300 ms Hold Time 相互独立。
+
 ---
 
 ## 4. 交互模型：焦点优先
@@ -534,6 +542,19 @@ Queue 显示时的左栏：
 - 触摸两侧都可操作。进入标签页时光标总是回到左栏，并回到该页之前选中的行。
 - Back 的顺序：右栏 → 左栏；已在左栏且不在第 1 行时 Back 回到第 1 行；已在第 1 行时 Back 返回 Now Playing。
 - Albums 的 Back 不会停在 `Shuffle All`：从任意专辑 Back 会选中第 1 张专辑并把 `Shuffle All` 滚出视野；已在第 1 张或 `Shuffle All` 时 Back 直接返回 Now Playing。
+
+### 5.7 AFC / Library Sync
+
+采用已选定的 **04 Bottom controls** 布局，1280×720，所有主题保持直角。当前截图：[Gray](previews/afc-bottom-gray.png)、[Aqua](previews/afc-bottom-aqua.png)、[Windows 95](previews/afc-bottom-win95.png)。
+
+- 顶部 `Library Sync` 标题与分隔线；下方一行左侧为 `Device` 状态，右侧为 `SD Card` 已用 / 总容量。连接或配对提示按需显示。
+- 中部横排 `Albums`、`Tracks`、`Cached covers` 三项，数字使用 54 px Inter tabular 数字子集和千位分隔符；超大计数缩小字号以适应列宽。下方居中显示最后一次导入时间。
+- 状态标题、处理数量、当前专辑居中。已知总数时显示 6 px 高进度条与百分比；空闲、配对、未连接、缺卡或总数未知的准备阶段隐藏进度条与百分比。
+- 底部分隔线为 y=599；三按钮均为 y=624、高 64 px：`Pair / Trust` x=64、宽 224；`Sync` x=520、宽 240；`Exit` x=1016、宽 200。状态变化不移动按钮。
+- `Sync` 使用与 `Exit` 一致的普通主题按钮颜色，保留键盘焦点边框和触摸按下反馈；需要配对时才强调 `Pair / Trust`。
+- `Pair / Trust` 仅在已连接 USB、未信任、AFC 未连接且不忙时可用；`Sync` 需要 AFC 和 SD 均就绪；配对或同步期间禁止重复操作和 `Exit`。
+- 同步刷新数据库并增量补齐缺失封面，界面只有一个 `Sync`，不显示 Quick/Full 选项或编号步骤。完成后保留结果，仅自动聚焦 `Exit` 一次；用户改变焦点后轮询不抢回。
+- `Exit` 保存 iAP2 模式并重启。AFC 更新 `afc_index.bin` 元数据和封面；iAP2 独立更新实时曲库。手工导入的 `library.bin` 不由 Sync 重写，主机转换仍是可选的快照导入流程；详见 [AFC 指南](afc-bringup.md#sync-screen)。
 
 ---
 

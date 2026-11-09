@@ -1,5 +1,30 @@
 # D100H BLE remote: handover and driver-analysis brief
 
+## Current rotary filter and device wording (2026-11-09)
+
+The shared USB/BLE input layer qualifies direction reversals before sending
+navigation to the UI. Same-direction notches pass immediately. An opposite
+report waits **50 ms** during normal scrolling, or **120 ms** when it arrives
+within **80 ms** of the preceding accepted notch. Returning to the original
+direction before the deadline discards the held reverse reports as noise.
+Otherwise they are emitted at the deadline with their original timestamps.
+Three consecutive opposite reports confirm a reversal early and emit all
+held notches. A second report does not extend the first report's deadline.
+
+Each input source has its own filter state. A following action key flushes
+pending movement before activation; disconnecting cancels only that source's
+pending input. These timers use physical arrival times, independently of UI
+rendering, Fast Scroll activation, and the configurable Fast Scroll hold time.
+The implementation is in `firmware/main/ulanzi_d100h.c`; production-code tests
+in `tests/test_ulanzi_rotary.py` and `tests/test_d100h_dispatch.py` cover the
+exact 50 ms boundary, delayed dispatch, real reversals, and captured noise.
+
+Paired-device rows display **Inactive** when disconnected on the Tab5, web
+dashboard, and debug page. Connected rows keep `BATT <percent>%`, optional
+`CHG`, or `BATT --%` while awaiting a battery report. This row wording is
+separate from the driver's live setup/error status. Older UI descriptions in
+the bring-up history below describe earlier builds.
+
 ## Official driver power controls (2026-11-09)
 
 For current sleep/standby behavior, use the supplied local Ulanzi Studio

@@ -1,4 +1,9 @@
-# Importing the real media library into the Tab5 UI
+# Manual library.bin import
+
+This is the optional host-conversion workflow. Normal catalog updates arrive
+over iAP2 and are saved in the per-library live catalog. AFC **Sync** refreshes
+the database snapshot, metadata index and missing artwork without rewriting
+`library.bin`. Use this guide when importing a binary snapshot explicitly.
 
 The UI library pages load a compact binary library. The mock build ships
 `/spiffs/library.json`; the real imported library lives at
@@ -121,8 +126,7 @@ Serial commands used by this workflow:
 | `W` | dump `MLDB.WAL` as base64 over the console |
 | `Q` | receive base64 `library.bin`, terminate with `EOF` |
 | `B` | receive base64 `/sdcard/JPFONT.TTF`, terminate with `EOF` |
-| `C` | AFC artwork sync for the first 64 albums |
-| `E` | AFC artwork sync for every album with an artwork manifest entry |
+| `C` / `E` | same AFC library Sync: refresh database/metadata and cache missing artwork |
 | `# <id>` | AFC artwork sync for one library album ID (line input) |
 
 ## 4. Album artwork cache
@@ -195,27 +199,20 @@ older cards and builds.
 Sync commands:
 
 ```text
-C         first 64 albums (fast validation; skips already downloaded originals)
-E         all 2,090 albums (large and long; old originals are removed)
+C / E     same incremental library Sync; cached artwork is reused
 # <id>    one album by library ID, e.g. #919
 ```
 
-The same operations are available in **Settings > iOS Device**:
+The serial `C` and `E` aliases run the same Sync; neither limits it to 64 albums.
+`#` remains the single-album diagnostic entry point. The normal device
+and web interfaces expose one **Sync** action, which refreshes the database
+and incrementally fills missing artwork for the imported library.
 
-```text
-Pair / Connect       switch to AFC / reconnect
-Quick sync           first 64 albums, then automatically back to iAP2
-Full sync            every album, then automatically back to iAP2
-Cached albums        count / total
-Cache size           thumbnails + covers + leftover originals
-Thumbnails/Covers    file counts and sizes
-USB mode / Sync      current mode and job state
-Switch to iAP2       reboot back to iAP2 without syncing
-```
-
-Quick/full sync queue a one-shot job in NVS, reboot to AFC config 4, run
-the sync, then set NVS back to iAP2 config 2 and reboot. The settings page
-shows `Sync: Quick running` / `Full running` while it is in progress.
+Enter **AFC Sync** from Settings or **Enter Library Sync** on the web page.
+The saved mode switches to USB configuration 4 and reboots. Use **Pair / Trust**
+for a device that needs trust approval, then **Sync** once AFC and the SD card
+are ready. Existing thumbnails are reused; there is no separate Quick/Full
+choice in the UI. Sync results stay visible until **Exit** is selected.
 
 The two boot modes are:
 
@@ -224,27 +221,28 @@ iAP2 (default)   normal media UI, USB config 2
 AFC Sync         dedicated sync-only screen, USB config 4
 ```
 
-AFC Sync has no Now Playing / Albums / Songs / media controls. It shows the
-iPod/AFC connection, cached album count and size, a progress bar with
-attempted/copied/failed counts, and only these buttons:
+AFC Sync has no media controls. Its compact status row, library counts and
+centered progress area sit above three fixed bottom buttons:
 
 ```text
-Quick sync
-Full sync
-Exit to iAP2
+Pair / Trust
+Sync
+Exit
 ```
 
-Once a sync finishes it automatically switches back to iAP2 and reboots.
-The screenshot is `docs/screenshots/tab5-afc-sync.png`.
+Completion moves keyboard/knob focus to **Exit** once; later status polls
+preserve the user's selection. **Exit** switches back to iAP2 and reboots.
+It is disabled while pairing or syncing. For the layout, screenshots and
+progress rules, see [the AFC sync screen](afc-bringup.md#sync-screen).
 
 The AFC job worker stack is allocated in PSRAM and is only created when a
 job is pending; otherwise the USB DMA pool can be exhausted on boot and
 AFC never becomes ready.
 
-After both the 54x54 thumbnail and the 360x360 cover are written, the
-downloaded original is removed. A full sync therefore stays around
-600 MB of covers rather than several GB; leftovers from interrupted older
-runs are cleaned when their album is processed.
+The one-pass artwork path keeps the packed 54x54 thumbnail and frees the
+original in memory. It does not build a collection of full-size covers on SD;
+large Now Playing artwork arrives separately through iAP2. Leftover original
+files from older sync runs are cleaned when their album is processed.
 
 `# <id>` is useful while testing iAP2: pause the iPod, switch to AFC,
 sync the album reported by `a`, then switch back to iAP2. The paused track

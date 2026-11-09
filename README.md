@@ -5,11 +5,11 @@ An iPod / iPhone media controller for the **M5Stack Tab5**, with a shared
 The UI runs at 1280×720 and supports a rotary controller, USB keyboard, Ulanzi
 D100H remote, and optional touch input.
 
-On hardware, **iAP2** provides playback control, Now Playing metadata, and
-artwork. **AFC** copies the device's media database and album artwork to an SD
-card; a host-side Python tool converts the database into the library used by
-the UI. The simulator uses a bundled mock library and needs no Apple device or
-MFi identity.
+On hardware, **iAP2** controls playback and supplies Now Playing metadata,
+artwork, and live catalog updates. **AFC** copies the device's media
+database and incrementally caches album artwork on SD. An optional host-side
+Python tool imports a `library.bin` snapshot. The simulator uses a bundled
+mock library and needs no Apple device or MFi identity.
 
 ## UI overview
 
@@ -17,7 +17,11 @@ These contact sheets use the simulator's mock library and device data. Each
 shows Now Playing, Up Next, Albums, Artists, Songs, Playlists, Settings, and
 Library Sync. Click a sheet to view the screens at full resolution.
 Library Sync uses a compact status row, prominent library counts, and fixed
-**Pair / Trust**, **Sync**, and **Exit** controls along the bottom.
+**Pair / Trust**, **Sync**, and **Exit** controls along the bottom. Sync uses
+the regular theme button color. Current AFC screenshots:
+[Gray](docs/previews/afc-bottom-gray.png),
+[Aqua](docs/previews/afc-bottom-aqua.png), and
+[Windows 95](docs/previews/afc-bottom-win95.png).
 
 **Gray (default)**
 
@@ -169,6 +173,10 @@ notch is held for 50 ms during normal scrolling, or 120 ms if it arrives within
 that window discards the held reverse reports as noise. Otherwise the held
 notches are delivered at the deadline; three consecutive reverse reports
 confirm the change early. Arrival timestamps are preserved before UI dispatch.
+The deadline starts at the first reverse report; a second report does not
+extend it. A following action key flushes pending movement before activation,
+and disconnecting cancels pending input only for that input source. This
+filter runs independently of the UI's Fast Scroll state and hold timer.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 Paired-device rows show the reported percentage as `BATT <percent>%`, with
 `CHG` appended while charging, or `Inactive` when disconnected. `BATT --%`
@@ -674,18 +682,21 @@ cannot handle full-/low-speed devices behind a high-speed hub on USB-A; see
 | **AFC Sync**, USB configuration 4 | Database copying and album thumbnail sync |
 
 These protocol modes are mutually exclusive. Switching between them saves the
-selection in NVS and reboots. Quick/full sync jobs keep their result on screen;
-choose **Exit** to restart in iAP2 mode.
+selection in NVS and reboots. **Sync** refreshes the database and incrementally
+caches missing album artwork. Its result stays on screen; choose **Exit** to
+restart in iAP2 mode. See the [AFC screen and sync guide](docs/afc-bringup.md#sync-screen)
+for progress states and button availability.
 
-## Import a media library
+## Import a library.bin snapshot (optional)
 
-Library conversion runs on a host computer. Copying the database or running an
-artwork sync on the Tab5 does not rebuild `library.bin`.
+Normal catalog updates arrive over iAP2; AFC Sync refreshes metadata dates and
+artwork separately. The following manual workflow converts a database snapshot
+on a host computer. Sync on the Tab5 does not rewrite `library.bin`.
 
 1. Enter **AFC Sync** mode and choose **Pair / Trust**. Unlock the Apple
    device and approve Trust on its screen. Existing pair records can also be
    uploaded. See [AFC pairing and bring-up](docs/afc-bringup.md).
-2. Use **Copy iPod database** in the web UI to copy the database to
+2. Use **Sync** on the Tab5 or web page to copy the database to
    `/sdcard/AFC/`. Copy `MLDB.SQL` and, if present, `MLDB.WAL` from the card to a
    host directory such as `/tmp/ipod-db/`.
 3. From the repository root, convert the snapshot with Python 3:
@@ -708,11 +719,12 @@ artwork sync on the Tab5 does not rebuild `library.bin`.
    ```
 
    The upload replaces the active library file and reboots the device.
-5. Run **Quick sync** for the first 64 albums or **Full sync** for the library's
-   artwork, then return to iAP2 playback. Album thumbnails are cached on SD;
+5. Run **Sync** again to cache missing artwork for the imported library, then
+   choose **Exit** to return to iAP2 playback. Album thumbnails are cached on SD;
    large Now Playing artwork arrives separately over iAP2.
 
-Repeat the conversion and upload after changing the device's library. See the
+Repeat conversion and upload when replacing the imported snapshot; live iAP2
+catalog updates do not require this step. See the
 [media library import guide](docs/media-library-import.md) for serial transfers,
 the binary format, fonts, and artwork cache details.
 
