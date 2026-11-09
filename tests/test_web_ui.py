@@ -233,7 +233,7 @@ class WebUITests(unittest.TestCase):
             self.open(path)
             self.assertIn('BATT 90% CHG', self.page.locator('#bt_paired').inner_text())
             self.assertIn('Sleep: disabled', self.page.locator('#bt_paired').inner_text())
-            self.assertIn('disconnect', self.page.locator('#bt_paired').inner_text())
+            self.assertIn('Inactive', self.page.locator('#bt_paired').inner_text())
             self.assertIn('<img', self.page.locator('#bt_paired').inner_text())
             self.assertEqual(self.page.locator('#bt_paired img').count(), 0)
             self.assertFalse(self.page.evaluate('!!window.injected'))

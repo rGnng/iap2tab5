@@ -563,7 +563,7 @@ static const char WEB_COMMON_JS[] =
 "        if(paired) {\n"
 "          var battery=document.createElement('span'); battery.className='bt-battery';\n"
 "          var valid=Number.isFinite(dev.battery) && dev.battery>=0 && dev.battery<=100;\n"
-"          battery.textContent=!dev.connected ? 'disconnect' : 'BATT '+(valid ? dev.battery : '--')+'%'+\n"
+"          battery.textContent=!dev.connected ? 'Inactive' : 'BATT '+(valid ? dev.battery : '--')+'%'+\n"
 "            (valid && dev.charging ? ' CHG' : '');\n"
 "          if(dev.connected && dev.charging) battery.classList.add('ok');\n"
 "          head.appendChild(battery);\n"

@@ -93,7 +93,7 @@ window.Tab5 = (function () {
         if(paired) {
           var battery=document.createElement('span'); battery.className='bt-battery';
           var valid=Number.isFinite(dev.battery) && dev.battery>=0 && dev.battery<=100;
-          battery.textContent=!dev.connected ? 'disconnect' : 'BATT '+(valid ? dev.battery : '--')+'%'+
+          battery.textContent=!dev.connected ? 'Inactive' : 'BATT '+(valid ? dev.battery : '--')+'%'+
             (valid && dev.charging ? ' CHG' : '');
           if(dev.connected && dev.charging) battery.classList.add('ok');
           head.appendChild(battery);

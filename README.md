@@ -171,7 +171,7 @@ notches are delivered at the deadline; three consecutive reverse reports
 confirm the change early. Arrival timestamps are preserved before UI dispatch.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 Paired-device rows show the reported percentage as `BATT <percent>%`, with
-`CHG` appended while charging, or `disconnect` when disconnected. `BATT --%`
+`CHG` appended while charging, or `Inactive` when disconnected. `BATT --%`
 means connected but awaiting a battery report. The BLE driver reads the D100H
 sleep timer and separate standby timer on every connection, writes zero only
 when needed, and confirms each by readback. Unsupported standby controls do

@@ -9290,7 +9290,7 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                 ble_remote_get_info(dev.addr, &info);
                 uint32_t color = !info.connected ? COL_MUTED :
                     info.charging || info.charge_full ? COL_GREEN : COL_TEXT;
-                char battery[24] = "disconnect";
+                char battery[24] = "Inactive";
                 if(info.connected) {
                     if(info.battery_valid) {
                         snprintf(battery, sizeof(battery), "BATT %u%%%s",
