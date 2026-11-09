@@ -146,13 +146,15 @@ over USB and BLE. Rapid rotation filters isolated reverse glitches before
 navigation; a deliberate single reverse notch is delivered within 120 ms.
 Pair it from **Settings → Bluetooth**, under **Search Devices**.
 
-**Settings → Fast Scroll** separates **Start Fast Scrolling After** (Off or
-1–5 pages per 1200 ms; default: 2 Pages) and **Hold Time** (150 ms, 300 ms,
+**Settings → Fast Scroll** starts with an **Enabled / Disabled** control
+(default: Enabled), followed by **Start Fast Scrolling After** (1–5 pages per
+1200 ms; default: 2 Pages) and **Hold Time** (150 ms, 300 ms,
 500 ms, or 1.5 s; default: 300 ms). A quick spin switches to one visible page
 per notch, with a rising two-tone cue and twin marks beside the cursor.
 A falling two-tone cue marks exit. Pausing for the selected hold time or
 reversing direction restores normal single-row precision. Speed uses physical
 notches rather than amplified page jumps; touch scrolling stays unchanged.
+Disabling Fast Scroll preserves the selected threshold and hold time.
 
 
 **Settings → Screen** groups **Brightness** presets (**Low**, **Mid**, **High**)

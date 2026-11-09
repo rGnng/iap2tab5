@@ -53,6 +53,7 @@ app_config_t g_app_config = {
     .menubar_left = true,
     .touch_enabled = true,
     .np_bg_mode = 2,
+    .fast_scroll_enabled = true,
     .fast_scroll_pages = 2,
     .fast_scroll_hold_ms = 300,
     .brightness = 70,
@@ -477,6 +478,7 @@ static void set_defaults(void)
     g_app_config.menubar_left = true;
     g_app_config.touch_enabled = true;
     g_app_config.np_bg_mode = 2;
+    g_app_config.fast_scroll_enabled = true;
     g_app_config.fast_scroll_pages = 2;
     g_app_config.fast_scroll_hold_ms = 300;
     g_app_config.brightness = 70;
@@ -558,8 +560,15 @@ static void load_from_json(const char * text)
     if(cJSON_IsNumber(item))
         g_app_config.brightness = (uint8_t)screen_brightness_normalize(item->valueint);
     item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_pages");
-    if(cJSON_IsNumber(item) && item->valueint >= 0 && item->valueint <= 5)
-        g_app_config.fast_scroll_pages = (uint8_t)item->valueint;
+    if(cJSON_IsNumber(item) && item->valuedouble == item->valueint) {
+        /* Migrate legacy Off (zero pages) without retaining an invalid
+         * threshold. An explicit new enable flag below takes precedence. */
+        if(item->valueint == 0) g_app_config.fast_scroll_enabled = false;
+        else if(item->valueint >= 1 && item->valueint <= 5)
+            g_app_config.fast_scroll_pages = (uint8_t)item->valueint;
+    }
+    item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_enabled");
+    if(cJSON_IsBool(item)) g_app_config.fast_scroll_enabled = cJSON_IsTrue(item);
     item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_hold_ms");
     if(cJSON_IsNumber(item) && item->valuedouble == item->valueint)
         g_app_config.fast_scroll_hold_ms = (uint16_t)fast_scroll_hold_normalize(item->valueint);
@@ -672,6 +681,7 @@ esp_err_t app_config_save(void)
     cJSON_AddBoolToObject(root, "menubar_left", g_app_config.menubar_left);
     cJSON_AddBoolToObject(root, "touch_enabled", g_app_config.touch_enabled);
     cJSON_AddNumberToObject(root, "np_bg_mode", g_app_config.np_bg_mode);
+    cJSON_AddBoolToObject(root, "fast_scroll_enabled", g_app_config.fast_scroll_enabled);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
     cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);

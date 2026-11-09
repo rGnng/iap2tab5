@@ -228,6 +228,7 @@ static void scrollbar_views(void)
 static void fast_navigation(void)
 {
     g_system_config.fast_scroll_hold_ms=150; /* Exercise the shortest selectable hold. */
+    g_system_config.fast_scroll_enabled=true;
     g_system_config.fast_scroll_pages=2;g_system_config.sound_mode=2;g_system_config.sound_enabled=true;
     ui_set_feedback_cb(feedback);ui_select_screen(SCR_ALBUMS);pump(600);
     albums_select(0);pump(200);
@@ -305,14 +306,29 @@ static void fast_navigation(void)
     pump(200);check(exit_cues==exits_before+1,"Idle exit cue must not repeat");
     check(!g_fast_scroll.active && lv_obj_has_flag(g_fast_marker,LV_OBJ_FLAG_HIDDEN),"Pausing must clear fast mode and its marker");
     old=albums_selected;ui_handle_key(UI_KEY_DOWN);check(albums_selected==old+1,"First notch after a pause must be precise");
-    ui_fast_scroll_reset();g_system_config.fast_scroll_pages=0;albums_select(0);
-    ui_handle_key_repeat(UI_KEY_DOWN,20);check(albums_selected==20 && !g_fast_scroll.active,"Off must retain one row per notch");
-    g_system_config.fast_scroll_pages=2;ui_fast_scroll_reset();
+    ui_fast_scroll_reset();g_system_config.fast_scroll_enabled=false;albums_select(0);
+    ui_handle_key_repeat(UI_KEY_DOWN,20);
+    check(albums_selected==20 && !g_fast_scroll.active && g_system_config.fast_scroll_pages==2,
+          "Disabled must retain one row per notch without losing the activation threshold");
+    g_system_config.fast_scroll_enabled=true;ui_fast_scroll_reset();
     ui_select_screen(SCR_SETTINGS);pump(600);settings_open((void *)(intptr_t)SETTING_FAST_SCROLL);pump(200);
-    check(g_focus_count==10 && g_focus_index==2,"Fast Scroll headings must be unselectable, with six thresholds and four hold times");
+    check(g_focus_count==10 && g_focus_index==0,"Fast Scroll must focus its top toggle, followed by five thresholds and four hold times");
+    for(uint32_t i=0;i<lv_obj_get_child_count(settings_right_content);i++) {
+        lv_obj_t *text=first_label(lv_obj_get_child(settings_right_content,i));
+        check(!text || strcmp(lv_label_get_text(text),"Off"),"Threshold choices must not contain Off");
+    }
+    ui_handle_key(UI_KEY_ENTER);
+    check(!g_system_config.fast_scroll_enabled && g_system_config.fast_scroll_pages==2 &&
+          !strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),"Disabled"),
+          "The top control must disable Fast Scroll and preserve its threshold");
+    ui_handle_key(UI_KEY_DOWN);ui_handle_key(UI_KEY_ENTER);
+    check(g_system_config.fast_scroll_pages==1 && !g_system_config.fast_scroll_enabled,
+          "A threshold can be changed while disabled without re-enabling Fast Scroll");
     ui_handle_key(UI_KEY_UP);ui_handle_key(UI_KEY_ENTER);
-    check(g_system_config.fast_scroll_pages==1,"Fast Scroll choices must change the saved UI setting");
-    ui_handle_key_repeat(UI_KEY_DOWN,5);
+    check(g_system_config.fast_scroll_enabled && g_system_config.fast_scroll_pages==1 &&
+          !strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),"Enabled"),
+          "Re-enabling must retain the chosen threshold");
+    ui_handle_key_repeat(UI_KEY_DOWN,6);
     for(int i=0;i<4;i++) {
         if(i) ui_handle_key(UI_KEY_DOWN);
         ui_handle_key(UI_KEY_ENTER);
@@ -329,7 +345,8 @@ int main(int argc,char **argv)
     lv_display_set_color_format(display,LV_COLOR_FORMAT_XRGB8888);
     lv_display_set_buffers(display,draw_buffer,NULL,sizeof(draw_buffer),LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(display,flush);
-    ui_system_config_t config={.theme=argc>1?atoi(argv[1]):0,.brightness=45,.menubar_left=1,.fast_scroll_pages=2};
+    ui_system_config_t config={.theme=argc>1?atoi(argv[1]):0,.brightness=45,.menubar_left=1,
+        .fast_scroll_enabled=true,.fast_scroll_pages=2};
     ui_apply_saved_settings(&config);ui_init();pump(600);
     check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
     alpha_fade();artist_viewport();scrollbar_views();pressed_controls();fast_navigation();

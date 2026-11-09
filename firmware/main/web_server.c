@@ -694,6 +694,7 @@ static esp_err_t config_get(httpd_req_t * req)
     cJSON_AddNumberToObject(root, "volume", g_app_config.volume);
     cJSON_AddNumberToObject(root, "brightness", g_app_config.brightness);
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
+    cJSON_AddBoolToObject(root, "fast_scroll_enabled", g_app_config.fast_scroll_enabled);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
     cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddBoolToObject(root, "debug_log", g_app_config.debug_log);
@@ -740,6 +741,11 @@ static esp_err_t config_post(httpd_req_t * req)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
     }
 
+    const cJSON * enabled = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_enabled");
+    if(enabled != NULL && !cJSON_IsBool(enabled)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid Fast Scroll enable value");
+    }
     const cJSON * item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_hold_ms");
     if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
        (item->valueint!=150 && item->valueint!=300 && item->valueint!=500 && item->valueint!=1500))) {
@@ -753,7 +759,13 @@ static esp_err_t config_post(httpd_req_t * req)
         cJSON_Delete(root);
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid Fast Scroll value");
     }
-    if(item != NULL) g_app_config.fast_scroll_pages = (uint8_t)item->valueint;
+    if(item != NULL) {
+        /* Keep legacy zero-page requests usable as Disable, while retaining
+         * the independently selected threshold for the next Enable. */
+        if(item->valueint == 0) g_app_config.fast_scroll_enabled = false;
+        else g_app_config.fast_scroll_pages = (uint8_t)item->valueint;
+    }
+    if(enabled != NULL) g_app_config.fast_scroll_enabled = cJSON_IsTrue(enabled);
     item = cJSON_GetObjectItemCaseSensitive(root, "screen_off_minutes");
     if(item != NULL && (!cJSON_IsNumber(item) || item->valuedouble != item->valueint ||
        (item->valueint != 0 && item->valueint != 30 && item->valueint != 60))) {
@@ -1059,6 +1071,7 @@ static esp_err_t status_get(httpd_req_t * req)
         bsp_display_unlock();
     }
     cJSON_AddNumberToObject(root, "screen_off_minutes", g_app_config.screen_off_minutes);
+    cJSON_AddBoolToObject(root, "fast_scroll_enabled", g_app_config.fast_scroll_enabled);
     cJSON_AddNumberToObject(root, "fast_scroll_pages", g_app_config.fast_scroll_pages);
     cJSON_AddNumberToObject(root, "fast_scroll_hold_ms", g_app_config.fast_scroll_hold_ms);
     cJSON_AddNumberToObject(root, "screen_flip", g_app_config.screen_flip);

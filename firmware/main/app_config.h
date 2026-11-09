@@ -30,7 +30,8 @@ typedef struct {
     bool touch_enabled;
     uint8_t np_bg_mode;
     uint8_t brightness;        /* 1..100; a requested 0 falls back to 5 */
-    uint8_t fast_scroll_pages; /* activation pages/1200 ms; 0 off, default 2 */
+    bool fast_scroll_enabled; /* default true; preserves threshold when disabled */
+    uint8_t fast_scroll_pages; /* activation pages/1200 ms; 1..5, default 2 */
     uint16_t fast_scroll_hold_ms; /* 150, 300 (default), 500, 1500 */
     uint8_t screen_off_minutes; /* 0 = disabled (default), 30, 60 */
     uint8_t usb_mode;

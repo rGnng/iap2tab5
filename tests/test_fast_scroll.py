@@ -1,5 +1,6 @@
 """Exercise production scroll speed policy against physical detents and time."""
 import ctypes as C
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -114,5 +115,60 @@ class FastScrollTests(unittest.TestCase):
         for i in range(15):self.assertEqual(self.feed((start+i*40) % 2**32),(1,False))
         self.assertEqual(self.feed((start+600) % 2**32),(8,True))
         self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),(start+750) % 2**32))
+
+class FastScrollConfigTests(unittest.TestCase):
+    """Load the production JSON parsing block, including old Off settings."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        source = (ROOT/'firmware/main/app_config.c').read_text()
+        start = source.index('    item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_pages");')
+        end = source.index('    item = cJSON_GetObjectItemCaseSensitive(root, "fast_scroll_hold_ms");', start)
+        harness = Path(cls.tmp.name)/'config.c'
+        harness.write_text('''
+#include <stdbool.h>
+#include <stdint.h>
+#include "cJSON.h"
+static struct { bool fast_scroll_enabled; uint8_t fast_scroll_pages; } g_app_config;
+unsigned load_settings(const char *text) {
+    g_app_config.fast_scroll_enabled=true;g_app_config.fast_scroll_pages=2;
+    cJSON *root=cJSON_Parse(text);const cJSON *item;
+''' + source[start:end] + '''
+    cJSON_Delete(root);
+    return (g_app_config.fast_scroll_enabled ? 256 : 0) | g_app_config.fast_scroll_pages;
+}
+''')
+        lib = Path(cls.tmp.name)/'config.so'
+        subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-shared','-fPIC',
+                        '-I'+str(ROOT/'third_party/cjson'),str(harness),
+                        str(ROOT/'third_party/cjson/cJSON.c'),'-o',str(lib)],check=True)
+        cls.lib = C.CDLL(str(lib))
+        cls.lib.load_settings.argtypes = [C.c_char_p]
+        cls.lib.load_settings.restype = C.c_uint
+
+    def load(self, **settings):
+        result = self.lib.load_settings(json.dumps(settings).encode())
+        return bool(result & 256), result & 255
+
+    def test_missing_enable_flag_keeps_enabled_default_and_legacy_threshold(self):
+        self.assertEqual(self.load(), (True,2))
+        for pages in range(1,6):
+            self.assertEqual(self.load(fast_scroll_pages=pages), (True,pages))
+
+    def test_legacy_off_migrates_to_disabled_with_a_valid_threshold(self):
+        self.assertEqual(self.load(fast_scroll_pages=0), (False,2))
+
+    def test_explicit_enable_flag_preserves_independent_threshold(self):
+        for enabled in (False,True):
+            for pages in range(1,6):
+                self.assertEqual(self.load(fast_scroll_enabled=enabled,fast_scroll_pages=pages),
+                                 (enabled,pages))
+        self.assertEqual(self.load(fast_scroll_enabled=True,fast_scroll_pages=0), (True,2))
+
+    def test_invalid_saved_threshold_does_not_disable_fast_scroll(self):
+        for pages in (-1,6,1.5,'2',False):
+            self.assertEqual(self.load(fast_scroll_pages=pages), (True,2))
+
 
 if __name__ == '__main__': unittest.main()

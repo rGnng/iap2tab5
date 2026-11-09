@@ -450,6 +450,7 @@ static void ui_system_config_changed(const ui_system_config_t * cfg)
     g_app_config.menubar_left = cfg->menubar_left != 0;
     g_app_config.touch_enabled = cfg->touch_enabled != 0;
     g_app_config.np_bg_mode = (uint8_t)cfg->np_bg_mode;
+    g_app_config.fast_scroll_enabled = cfg->fast_scroll_enabled;
     g_app_config.fast_scroll_pages = (uint8_t)cfg->fast_scroll_pages;
     g_app_config.fast_scroll_hold_ms = (uint16_t)fast_scroll_hold_normalize(cfg->fast_scroll_hold_ms);
     g_app_config.brightness = (uint8_t)screen_brightness_normalize(cfg->brightness);
@@ -506,6 +507,7 @@ static void fill_ui_config(ui_system_config_t * cfg)
     cfg->menubar_left = g_app_config.menubar_left ? 1 : 0;
     cfg->touch_enabled = g_app_config.touch_enabled ? 1 : 0;
     cfg->np_bg_mode = g_app_config.np_bg_mode;
+    cfg->fast_scroll_enabled = g_app_config.fast_scroll_enabled;
     cfg->fast_scroll_pages = g_app_config.fast_scroll_pages;
     cfg->fast_scroll_hold_ms = g_app_config.fast_scroll_hold_ms;
     cfg->brightness = g_app_config.brightness;

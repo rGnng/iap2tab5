@@ -274,6 +274,7 @@ static ui_system_config_t g_system_config = {
     .sound_mode = 2,
     .volume = 65,
     .np_bg_mode = 2,
+    .fast_scroll_enabled = true,
     .fast_scroll_pages = 2,
     .fast_scroll_hold_ms = 300,
     .wifi_status = "WiFi off",
@@ -2457,7 +2458,7 @@ void ui_set_system_config(const ui_system_config_t * cfg)
 
     g_system_config = *cfg;
     g_system_config.fast_scroll_hold_ms = fast_scroll_hold_normalize(cfg->fast_scroll_hold_ms);
-    if(cfg->fast_scroll_pages < 0 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
+    if(cfg->fast_scroll_pages < 1 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
     g_system_config.brightness = screen_brightness_normalize(cfg->brightness);
 
     if(cfg->wifi_status[0] == '\0') {
@@ -7483,7 +7484,8 @@ static lv_obj_t * settings_detail_theme_gray_check;
 static lv_obj_t * settings_detail_theme_aqua_check;
 static lv_obj_t * settings_detail_theme_win95_check;
 static lv_obj_t * settings_screen_off_checks[3];
-static lv_obj_t * settings_fast_scroll_checks[6];
+static lv_obj_t * settings_fast_scroll_enabled_value;
+static lv_obj_t * settings_fast_scroll_checks[5];
 static lv_obj_t * settings_fast_hold_checks[4];
 static const int settings_fast_hold_values[] = {150,300,500,1500};
 static lv_obj_t * settings_brightness_checks[3];
@@ -7545,7 +7547,7 @@ void ui_apply_saved_settings(const ui_system_config_t * cfg)
 
     g_system_config = *cfg;
     g_system_config.fast_scroll_hold_ms = fast_scroll_hold_normalize(cfg->fast_scroll_hold_ms);
-    if(cfg->fast_scroll_pages < 0 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
+    if(cfg->fast_scroll_pages < 1 || cfg->fast_scroll_pages > 5) g_system_config.fast_scroll_pages = 2;
     screen_idle_configure(&g_screen_idle, cfg->screen_off_minutes, lv_tick_get());
     if(g_system_config.sound_mode < 0) g_system_config.sound_mode = 0;
     if(g_system_config.sound_mode > 2) g_system_config.sound_mode = 2;
@@ -7593,7 +7595,7 @@ static const char * const settings_names[SETTING_COUNT] = {
 
 static int settings_initial_focus(int index)
 {
-    if(index == SETTING_FAST_SCROLL) return g_system_config.fast_scroll_pages;
+    if(index == SETTING_FAST_SCROLL) return 0;
     if(index == SETTING_SCREEN) {
         int nearest = 0;
         for(int i = 1; i < 3; i++) {
@@ -8331,8 +8333,13 @@ static void settings_theme_touch_cb(lv_event_t * event)
 
 static void settings_update_fast_scroll_checks(void)
 {
-    for(int i=0;i<6;i++) if(settings_fast_scroll_checks[i]) {
-        const char *text=i==g_system_config.fast_scroll_pages ? ICON_CHECK : "";
+    if(settings_fast_scroll_enabled_value) {
+        const char *text=g_system_config.fast_scroll_enabled ? "Enabled" : "Disabled";
+        if(strcmp(lv_label_get_text(settings_fast_scroll_enabled_value),text))
+            lv_label_set_text(settings_fast_scroll_enabled_value,text);
+    }
+    for(int i=0;i<5;i++) if(settings_fast_scroll_checks[i]) {
+        const char *text=i+1==g_system_config.fast_scroll_pages ? ICON_CHECK : "";
         if(strcmp(lv_label_get_text(settings_fast_scroll_checks[i]),text))
             lv_label_set_text(settings_fast_scroll_checks[i],text);
     }
@@ -8343,14 +8350,26 @@ static void settings_update_fast_scroll_checks(void)
     }
 }
 
+static void settings_fast_scroll_enabled_action(void *user)
+{
+    LV_UNUSED(user);
+    g_system_config.fast_scroll_enabled = !g_system_config.fast_scroll_enabled;
+    settings_update_fast_scroll_checks();
+    settings_system_changed();
+}
+
+static void settings_fast_scroll_enabled_touch_cb(lv_event_t *event)
+{
+    LV_UNUSED(event);
+    settings_fast_scroll_enabled_action(NULL);
+}
+
 static void settings_fast_scroll_action(void * user)
 {
     int pages = (int)(intptr_t)user;
-    if(pages < 0 || pages > 5) return;
+    if(pages < 1 || pages > 5) return;
     g_system_config.fast_scroll_pages = pages;
-    for(int i = 0; i < 6; i++)
-        if(settings_fast_scroll_checks[i]) lv_label_set_text(settings_fast_scroll_checks[i],
-            i == pages ? ICON_CHECK : "");
+    settings_update_fast_scroll_checks();
     settings_system_changed();
 }
 
@@ -8759,6 +8778,7 @@ static void settings_np_bg_touch_cb(lv_event_t * event)
 
 static void settings_render_detail(lv_obj_t * parent, bool interactive)
 {
+    settings_fast_scroll_enabled_value = NULL;
     memset(settings_fast_scroll_checks, 0, sizeof(settings_fast_scroll_checks));
     memset(settings_fast_hold_checks, 0, sizeof(settings_fast_hold_checks));
     if(parent == NULL) return;
@@ -9058,14 +9078,21 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
             break;
         }
         case SETTING_FAST_SCROLL: {
+            lv_obj_t *enabled = settings_make_value_row(parent, "Fast Scroll",
+                g_system_config.fast_scroll_enabled ? "Enabled" : "Disabled",
+                COL_ACCENT, SETTINGS_ROW_H, FONT_H2, FONT_H2,
+                &settings_fast_scroll_enabled_value);
+            if(interactive) focus_add_clickable(enabled, settings_fast_scroll_enabled_action,
+                NULL, NULL, true);
+            else touch_add_clickable(enabled, settings_fast_scroll_enabled_touch_cb, NULL);
             settings_section(parent,"Start Fast Scrolling After");
-            static const char * const labels[] = {"Off", "1 Page", "2 Pages", "3 Pages", "4 Pages", "5 Pages"};
-            for(int i = 0; i < 6; i++) {
+            static const char * const labels[] = {"1 Page", "2 Pages", "3 Pages", "4 Pages", "5 Pages"};
+            for(int i = 0; i < 5; i++) {
                 lv_obj_t * row = settings_make_choice_row(parent, labels[i],
-                    g_system_config.fast_scroll_pages == i, &settings_fast_scroll_checks[i]);
+                    g_system_config.fast_scroll_pages == i+1, &settings_fast_scroll_checks[i]);
                 if(interactive) focus_add_clickable(row, settings_fast_scroll_action,
-                    NULL, (void *)(intptr_t)i, true);
-                else touch_add_clickable(row, settings_fast_scroll_touch_cb, (void *)(intptr_t)i);
+                    NULL, (void *)(intptr_t)(i+1), true);
+                else touch_add_clickable(row, settings_fast_scroll_touch_cb, (void *)(intptr_t)(i+1));
             }
             settings_section(parent,"Hold Time");
             static const char * const hold_labels[] = {"150 ms","300 ms","500 ms","1.5 s"};
@@ -9832,6 +9859,10 @@ static int ui_fast_scroll_rows(lv_obj_t **context)
 
 static void ui_fast_marker_update(lv_timer_t * timer)
 {
+    if(!g_system_config.fast_scroll_enabled) {
+        ui_fast_scroll_reset_reason("configuration");
+        return;
+    }
     LV_UNUSED(timer);
     bool was_active = g_fast_scroll.active;
     uint32_t idle_ms = lv_tick_get()-g_fast_scroll.last_ms;
@@ -9903,6 +9934,7 @@ void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint
     }
     lv_obj_t * context;
     int rows = ui_fast_scroll_rows(&context);
+    int pages = g_system_config.fast_scroll_enabled ? g_system_config.fast_scroll_pages : 0;
     if(context != g_fast_context) ui_fast_scroll_reset_reason("list_change");
     g_fast_context = context;
     bool entered = false;
@@ -9916,12 +9948,12 @@ void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint
         bool was_active = g_fast_scroll.active;
         int direction = key == UI_KEY_UP ? -1 : 1;
         const char * reason = g_fast_scroll.direction != direction ? "direction" :
-            g_fast_scroll.rows != rows || g_fast_scroll.pages != g_system_config.fast_scroll_pages ||
+            g_fast_scroll.rows != rows || g_fast_scroll.pages != pages ||
             g_fast_scroll.hold_ms != g_system_config.fast_scroll_hold_ms
                 ? "configuration" : "idle";
         int32_t gap_ms = (int32_t)(tick-g_fast_scroll.last_ms);
         steps += fast_scroll_feed(&g_fast_scroll, tick, direction,
-            1, rows, g_system_config.fast_scroll_pages, g_system_config.fast_scroll_hold_ms, &just_entered);
+            1, rows, pages, g_system_config.fast_scroll_hold_ms, &just_entered);
         if(was_active && (!g_fast_scroll.active || just_entered)) {
             UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d gap_ms=%ld",
                 reason, (int)g_current_screen, (long)gap_ms);
