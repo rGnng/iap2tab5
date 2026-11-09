@@ -150,11 +150,13 @@ Pair it from **Settings → Bluetooth**, under **Search Devices**.
 (default: Enabled), followed by **Start Fast Scrolling After** (1–5 pages per
 1200 ms; default: 2 Pages) and **Hold Time** (150 ms, 300 ms,
 500 ms, or 1.5 s; default: 300 ms). A quick spin switches to one visible page
-per notch, with a rising two-tone cue and twin marks beside the cursor.
-A falling two-tone cue marks exit. Pausing for the selected hold time or
+per notch, with a short high tone and twin marks beside the cursor.
+A short lower tone marks exit. Pausing for the selected hold time or
 reversing direction restores normal single-row precision. Speed uses physical
 notches rather than amplified page jumps; touch scrolling stays unchanged.
 Disabling Fast Scroll preserves the selected threshold and hold time.
+Screen off and wake also play a short low and high tone respectively when
+Key Feedback is enabled.
 
 
 **Settings → Screen** groups **Brightness** presets (**Low**, **Mid**, **High**)

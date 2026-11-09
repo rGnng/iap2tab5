@@ -258,6 +258,7 @@ static void settings_update_system_labels(void);
 static void ui_page_teardown(void);
 static bool ui_apply_theme(void);
 static void ui_feedback_emit(ui_feedback_t type, bool from_key);
+static void ui_state_feedback(ui_feedback_t type);
 
 static focus_item_t g_focus[MAX_FOCUS];
 static int g_focus_count;
@@ -302,6 +303,7 @@ static void ui_screen_apply(bool was_on)
         lv_obj_set_hidden(g_screen_mask, on);
     }
     if(g_screen_power_cb) g_screen_power_cb(on);
+    ui_state_feedback(on ? UI_FEEDBACK_SCREEN_ON : UI_FEEDBACK_SCREEN_OFF);
 }
 
 bool ui_screen_is_on(void) { return !g_screen_idle.off; }
@@ -364,13 +366,15 @@ static void ui_feedback_emit(ui_feedback_t type, bool from_key)
     }
 }
 
-/* Mode transitions are additional feedback, independent of the per-key click
- * deduplication scope. They still obey the user's Key Feedback setting. */
-static void ui_fast_feedback(ui_feedback_t type)
+/* State changes have their own cue, even when a wake gesture consumes the
+ * input or another action already used this key's feedback scope. Screen
+ * tones use any enabled feedback mode; rotary cues still require key mode. */
+static void ui_state_feedback(ui_feedback_t type)
 {
     bool previous_scope = g_key_feedback_scope;
     g_key_feedback_scope = false;
-    ui_feedback_emit(type, true);
+    bool from_key = type == UI_FEEDBACK_FAST_SCROLL || type == UI_FEEDBACK_FAST_SCROLL_EXIT;
+    ui_feedback_emit(type, from_key);
     g_key_feedback_scope = previous_scope;
 }
 
@@ -9816,7 +9820,7 @@ static void ui_fast_scroll_reset_reason(const char * reason)
     if(g_fast_scroll.active) {
         UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d idle_ms=%u",
             reason, (int)g_current_screen, (unsigned)(lv_tick_get()-g_fast_scroll.last_ms));
-        ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
+        ui_state_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
     }
     fast_scroll_reset(&g_fast_scroll);
     g_fast_context = NULL;
@@ -9870,7 +9874,7 @@ static void ui_fast_marker_update(lv_timer_t * timer)
         if(was_active) {
             UI_PERF_LOG("fast_scroll exit: reason=idle screen=%d idle_ms=%u",
                 (int)g_current_screen, (unsigned)idle_ms);
-            ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
+            ui_state_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
         }
         ui_fast_scroll_reset(); return;
     }
@@ -9957,14 +9961,14 @@ void ui_handle_key_repeat_timed(ui_key_t key, int count, uint32_t first_ms, uint
         if(was_active && (!g_fast_scroll.active || just_entered)) {
             UI_PERF_LOG("fast_scroll exit: reason=%s screen=%d gap_ms=%ld",
                 reason, (int)g_current_screen, (long)gap_ms);
-            ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
+            ui_state_feedback(UI_FEEDBACK_FAST_SCROLL_EXIT);
         }
         entered |= just_entered;
     }
     if(entered) {
         UI_PERF_LOG("fast_scroll enter: screen=%d rows=%d threshold=%d hold_ms=%d count=%u",
             (int)g_current_screen, rows, g_system_config.fast_scroll_pages, g_system_config.fast_scroll_hold_ms, g_fast_scroll.count);
-        ui_fast_feedback(UI_FEEDBACK_FAST_SCROLL);
+        ui_state_feedback(UI_FEEDBACK_FAST_SCROLL);
     }
     ui_handle_key_repeat_raw(key, steps);
     if(g_fast_scroll.active) {

@@ -12,6 +12,7 @@ static bool pressed, backlight = true;
 static int saved_minutes = -1;
 static int saved_brightness = -1, saves;
 static int touch_clicks;
+static int screen_off_cues,screen_on_cues;
 static uint8_t pixels[1280 * 40 * 4];
 static void check(bool condition, const char *message)
 {
@@ -26,7 +27,12 @@ static void pump(int ms)
 static void pointer(int x, int y, bool down)
 { point = (lv_point_t){x,y}; pressed=down; lv_indev_read(touch); pump(20); }
 static void power(bool on) { backlight=on; }
-static void feedback(int type) { if(type==UI_FEEDBACK_CLICK)touch_clicks++; }
+static void feedback(int type)
+{
+    if(type==UI_FEEDBACK_CLICK)touch_clicks++;
+    else if(type==UI_FEEDBACK_SCREEN_OFF)screen_off_cues++;
+    else if(type==UI_FEEDBACK_SCREEN_ON)screen_on_cues++;
+}
 static void save(const ui_system_config_t *cfg)
 { saved_minutes=cfg->screen_off_minutes; saved_brightness=cfg->brightness; saves++; }
 static lv_obj_t *label(lv_obj_t *o, const char *text)
@@ -162,6 +168,11 @@ int main(int argc, char **argv)
         check(touch_clicks==before_clicks+(mode!=0),"Clock touch-down must click once when touch feedback is enabled");
         pointer(54,35,false);
         check(touch_clicks==before_clicks+(mode!=0),"Clock release must not emit a second click");
+        int offs=screen_off_cues,ons=screen_on_cues;
+        ui_screen_off();ui_screen_off();
+        check(screen_off_cues==offs+(mode!=0),"Screen off must sound once per transition, respecting disabled feedback");
+        ui_user_activity();ui_user_activity();
+        check(screen_on_cues==ons+(mode!=0),"Wake must sound once per transition, including touch-only feedback mode");
     }
 
     int before_clicks=touch_clicks;
@@ -172,19 +183,25 @@ int main(int argc, char **argv)
     check(ui_screen_is_on(),"Short clock press must cancel the timer");
     pointer(54,35,true); pointer(200,35,true); pump(2200); pointer(200,35,false);
     check(ui_screen_is_on(),"Dragging outside the clock must not turn off the screen");
+    int offs=screen_off_cues;
     pointer(54,35,true); pump(2000);
     check(!ui_screen_is_on() && !backlight,"Two-second hold must blank and disable backlight");
+    check(screen_off_cues==offs+1,"Clock hold must play the screen-off cue exactly once");
     pump(2500); pointer(54,35,false); pump(1100);
     check(!ui_screen_is_on(),"Held finger, release and playing must not wake a manual blank");
 
     before_clicks=touch_clicks;
+    int ons=screen_on_cues;
     pointer(54,35,true);pump(2100);pointer(54,35,false);
     check(ui_screen_is_on() && touch_clicks==before_clicks,"A clock touch that wakes the screen must not click or start another screen-off hold");
+    check(screen_on_cues==ons+1,"Wake-only clock touch must still produce one screen-on cue");
     ui_screen_off();
 
     player_snapshot_t before,after; player_get_snapshot(&before);
+    ons=screen_on_cues;
     ui_handle_key(UI_KEY_7); player_get_snapshot(&after);
     check(ui_screen_is_on() && backlight,"A key must wake the backlight");
+    check(screen_on_cues==ons+1,"A consumed wake key must produce one screen-on cue");
     check(before.status==after.status,"Wake key must not toggle playback");
     ui_handle_key(UI_KEY_2); pump(400);
     check(label(lv_screen_active(),"Albums")!=NULL,"Albums must be shown");
@@ -198,8 +215,10 @@ int main(int argc, char **argv)
 
     player_get_snapshot(&after); if(after.status==PLAYER_PLAYING) player_play_pause();
     cfg.screen_off_minutes=30; ui_set_system_config(&cfg); pump(1100);
+    offs=screen_off_cues;
     lv_tick_inc(1801000); lv_timer_handler();
     check(!ui_screen_is_on(),"Idle LVGL timer must blank a paused player");
+    check(screen_off_cues==offs+1,"Idle screen-off must play one transition cue");
     ui_user_activity();
     cfg.screen_off_minutes=0; ui_set_system_config(&cfg);
     lv_tick_inc(3601000); lv_timer_handler();

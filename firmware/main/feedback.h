@@ -13,6 +13,8 @@ typedef enum {
     FEEDBACK_BACK,
     FEEDBACK_FAST_SCROLL,
     FEEDBACK_FAST_SCROLL_EXIT,
+    FEEDBACK_SCREEN_OFF,
+    FEEDBACK_SCREEN_ON,
 } feedback_t;
 
 /* Initializes the speaker codec and starts the beep task. Returns false when

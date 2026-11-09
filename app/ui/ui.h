@@ -141,6 +141,8 @@ typedef enum {
     UI_FEEDBACK_BACK,
     UI_FEEDBACK_FAST_SCROLL,
     UI_FEEDBACK_FAST_SCROLL_EXIT,
+    UI_FEEDBACK_SCREEN_OFF,
+    UI_FEEDBACK_SCREEN_ON,
 } ui_feedback_t;
 
 /** Optional short UI sound hook implemented by the firmware. */
