@@ -54,7 +54,7 @@ app_config_t g_app_config = {
     .touch_enabled = true,
     .np_bg_mode = 2,
     .fast_scroll_pages = 2,
-    .fast_scroll_hold_ms = 150,
+    .fast_scroll_hold_ms = 300,
     .brightness = 70,
     .usb_mode = 0,
     .debug_log = false,
@@ -478,7 +478,7 @@ static void set_defaults(void)
     g_app_config.touch_enabled = true;
     g_app_config.np_bg_mode = 2;
     g_app_config.fast_scroll_pages = 2;
-    g_app_config.fast_scroll_hold_ms = 150;
+    g_app_config.fast_scroll_hold_ms = 300;
     g_app_config.brightness = 70;
     g_app_config.screen_off_minutes = 0;
     g_app_config.usb_mode = 0;

@@ -64,8 +64,53 @@ static void artist_viewport(void)
     check(lv_obj_get_scroll_y(artists_left_list)==saved,"Artist detail rebuilds must preserve the viewport");
 }
 
+static unsigned audited_scrollbars;
+static void audit_scrollbars(lv_obj_t *obj)
+{
+    /* Only explicit vertical viewports; LVGL also defaults decorative objects
+     * and buttons to scrollable, even though they never hold a list. */
+    if(lv_obj_is_visible(obj) && lv_obj_is_scrollable(obj) &&
+       lv_obj_get_scroll_dir(obj)==LV_DIR_VER &&
+       lv_obj_get_scrollbar_mode(obj)!=LV_SCROLLBAR_MODE_OFF) {
+        lv_scrollbar_mode_t mode=lv_obj_get_scrollbar_mode(obj);
+        bool was_scrolled=lv_obj_has_state(obj,LV_STATE_SCROLLED);
+        lv_obj_set_scrollbar_mode(obj,LV_SCROLLBAR_MODE_ON);
+        for(int state=0;state<2;state++) {
+            if(state)lv_obj_add_state(obj,LV_STATE_SCROLLED);
+            else lv_obj_remove_state(obj,LV_STATE_SCROLLED);
+            if(lv_obj_get_style_radius(obj,LV_PART_SCROLLBAR)!=0 ||
+               lv_obj_get_style_pad_right(obj,LV_PART_SCROLLBAR)!=6)
+                fprintf(stderr,"Scrollbar style failure: screen=%d width=%ld height=%ld state=%d\n",
+                    g_current_screen,(long)lv_obj_get_width(obj),(long)lv_obj_get_height(obj),state);
+            check(lv_obj_get_style_radius(obj,LV_PART_SCROLLBAR)==0,"Every scrollbar must have square corners");
+            check(lv_obj_get_style_pad_right(obj,LV_PART_SCROLLBAR)==6,"Every scrollbar must have a six-pixel right inset");
+            if(lv_obj_get_scroll_dir(obj)&LV_DIR_VER) {
+                lv_area_t horizontal,vertical,bounds;
+                lv_obj_get_scrollbar_area(obj,&horizontal,&vertical);lv_obj_get_coords(obj,&bounds);
+                check(vertical.x2>=vertical.x1,"A forced vertical scrollbar must have a real draw area");
+                check(bounds.x2-vertical.x2==6,"Actual scrollbar geometry must be six pixels inside its container");
+            }
+        }
+        if(!was_scrolled)lv_obj_remove_state(obj,LV_STATE_SCROLLED);
+        lv_obj_set_scrollbar_mode(obj,mode);audited_scrollbars++;
+    }
+    for(uint32_t i=0;i<lv_obj_get_child_count(obj);i++)audit_scrollbars(lv_obj_get_child(obj,i));
+}
+static void scrollbar_views(void)
+{
+    for(int screen=SCR_ALBUMS;screen<SCR_COUNT;screen++) {
+        ui_select_screen(screen);pump(600);audit_scrollbars(lv_screen_active());
+        if(screen==SCR_ALBUMS) { albums_open((void *)(intptr_t)0);pump(200);audit_scrollbars(lv_screen_active()); }
+        if(screen==SCR_ARTISTS) { artists_open((void *)(intptr_t)0);pump(200);audit_scrollbars(lv_screen_active()); }
+    }
+    ui_select_screen(SCR_NOW_PLAYING);pump(300);np_toggle_queue();pump(600);
+    audit_scrollbars(lv_screen_active());np_toggle_queue();pump(300);
+    check(audited_scrollbars>=10,"Audit must cover virtual lists, detail panes, Settings and Up Next");
+}
+
 static void fast_navigation(void)
 {
+    g_system_config.fast_scroll_hold_ms=150; /* Exercise the shortest selectable hold. */
     g_system_config.fast_scroll_pages=2;g_system_config.sound_mode=2;g_system_config.sound_enabled=true;
     ui_set_feedback_cb(feedback);ui_select_screen(SCR_ALBUMS);pump(600);
     albums_select(0);pump(200);
@@ -169,7 +214,8 @@ int main(int argc,char **argv)
     lv_display_set_flush_cb(display,flush);
     ui_system_config_t config={.theme=argc>1?atoi(argv[1]):0,.brightness=45,.menubar_left=1,.fast_scroll_pages=2};
     ui_apply_saved_settings(&config);ui_init();pump(600);
-    alpha_fade();artist_viewport();fast_navigation();
+    check(g_system_config.fast_scroll_hold_ms==300,"Missing hold configuration must default to 300 ms");
+    alpha_fade();artist_viewport();scrollbar_views();fast_navigation();
     puts("PASS: transparent text fade, Artists viewport restoration, page scrolling and theme cursor feedback");
     return 0;
 }

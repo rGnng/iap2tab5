@@ -175,7 +175,7 @@ live in `../docs/sd/`. Two files are used:
   "brightness": 70,
   "screen_off_minutes": 0,
   "fast_scroll_pages": 2,
-  "fast_scroll_hold_ms": 150,
+  "fast_scroll_hold_ms": 300,
   "usb_mode": 0,
   "charge_enabled": true,
   "qc_high": false
@@ -187,7 +187,7 @@ live in `../docs/sd/`. Two files are used:
 - `np_bg_mode`: `0` theme, `1` blurred cover, `2` cover gradient
 - `fast_scroll_pages`: `0` off, `1`–`5` physical pages per 1200 ms to enter fast
   scroll (default `2`). Once active, each notch moves one visible page.
-- `fast_scroll_hold_ms`: `150` (default), `300`, `500`, or `1500` ms without
+- `fast_scroll_hold_ms`: `150`, `300` (default), `500`, or `1500` ms without
   another scroll notch before returning to single-row precision.
 - `screen_off_minutes`: `0` disabled (default), `30` or `60`. Only paused/stopped
   playback with no input counts as idle. Hold the menubar clock for two seconds

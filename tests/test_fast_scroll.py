@@ -94,8 +94,8 @@ class FastScrollTests(unittest.TestCase):
     def test_invalid_hold_times_use_the_default(self):
         for hold in (0,-1,1,149,151,1000,1501):
             self.s=State();self.feed(100,16,hold=hold)
-            self.assertEqual(self.s.hold_ms,150)
-            self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),250))
+            self.assertEqual(self.s.hold_ms,300)
+            self.assertTrue(self.lib.fast_scroll_expire(C.byref(self.s),400))
 
     def test_off_invalid_or_single_row_contexts_never_accelerate(self):
         for pages,rows in [(0,8),(-1,8),(6,8),(2,1),(2,0)]:

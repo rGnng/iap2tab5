@@ -273,7 +273,7 @@ static ui_system_config_t g_system_config = {
     .volume = 65,
     .np_bg_mode = 2,
     .fast_scroll_pages = 2,
-    .fast_scroll_hold_ms = 150,
+    .fast_scroll_hold_ms = 300,
     .wifi_status = "WiFi off",
     .wifi_ip = "--",
 };
@@ -991,9 +991,24 @@ static lv_obj_t * make_page_header(lv_obj_t * parent, const char * title, int he
     return head;
 }
 
+/* One scrollbar spec for shared scroll views and the custom virtual lists.
+ * LVGL positions the bar from the scroll container's right edge using this
+ * part-specific padding. Keep it identical while idle and while scrolling. */
+static void ui_style_scrollbar(lv_obj_t *obj)
+{
+    const lv_style_selector_t selectors[] = {
+        LV_PART_SCROLLBAR, LV_PART_SCROLLBAR | LV_STATE_SCROLLED
+    };
+    for(unsigned i=0;i<sizeof(selectors)/sizeof(selectors[0]);i++) {
+        lv_obj_set_style_pad_right(obj,6,selectors[i]);
+        lv_obj_set_style_radius(obj,0,selectors[i]);
+    }
+}
+
 static lv_obj_t * make_panel_content(lv_obj_t * panel, int pad)
 {
     lv_obj_t * content = lv_obj_create(panel);
+    ui_style_scrollbar(content);
     lv_obj_set_size(content, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
@@ -1015,7 +1030,7 @@ static lv_obj_t * make_scroll(lv_obj_t * parent)
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_style_pad_row(list, LIST_ROW_GAP, 0);
-    lv_obj_set_style_radius(list, 0, LV_PART_SCROLLBAR);
+    ui_style_scrollbar(list);
     if(g_theme->id != UI_THEME_GRAY) {
         lv_obj_set_style_bg_color(list, lv_color_hex(COL_MUTED), LV_PART_SCROLLBAR);
     }
@@ -4989,7 +5004,7 @@ static void albums_create(lv_obj_t * parent)
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
-    lv_obj_set_style_radius(list, 0, LV_PART_SCROLLBAR);
+    ui_style_scrollbar(list);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_scroll_elastic(list, true);
@@ -6580,7 +6595,7 @@ static void songs_create(lv_obj_t * parent)
     lv_obj_set_style_pad_right(songs_list, 14, 0);
     lv_obj_set_scroll_dir(songs_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(songs_list, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_radius(songs_list, 0, LV_PART_SCROLLBAR);
+    ui_style_scrollbar(songs_list);
     lv_obj_set_scroll_elastic(songs_list, true);
     lv_obj_set_scrollable(songs_list, true);
     lv_obj_set_scroll_chain(songs_list, false);
