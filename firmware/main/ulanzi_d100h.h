@@ -107,10 +107,11 @@ typedef struct { bool down; } ulanzi_back_t;
 bool ulanzi_back_update(ulanzi_back_t * state, bool down);
 void ulanzi_back_cancel(ulanzi_back_t * state);
 
-/* D100H encoders occasionally report a lone opposite step during a fast
- * turn. Qualify that reversal before emitting navigation, for both USB/BLE.
- * Ordinary turns stay immediate. A deliberate isolated reverse step is
- * released after 120 ms; three opposite steps confirm immediately. */
+/* Qualify opposite steps before navigation, for both USB/BLE. Normal turns
+ * use a 30 ms reversal debounce; rapid turns retain the longer noise filter.
+ * Same-direction steps stay immediate. Three opposite reports confirm a
+ * reversal early; a lone deliberate reverse is released at its deadline. */
+#define ULANZI_ROTARY_NORMAL_DEBOUNCE_MS 30
 #define ULANZI_ROTARY_RAPID_MS 80
 #define ULANZI_ROTARY_CONFIRM_MS 120
 #define ULANZI_ROTARY_CONFIRM_STEPS 3
@@ -139,7 +140,7 @@ void ulanzi_rotary_cancel(ulanzi_rotary_t *state);
 
 /* Knob press/held-turn gesture (IDs 0x07, 0x0B, 0x0C). A plain click emits
  * Enter on release; any held turn cancels that click and changes volume.
- * Normal turns (0x09/0x0A) remain stateless, coalescible navigation events. */
+ * Ordinary turns (0x09/0x0A) use the direction filter before navigation. */
 typedef struct {
     bool down;
     bool turned;

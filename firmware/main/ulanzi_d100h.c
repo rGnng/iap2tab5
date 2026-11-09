@@ -266,7 +266,14 @@ void ulanzi_rotary_cancel(ulanzi_rotary_t *state)
 
 int64_t ulanzi_rotary_deadline(const ulanzi_rotary_t *state)
 {
-    return state->pending ? state->pending_us + (int64_t)ULANZI_ROTARY_CONFIRM_MS * 1000 : 0;
+    if(!state->pending) return 0;
+    /* Choose from physical arrival times, independently of UI Fast Scroll
+     * or dispatch delays. last_us stays at the preceding accepted direction
+     * until this candidate is confirmed or discarded. */
+    int wait_ms = state->pending_us - state->last_us <=
+        (int64_t)ULANZI_ROTARY_RAPID_MS * 1000
+        ? ULANZI_ROTARY_CONFIRM_MS : ULANZI_ROTARY_NORMAL_DEBOUNCE_MS;
+    return state->pending_us + (int64_t)wait_ms * 1000;
 }
 
 ulanzi_rotary_result_t ulanzi_rotary_flush(ulanzi_rotary_t *state)
@@ -313,8 +320,7 @@ ulanzi_rotary_result_t ulanzi_rotary_update(ulanzi_rotary_t *state, int directio
         state->pending_count = 0;
         out.suppressed = true;
     }
-    if(state->direction && direction != state->direction &&
-       now_us - state->last_us <= (int64_t)ULANZI_ROTARY_RAPID_MS * 1000) {
+    if(state->direction && direction != state->direction) {
         state->pending = true;
         state->pending_count = 1;
         state->pending_us = state->pending_last_us = now_us;
