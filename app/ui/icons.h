@@ -37,6 +37,7 @@ LV_FONT_DECLARE(bootstrap_icons_48);
 #define ICON_PERSON          "\xEF\x93\xA1" /* U+F4E1 */
 #define ICON_SETTINGS        "\xEF\x8F\xA5" /* U+F3E5 */
 #define ICON_LIST            "\xEF\x91\xB9" /* U+F479 */
+#define ICON_LIST_UL         "\xEF\x91\xB8" /* U+F478 */
 #define ICON_HOME            "\xEF\x90\xA5" /* U+F425 */
 #define ICON_BACK            "\xEF\x84\xAF" /* U+F12F */
 #define ICON_CHEVRON_UP      "\xEF\x8A\x86" /* U+F286 */

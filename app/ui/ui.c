@@ -1999,7 +1999,11 @@ static void ui_dispatch_key(ui_key_t key);
 
 static void menu_click_async(void * arg)
 {
-    ui_show_screen((screen_id_t)(intptr_t)arg);
+    screen_id_t target = (screen_id_t)(intptr_t)arg;
+    bool toggle_queue = !g_afc_sync_mode && target == SCR_NOW_PLAYING &&
+                        g_current_screen == SCR_NOW_PLAYING;
+    ui_show_screen(target);
+    if(toggle_queue) np_toggle_queue();
 }
 
 static void menu_click_cb(lv_event_t * event)
@@ -2395,7 +2399,7 @@ static void build_menubar(lv_obj_t * parent)
         ICON_DISC,
         ICON_PERSON,
         ICON_MUSIC_LIST,
-        ICON_LIST,
+        ICON_LIST_UL,
         ICON_SETTINGS,
     };
 

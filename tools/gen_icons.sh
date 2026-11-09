@@ -6,8 +6,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FONT="$ROOT/assets/fonts/bootstrap-icons.ttf"
-OUT_DIR="$ROOT/app/ui/fonts"
+cd "$ROOT"
+FONT="assets/fonts/bootstrap-icons.ttf"
+OUT_DIR="app/ui/fonts"
 
 # Keep this list in sync with assets/fonts/bootstrap-icons-codepoints.txt.
 # Add new icons here when the UI needs them; keeping the subset small matters
@@ -40,6 +41,7 @@ RANGES=(
   0xF4E1 # person
   0xF3E5 # gear
   0xF479 # list
+  0xF478 # list-ul
   0xF425 # house
   0xF12F # arrow-left
   0xF286 # chevron-up

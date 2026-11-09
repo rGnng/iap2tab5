@@ -3,6 +3,7 @@
 #include "lvgl.h"
 #include "player.h"
 #include "ui.h"
+#include "icons.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -188,6 +189,31 @@ static void tap_tile(int slot)
     pointer(p.x, p.y, true); pointer(p.x, p.y, false); pump(300);
 }
 
+static void now_playing_menu(void)
+{
+    lv_obj_t *icon=lv_obj_get_child(menu_tile(4),0);
+    check(!strcmp(lv_label_get_text(icon),ICON_LIST_UL),"Playlists menu must use list-ul");
+    lv_font_glyph_dsc_t glyph;
+    check(lv_font_get_glyph_dsc(&bootstrap_icons_40,&glyph,0xF478,0) &&
+          !glyph.is_placeholder && glyph.adv_w>0,"The menubar font must contain the real list-ul glyph");
+    player_snapshot_t before,after;player_get_snapshot(&before);
+    for(int side=0;side<2;side++) {
+        ui_set_menubar_left(side==0);ui_select_screen(1);pump(300);
+        tap_tile(0);
+        check(find_label(lv_screen_active(),"Up Next")==NULL,"Entering Now Playing must not also open Up Next");
+        tap_tile(0);
+        check(find_label(lv_screen_active(),"Up Next")!=NULL,"Tapping active Now Playing must open Up Next");
+        ui_handle_key(UI_KEY_1);pump(100);
+        check(find_label(lv_screen_active(),"Up Next")!=NULL,"The existing keyboard shortcut must keep its queue focus behavior");
+        tap_tile(0);
+        check(find_label(lv_screen_active(),"Up Next")==NULL,"Tapping active Now Playing again must close Up Next");
+        expect_active(0);
+    }
+    ui_set_menubar_left(true);pump(100);
+    player_get_snapshot(&after);
+    check(before.track.id==after.track.id && before.status==after.status,"Menu queue toggles must not change playback");
+}
+
 static void blocked_navigation(void)
 {
     check(!ui_library_available(), "Library must be unavailable with a prerequisite missing");
@@ -262,6 +288,7 @@ int main(int argc, char ** argv)
         drag(names[region], region, true);
     }
     tap_title();
+    now_playing_menu();
     device_gating();
     puts("PASS: album touch scrolling and tapping");
     return 0;

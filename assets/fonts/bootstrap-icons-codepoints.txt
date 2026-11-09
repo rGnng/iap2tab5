@@ -25,6 +25,7 @@ disc                   U+F2FF
 person                 U+F4E1
 gear                   U+F3E5
 list                   U+F479
+list-ul                U+F478
 house                  U+F425
 arrow-left             U+F12F
 chevron-up             U+F286
