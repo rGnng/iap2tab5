@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Regenerate the LVGL bootstrap-icons font subset.
+# Regenerate the LVGL Bootstrap/custom icon font subset.
 #
-# Prerequisites: node/npm (npx). Bootstrap Icons is MIT licensed; the TTF and
-# license are vendored under assets/fonts/.
+# Prerequisites: node/npm (npx), Python fonttools. Bootstrap Icons and the
+# Simple Line Icons disc are MIT licensed; see assets/fonts/ and assets/icons/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-FONT="assets/fonts/bootstrap-icons.ttf"
+python3 tools/gen_icon_font.py
+FONT=".deps/tab5-icons.ttf"
 OUT_DIR="app/ui/fonts"
 
 # Keep this list in sync with assets/fonts/bootstrap-icons-codepoints.txt.
 # Add new icons here when the UI needs them; keeping the subset small matters
 # on the Tab5's 16 MB flash.
 RANGES=(
+  0xE000 # supplied Albums SVG, assets/icons/albums.svg
   0xF4E7 # phone
   0xF4F7 # plug
   0xF655 # sd-card

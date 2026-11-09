@@ -3,8 +3,9 @@
 
 #include "lvgl.h"
 
-/* Bootstrap Icons 1.13.2, MIT. Generated subset at 24 px.
- * Regenerate with tools/gen_icons.sh after adding codepoints. */
+/* Bootstrap Icons 1.13.2 and Simple Line Icons disc, MIT.
+ * Source SVG and attribution: assets/icons/.
+ * Regenerate the size subsets with tools/gen_icons.sh. */
 LV_FONT_DECLARE(bootstrap_icons_24);
 LV_FONT_DECLARE(bootstrap_icons_32);
 LV_FONT_DECLARE(bootstrap_icons_40);
@@ -34,6 +35,7 @@ LV_FONT_DECLARE(bootstrap_icons_48);
 #define ICON_REPEAT_ONE      "\xEF\xA0\x92" /* U+F812 */
 #define ICON_MUSIC_LIST      "\xEF\x92\x9F" /* U+F49F */
 #define ICON_DISC            "\xEF\x8B\xBF" /* U+F2FF */
+#define ICON_ALBUMS          "\xEE\x80\x80" /* U+E000, supplied Albums SVG */
 #define ICON_PERSON          "\xEF\x93\xA1" /* U+F4E1 */
 #define ICON_SETTINGS        "\xEF\x8F\xA5" /* U+F3E5 */
 #define ICON_LIST            "\xEF\x91\xB9" /* U+F479 */

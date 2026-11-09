@@ -738,7 +738,7 @@ their sources. Run them from the repository root:
 | `python3 tools/gen_mock_library.py` | Rebuild the deterministic mock library, covers, and thumbnails | Pillow |
 | `python3 tools/gen_web_ui.py` | Embed `assets/web/index.html` in `firmware/main/web_index.h` | Python 3 |
 | `python3 tools/gen_plug_art.py` | Embed the no-device illustration | Pillow |
-| `./tools/gen_icons.sh` | Generate Bootstrap Icons font subsets | Node/npm (`lv_font_conv`) |
+| `./tools/gen_icons.sh` | Generate Bootstrap/custom SVG icon font subsets | Node/npm (`lv_font_conv`), Python `fonttools` |
 | `./tools/gen_inter_fonts.sh` | Generate proportional and tabular Inter fonts | Node/npm and Python `fonttools` |
 | `./tools/gen_boot_font.sh` | Generate the VT323 boot font | Node/npm |
 
@@ -776,8 +776,10 @@ use the current source and build files when working on the drivers.
 ## Third-party code and licenses
 
 The project uses LVGL, SDL2, ESP-IDF/esp-bsp/ESP-Hosted, cJSON, stb, Bootstrap
-Icons, Inter, VT323, and optional M PLUS 1p fonts. Each retains its own license;
+Icons, Simple Line Icons, Inter, VT323, and optional M PLUS 1p fonts. Each
+retains its own license;
 font licenses are included in [`assets/fonts/`](assets/fonts/) and
-[`tools/fonts/`](tools/fonts/), and cJSON's license is in
+[`tools/fonts/`](tools/fonts/). The Albums icon's attribution and MIT license are
+in [`assets/icons/`](assets/icons/), and cJSON's license is in
 [`third_party/cjson/LICENSE`](third_party/cjson/LICENSE). There is currently no
 project-wide license file.

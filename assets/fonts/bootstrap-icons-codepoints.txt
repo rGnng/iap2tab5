@@ -22,6 +22,7 @@ repeat                 U+F813
 repeat-1               U+F812
 music-note-list        U+F49F
 disc                   U+F2FF
+albums (custom SVG)     U+E000  assets/icons/albums.svg
 person                 U+F4E1
 gear                   U+F3E5
 list                   U+F479

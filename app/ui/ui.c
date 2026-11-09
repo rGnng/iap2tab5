@@ -2396,7 +2396,7 @@ static void build_menubar(lv_obj_t * parent)
     };
     static const char * const icons[6] = {
         ICON_PLAY,
-        ICON_DISC,
+        ICON_ALBUMS,
         ICON_PERSON,
         ICON_MUSIC_LIST,
         ICON_LIST_UL,
