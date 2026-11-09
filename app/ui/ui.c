@@ -4908,7 +4908,7 @@ static void albums_render_detail(lv_obj_t * parent, bool interactive)
         albums_play_focus = -1;
     }
 
-    lv_obj_t * track_list = make_scroll(parent, 14);
+    lv_obj_t * track_list = make_scroll(parent, 0);
     lv_obj_set_flex_grow(track_list, 0);
     lv_obj_set_height(track_list, ALBUM_TRACK_LIST_H);
     lv_obj_set_style_pad_row(track_list, 0, 0);
@@ -5611,7 +5611,7 @@ static void artists_render_detail(lv_obj_t * parent, bool interactive)
         artists_play_focus = -1;
     }
 
-    lv_obj_t * album_list = make_scroll(parent, 14);
+    lv_obj_t * album_list = make_scroll(parent, 0);
     lv_obj_set_flex_grow(album_list, 0);
     lv_obj_set_height(album_list, ARTIST_DETAIL_LIST_H);
     lv_obj_set_style_pad_row(album_list, 0, 0);
