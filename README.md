@@ -212,11 +212,11 @@ Key Feedback is enabled.
 and an **Idle Timer** with **30 min**, **1 hour**, and **Off**
 (the default). Both section labels are inset and non-selectable.
 
-**Settings → About → NP Battery** shows the Tab5's removable NP-F pack state,
-estimated charge, voltage, current direction and charge-control setting. This
+**Settings → About → NP Battery** shows the Tab5's removable NP-F pack in one
+line: `Charging  ~79%  7.87 V` or `Not charging  ~79%  7.87 V`. This
 is separate from the iPod and Bluetooth-controller batteries. Values update
 in place once per second. Level is a voltage estimate, displayed as `~79%`;
-an absent pack or failed reading shows no invented percentage.
+an absent pack shows **Not installed**, and failed readings show **Unavailable**.
 
 The clock area briefly shows an icon labeled **NP Battery** on charging,
 switching to battery discharge, estimated full charge, or low battery. These
@@ -224,8 +224,8 @@ events use the existing fades and newest-event priority, then restore the
 clock without waking the screen or resetting its idle timer. Repeated samples
 do not replay the same event. Charge/discharge state changes need three stable
 seconds; low charge warns at 15% and rearms at 25%. Full is inferred only after
-at least 60 seconds near 8.2 V with settled current and charging enabled, and
-is labeled **Full (est.)**. The INA226 is a voltage/current monitor, not a fuel
+at least 60 seconds near 8.2 V with settled current and charging enabled.
+The API labels that inferred state **Full (est.)**. The INA226 is a voltage/current monitor, not a fuel
 gauge; charger removal is inferred from battery discharge, not a separate
 USB/DC connector sensor. Monitoring never changes the saved charging setting.
 A brightness setting of zero falls back to Low to keep the screen visible.

@@ -7802,7 +7802,7 @@ static counter_t settings_counter;
 static lv_obj_t * settings_detail_time_format_value;
 static lv_obj_t * settings_detail_set_time_value;
 static lv_obj_t * settings_detail_ble_value;
-static lv_obj_t * settings_np_values[5];
+static lv_obj_t * settings_detail_np_battery_value;
 static lv_obj_t * settings_detail_usb_a_check;
 static lv_obj_t * settings_detail_usb_both_check;
 static lv_obj_t * settings_detail_boot_off_check;
@@ -7870,7 +7870,7 @@ static lv_obj_t * settings_detail_sound_none_check;
  * so tick/blink callbacks cannot use labels from the previous visit. */
 static void settings_clear_detail_widgets(void)
 {
-    memset(settings_np_values,0,sizeof(settings_np_values));
+    settings_detail_np_battery_value=NULL;
     settings_detail_time_format_value = NULL;
     settings_detail_set_time_value = NULL;
     settings_detail_ble_value = NULL;
@@ -8989,27 +8989,19 @@ static void settings_ble_scan_connect_cb(lv_event_t * event)
 
 static void settings_update_np_battery(void)
 {
-    if(!settings_np_values[0]) return;
+    if(!settings_detail_np_battery_value) return;
     const np_battery_status_t *b=&g_np_battery;
-    char values[5][48];
-    snprintf(values[0],sizeof(values[0]),"%s",
-        b->state==NP_BATTERY_IDLE && !b->charger_enabled ?
-        "Charging disabled" : np_battery_state_name(b->state));
-    if(b->available && b->present) {
-        snprintf(values[1],sizeof(values[1]),"~%d%%",b->percent);
-        if(b->percent<0) snprintf(values[1],sizeof(values[1]),"--");
-        snprintf(values[2],sizeof(values[2]),"%d.%02d V",b->voltage_mv/1000,
-                 (b->voltage_mv%1000)/10);
-        snprintf(values[3],sizeof(values[3]),"%d mA%s",abs(b->current_ma),
-                 b->current_ma<0 ? " in" : b->current_ma>0 ? " out" : "");
-    }
-    else for(int i=1;i<4;i++) snprintf(values[i],sizeof(values[i]),"--");
-    snprintf(values[4],sizeof(values[4]),"%s",!b->available ? "Unavailable" :
-             b->charger_enabled ? "Enabled" : "Disabled");
-    for(int i=0;i<5;i++) {
-        if(settings_np_values[i] && strcmp(lv_label_get_text(settings_np_values[i]),values[i]))
-            lv_label_set_text(settings_np_values[i],values[i]);
-    }
+    char text[96];
+    if(!b->available || b->state==NP_BATTERY_UNKNOWN)
+        snprintf(text,sizeof(text),"Unavailable");
+    else if(!b->present || b->state==NP_BATTERY_ABSENT)
+        snprintf(text,sizeof(text),"Not installed");
+    else
+        snprintf(text,sizeof(text),"%s  ~%d%%  %d.%02d V",
+            b->state==NP_BATTERY_CHARGING ? "Charging" : "Not charging",
+            b->percent,b->voltage_mv/1000,(b->voltage_mv%1000)/10);
+    if(strcmp(lv_label_get_text(settings_detail_np_battery_value),text))
+        lv_label_set_text(settings_detail_np_battery_value,text);
 }
 
 static void settings_tick(void)
@@ -9678,11 +9670,8 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                     settings_compile_time(), COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2, NULL);
             settings_make_value_row(parent, "Commit", settings_commit(),
                                     COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2, NULL);
-            settings_section(parent,"NP Battery");
-            const char *battery_labels[]={"State","Charge (est.)","Voltage","Current","Charge control"};
-            for(int i=0;i<5;i++)
-                settings_make_value_row(parent,battery_labels[i],"--",COL_MUTED,
-                    SETTINGS_ROW_H,FONT_H2,FONT_H2,&settings_np_values[i]);
+            settings_make_value_row(parent,"NP Battery","--",COL_MUTED,
+                SETTINGS_ROW_H,FONT_H2,FONT_H2,&settings_detail_np_battery_value);
             settings_update_np_battery();
             break;
         case SETTING_DATETIME:

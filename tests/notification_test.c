@@ -252,20 +252,24 @@ int main(int argc, char **argv)
     ui_set_np_battery_status(&battery);
     settings_selected=SETTING_ABOUT;
     ui_show_screen(SCR_SETTINGS);pump(1100);
-    check(settings_np_values[0]!=NULL,"About must create NP Battery details");
-    check(!strcmp(lv_label_get_text(settings_np_values[0]),"Charging disabled"),"About must distinguish a disabled charger from charging");
-    check(!strcmp(lv_label_get_text(settings_np_values[1]),"~79%"),"NP level must be labeled as a voltage estimate");
-    check(!strcmp(lv_label_get_text(settings_np_values[2]),"7.87 V"),"About must use NP voltage rather than iPod battery data");
+    check(settings_detail_np_battery_value!=NULL,"About must create the NP Battery row");
+    check(!strcmp(lv_label_get_text(settings_detail_np_battery_value),"Not charging  ~79%  7.87 V"),"About must combine charging, estimated percent and NP voltage in one line");
     save_strip("np-about");
     battery.state=NP_BATTERY_CHARGING;battery.current_ma=-500;battery.charger_enabled=true;
-    lv_obj_t *label=settings_np_values[0];ui_set_np_battery_status(&battery);pump(1100);
-    check(settings_np_values[0]==label && !strcmp(lv_label_get_text(label),"Charging"),"Live NP updates must preserve About widgets and focus");
-    check(!strcmp(lv_label_get_text(settings_np_values[3]),"500 mA in"),"Current must have a readable charging direction");
-    ui_show_screen(SCR_ALBUMS);pump(600);ui_set_np_battery_status(&battery);pump(1100);
-    check(settings_np_values[0]==NULL,"Leaving About must clear battery widget pointers");
-    ui_screen_off();battery.state=NP_BATTERY_DISCHARGING;battery.current_ma=300;
+    lv_obj_t *label=settings_detail_np_battery_value;ui_set_np_battery_status(&battery);pump(1100);
+    check(settings_detail_np_battery_value==label && !strcmp(lv_label_get_text(label),"Charging  ~79%  7.87 V"),"Live NP updates must preserve the single row and focus");
+    lv_obj_update_layout(label);
+    lv_area_t battery_bounds;lv_obj_get_coords(label,&battery_bounds);
+    check(battery_bounds.x2<1280 && lv_obj_get_height(label)<=FONT_H2->line_height,
+          "The NP Battery value must fit on one line in the About column");
+    battery.present=false;battery.state=NP_BATTERY_ABSENT;battery.percent=-1;
     ui_set_np_battery_status(&battery);pump(1100);
-    check(!ui_screen_is_on(),"An NP battery notification must not wake the screen");
+    check(!strcmp(lv_label_get_text(label),"Not installed"),"An absent NP battery must say Not installed");
+    ui_show_screen(SCR_ALBUMS);pump(600);ui_set_np_battery_status(&battery);pump(1100);
+    check(settings_detail_np_battery_value==NULL,"Leaving About must clear the battery widget pointer");
+    ui_screen_off();battery.present=true;battery.state=NP_BATTERY_CHARGING;battery.current_ma=-300;
+    ui_set_np_battery_status(&battery);pump(1100);
+    check(g_status_content==STATUS_NP_CHARGING && !ui_screen_is_on(),"An NP battery notification must not wake the screen");
     puts("PASS: clock notifications, NP battery transitions and live About details across themes");
     return 0;
 }

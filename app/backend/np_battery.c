@@ -3,7 +3,7 @@
 const char *np_battery_state_name(np_battery_state_t state)
 {
     switch(state) {
-        case NP_BATTERY_ABSENT: return "Not detected";
+        case NP_BATTERY_ABSENT: return "Not installed";
         case NP_BATTERY_IDLE: return "Not charging";
         case NP_BATTERY_CHARGING: return "Charging";
         case NP_BATTERY_DISCHARGING: return "On battery";
