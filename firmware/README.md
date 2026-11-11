@@ -300,8 +300,10 @@ reads INA226 at `0x41` outside the display lock once per second; HTTP and UI
 read the cached result. Raw negative current charges the pack, positive current
 discharges it. ADC shutdown and failed reads remain unavailable, not zero.
 
-About shows charging / estimated percentage / voltage in one **NP Battery**
-row (`Not installed` when absent), and charging/discharge/full/low edges
+About shows state / estimated percentage / voltage in one **NP Battery** row
+(`Not installed` when absent). It uses **Charging**, **Discharging**, and
+**Idle** wording; zero current is idle rather than discharge.
+Charging/discharge/full/low edges
 produce brief clock-area notifications with the same label. The control setting
 is read-only here. Presence, charge level and full are inferred from voltage /
 current: three-second state qualification, a 20 mA current deadband, low warning

@@ -253,7 +253,7 @@ int main(int argc, char **argv)
     settings_selected=SETTING_ABOUT;
     ui_show_screen(SCR_SETTINGS);pump(1100);
     check(settings_detail_np_battery_value!=NULL,"About must create the NP Battery row");
-    check(!strcmp(lv_label_get_text(settings_detail_np_battery_value),"Not charging  ~79%  7.87 V"),"About must combine charging, estimated percent and NP voltage in one line");
+    check(!strcmp(lv_label_get_text(settings_detail_np_battery_value),"Idle  ~79%  7.87 V"),"About must distinguish zero current from battery discharge");
     save_strip("np-about");
     battery.state=NP_BATTERY_CHARGING;battery.current_ma=-500;battery.charger_enabled=true;
     lv_obj_t *label=settings_detail_np_battery_value;ui_set_np_battery_status(&battery);pump(1100);
@@ -262,6 +262,9 @@ int main(int argc, char **argv)
     lv_area_t battery_bounds;lv_obj_get_coords(label,&battery_bounds);
     check(battery_bounds.x2<1280 && lv_obj_get_height(label)<=FONT_H2->line_height,
           "The NP Battery value must fit on one line in the About column");
+    battery.state=NP_BATTERY_DISCHARGING;battery.current_ma=300;
+    ui_set_np_battery_status(&battery);pump(1100);
+    check(!strcmp(lv_label_get_text(label),"Discharging  ~79%  7.87 V"),"Battery output must be labeled Discharging");
     battery.present=false;battery.state=NP_BATTERY_ABSENT;battery.percent=-1;
     ui_set_np_battery_status(&battery);pump(1100);
     check(!strcmp(lv_label_get_text(label),"Not installed"),"An absent NP battery must say Not installed");

@@ -8998,7 +8998,8 @@ static void settings_update_np_battery(void)
         snprintf(text,sizeof(text),"Not installed");
     else
         snprintf(text,sizeof(text),"%s  ~%d%%  %d.%02d V",
-            b->state==NP_BATTERY_CHARGING ? "Charging" : "Not charging",
+            b->state==NP_BATTERY_CHARGING ? "Charging" :
+            b->state==NP_BATTERY_DISCHARGING ? "Discharging" : "Idle",
             b->percent,b->voltage_mv/1000,(b->voltage_mv%1000)/10);
     if(strcmp(lv_label_get_text(settings_detail_np_battery_value),text))
         lv_label_set_text(settings_detail_np_battery_value,text);

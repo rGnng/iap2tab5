@@ -213,7 +213,8 @@ and an **Idle Timer** with **30 min**, **1 hour**, and **Off**
 (the default). Both section labels are inset and non-selectable.
 
 **Settings → About → NP Battery** shows the Tab5's removable NP-F pack in one
-line: `Charging  ~79%  7.87 V` or `Not charging  ~79%  7.87 V`. This
+line: `Charging  ~79%  7.87 V`, `Discharging  ~79%  7.87 V`, or
+`Idle  ~79%  7.87 V` when current is near zero. This
 is separate from the iPod and Bluetooth-controller batteries. Values update
 in place once per second. Level is a voltage estimate, displayed as `~79%`;
 an absent pack shows **Not installed**, and failed readings show **Unavailable**.

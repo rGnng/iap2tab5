@@ -525,7 +525,7 @@ Queue 显示时的左栏：
 - 菜单项统一规格：所有可选、只读、带右侧值的菜单项都是 64 px 高、16 px 左内边距、FONT_H2 字号；颜色按语义保留（On 为绿色，Off 与次要信息为灰色，强调项为 accent 色）。
 - 说明性文字不随菜单字号：分组标题（如 `Paired Devices`、`Search Devices`）及其右侧提示、`Reboot to apply`、`No paired devices`、`Searching...` 保持原小字号；说明文字与菜单标签左对齐（16 px 内边距）。
 - **Bluetooth**：第一行是 Bluetooth On/Off。下方是 Paired Devices（Connected / Inactive，长按 Enter 忘记设备）。页面底部是 **Search Devices** 分组（`PRESS: PAIR`）：打开页面即开始扫描，新发现的设备出现在该分组下方，选中即配对。已移除顶部的 Search 行。
-- **About → NP Battery**：Tab5 的 NP-F 电池独立于 iPod 和蓝牙控制器电池。一行显示 `Charging  ~79%  7.87 V` 或 `Not charging  ~79%  7.87 V`；每秒原位更新，不重建页面或改变焦点。电池未安装时显示 `Not installed`，读取失败时显示 `Unavailable`。
+- **About → NP Battery**：Tab5 的 NP-F 电池独立于 iPod 和蓝牙控制器电池。一行显示充电状态、估算电量与电压，例如 `Charging  ~79%  7.87 V`。供电放电时为 `Discharging`，电流接近零时为 `Idle`；每秒原位更新，不重建页面或改变焦点。电池未安装时显示 `Not installed`，读取失败时显示 `Unavailable`。
 - 时钟区用 32 px 图标和 `NP Battery` 标签短暂报告充电、切到电池放电、估算满电及低电量，沿用淡入淡出和最新事件优先规则；重复采样不重播，不唤醒屏幕、不重置空闲计时。充放电状态需稳定 3 秒；低电量阈值估算 15%，放电时恢复到 25% 清除，充电时也清除。满电仅在充电控制开启、约 8.2 V 且电流接近零持续至少 60 秒后估算，API 状态为 `Full (est.)`；不是把 BAT_STAT 当作满电信号。
 - **Key Feedback**：`Volume` 行（Enter 进入调节，Up/Down ±5%，Enter 确认）；中间留 14 px inset；下方 `Play sound on` 提供 `Touch`、`Touch + Key`、`None` 三个带勾选项，默认 `Touch + Key`。
   - 触屏点击控件以及键盘按钮操作有声音：左右切换标签页、Back、播放/暂停、上一首/下一首、Enter（旋钮按下）、菜单与收藏。统一在 key dispatch 入口触发，覆盖列表、菜单和编辑模式；同一次按键最多一个提示音。长按上一首/下一首在开始快退/快进时响一次，松开不重复。
