@@ -69,7 +69,9 @@ static void save_strip(const char *name)
     if(!prefix) return;
     char path[256]; snprintf(path,sizeof(path),"%s-%d-%s.ppm",prefix,g_theme->id,name);
     FILE *file=fopen(path,"wb"); check(file!=NULL,"Notification preview must be writable");
-    lv_area_t bounds; lv_obj_get_coords(lv_obj_get_parent(g_status_time),&bounds);
+    lv_area_t bounds;
+    if(!strcmp(name,"np-about")) bounds=(lv_area_t){0,0,1279,719};
+    else lv_obj_get_coords(lv_obj_get_parent(g_status_time),&bounds);
     fprintf(file,"P6\n%ld %ld\n255\n",(long)lv_area_get_width(&bounds),(long)lv_area_get_height(&bounds));
     for(int y=bounds.y1;y<=bounds.y2;y++) for(int x=bounds.x1;x<=bounds.x2;x++) {
         uint32_t pixel=frame[y][x]; uint8_t rgb[]={pixel>>16,pixel>>8,pixel};
@@ -218,6 +220,52 @@ int main(int argc, char **argv)
     lv_area_t final; lv_obj_get_coords(lv_obj_get_parent(g_status_time),&final);
     check(original.x1==final.x1 && original.x2==final.x2 && original.y1==final.y1 && original.y2==final.y2,
           "Notification transitions must not change the clock strip geometry");
-    puts("PASS: smaller icons, persistent sync, newest-event priority, active-status restoration, touch and themes");
+    bluetooth_enabled=false;status_area_update();pump(600);wait_for(STATUS_CLOCK);
+    np_battery_status_t battery={.available=true,.present=true,.percent=79,
+        .voltage_mv=7871,.current_ma=300,.state=NP_BATTERY_DISCHARGING};
+    ui_set_np_battery_status(&battery);pump(600);wait_for(STATUS_CLOCK);
+    stays_visible(STATUS_CLOCK,3000,"Initial battery power must not invent an unplug event");
+    battery.state=NP_BATTERY_CHARGING;battery.current_ma=-500;battery.charger_enabled=true;
+    ui_set_np_battery_status(&battery);wait_for(STATUS_NP_CHARGING);
+    check(lv_obj_is_visible(g_status_np_caption) &&
+          !strcmp(lv_label_get_text(g_status_np_caption),"NP Battery"),"Battery notifications must name the NP battery explicitly");
+    check(lv_image_get_src(g_status_icon)==&notification_battery_charging,"Charging must use the battery bolt icon");
+    save_strip("np-charging");wait_for(STATUS_CLOCK);
+    for(int i=0;i<5;i++) {ui_set_np_battery_status(&battery);pump(1000);}
+    stays_visible(STATUS_CLOCK,1000,"Polling the same charging state must not replay its notification");
+    battery.state=NP_BATTERY_FULL;battery.current_ma=0;battery.percent=100;battery.voltage_mv=8230;
+    ui_set_np_battery_status(&battery);wait_for(STATUS_NP_FULL);save_strip("np-full");wait_for(STATUS_CLOCK);
+    battery.state=NP_BATTERY_DISCHARGING;battery.current_ma=300;
+    ui_set_np_battery_status(&battery);wait_for(STATUS_NP_UNPLUGGED);save_strip("np-unplugged");wait_for(STATUS_CLOCK);
+    battery.low=true;battery.percent=10;battery.voltage_mv=6760;
+    ui_set_np_battery_status(&battery);wait_for(STATUS_NP_LOW);save_strip("np-low");wait_for(STATUS_CLOCK);
+    config.theme=(config.theme+1)%3;ui_set_system_config(&config);pump(1100);wait_for(STATUS_CLOCK);
+    ui_set_np_battery_status(&battery);
+    stays_visible(STATUS_CLOCK,3000,"Theme changes and repeated low samples must not replay low battery");
+    battery.available=false;battery.present=false;battery.state=NP_BATTERY_UNKNOWN;battery.low=false;
+    ui_set_np_battery_status(&battery);pump(600);wait_for(STATUS_CLOCK);
+    battery.available=true;battery.present=true;battery.state=NP_BATTERY_DISCHARGING;
+    ui_set_np_battery_status(&battery);pump(600);wait_for(STATUS_CLOCK);
+    stays_visible(STATUS_CLOCK,3000,"Recovery after a missing sensor must not invent an unplug event");
+    battery.state=NP_BATTERY_IDLE;battery.current_ma=0;battery.percent=79;
+    battery.voltage_mv=7871;battery.charger_enabled=false;
+    ui_set_np_battery_status(&battery);
+    settings_selected=SETTING_ABOUT;
+    ui_show_screen(SCR_SETTINGS);pump(1100);
+    check(settings_np_values[0]!=NULL,"About must create NP Battery details");
+    check(!strcmp(lv_label_get_text(settings_np_values[0]),"Charging disabled"),"About must distinguish a disabled charger from charging");
+    check(!strcmp(lv_label_get_text(settings_np_values[1]),"~79%"),"NP level must be labeled as a voltage estimate");
+    check(!strcmp(lv_label_get_text(settings_np_values[2]),"7.87 V"),"About must use NP voltage rather than iPod battery data");
+    save_strip("np-about");
+    battery.state=NP_BATTERY_CHARGING;battery.current_ma=-500;battery.charger_enabled=true;
+    lv_obj_t *label=settings_np_values[0];ui_set_np_battery_status(&battery);pump(1100);
+    check(settings_np_values[0]==label && !strcmp(lv_label_get_text(label),"Charging"),"Live NP updates must preserve About widgets and focus");
+    check(!strcmp(lv_label_get_text(settings_np_values[3]),"500 mA in"),"Current must have a readable charging direction");
+    ui_show_screen(SCR_ALBUMS);pump(600);ui_set_np_battery_status(&battery);pump(1100);
+    check(settings_np_values[0]==NULL,"Leaving About must clear battery widget pointers");
+    ui_screen_off();battery.state=NP_BATTERY_DISCHARGING;battery.current_ma=300;
+    ui_set_np_battery_status(&battery);pump(1100);
+    check(!ui_screen_is_on(),"An NP battery notification must not wake the screen");
+    puts("PASS: clock notifications, NP battery transitions and live About details across themes");
     return 0;
 }

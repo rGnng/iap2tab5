@@ -2,6 +2,7 @@
 #define IAP2TAB5_UI_H
 
 #include "lvgl.h"
+#include "../backend/np_battery.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -129,6 +130,8 @@ void ui_set_network_status(const char *status, const char *ip);
 void ui_set_device_state(bool iap2_mode, bool present, bool sd_ready);
 /** Publish iAP2 library transfer activity under the platform display lock. */
 void ui_set_library_syncing(bool syncing);
+/* NP-F battery on the Tab5. Publish on the UI thread under the display lock. */
+void ui_set_np_battery_status(const np_battery_status_t *status);
 /* Read on the UI thread (under the platform display lock). */
 bool ui_library_available(void);
 void ui_system_toggle_screen_flip(void);

@@ -11,6 +11,7 @@
 #include "ble_remote.h"
 #include "screen_brightness.h"
 #include "charge.h"
+#include "np_battery_hw.h"
 #include "cJSON.h"
 #include "rtc_time.h"
 #include "esp_app_desc.h"
@@ -1192,6 +1193,20 @@ static esp_err_t status_get(httpd_req_t * req)
 
     const esp_app_desc_t * app = esp_app_get_description();
     cJSON_AddStringToObject(root, "firmware", app->version);
+    np_battery_status_t battery;
+    np_battery_hw_snapshot(&battery);
+    cJSON *np=cJSON_AddObjectToObject(root,"np_battery");
+    if(np) {
+        cJSON_AddBoolToObject(np,"available",battery.available);
+        cJSON_AddBoolToObject(np,"present",battery.present);
+        cJSON_AddBoolToObject(np,"charger_enabled",battery.charger_enabled);
+        cJSON_AddBoolToObject(np,"low",battery.low);
+        cJSON_AddStringToObject(np,"state",np_battery_state_name(battery.state));
+        cJSON_AddNumberToObject(np,"voltage_mv",battery.voltage_mv);
+        cJSON_AddNumberToObject(np,"current_ma",battery.current_ma);
+        if(battery.percent>=0) cJSON_AddNumberToObject(np,"percent_estimate",battery.percent);
+        else cJSON_AddNullToObject(np,"percent_estimate");
+    }
     cJSON_AddStringToObject(root, "build", __DATE__ " " __TIME__);
     cJSON_AddItemToObject(root, "bluetooth", bluetooth_json());
     cJSON_AddNumberToObject(root, "reset_reason", (int)esp_reset_reason());

@@ -46,6 +46,7 @@ endif()
 # Application
 # -----------------------------------------------------------------------------
 set(UI_SOURCES
+    app/backend/np_battery.c
     app/backend/screen_idle.c
     app/backend/fast_scroll.c
     app/backend/cover_gradient.c

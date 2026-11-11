@@ -292,6 +292,27 @@ The INA226 measures the battery connector, so its voltage is not a USB power
 measurement when the battery has been removed. `lcd_enabled` in `/api/power`
 reads the LCD enable pin separately.
 
+`np_battery` in `/api/status` is the cached **Tab5 NP Battery** snapshot,
+independent of the iPod's `device_battery` / `device_charging` fields. It has
+`available`, `present`, `state`, `voltage_mv`, `current_ma`, `percent_estimate`
+(null when unknown), `charger_enabled`, and `low`. The background sampler
+reads INA226 at `0x41` outside the display lock once per second; HTTP and UI
+read the cached result. Raw negative current charges the pack, positive current
+discharges it. ADC shutdown and failed reads remain unavailable, not zero.
+
+About shows **NP Battery** values live, and charging/discharge/full/low edges
+produce brief clock-area notifications with the same label. The control setting
+is read-only here. Presence, charge level and full are inferred from voltage /
+current: three-second state qualification, a 20 mA current deadband, low warning
+at an estimated 15% with 25% rearm, and a full estimate after 60 seconds at
+8.2 V or above with settled current and charging enabled. Full has an 8.1 V
+release threshold. Failed reads and an undetected pack cannot create empty,
+unplug or full notifications. A transition to battery discharge represents
+loss of external supply; the board has no separate input-connector reading in
+this monitor. Full is displayed as **Full (est.)**, not a hardware completion
+flag. See [M5Stack's battery specifications](https://docs.m5stack.com/en/core/Tab5)
+and the [official voltage/current interpretation](https://github.com/m5stack/M5Unified/blob/master/src/utility/Power_Class.inl).
+
 `library_available` in `/api/status` reports the UI's actual library gate.
 Albums, Artists, Songs and Playlists are disabled until the SD library is ready
 and the iPod is identified; all touch, keyboard/keypad and debug navigation

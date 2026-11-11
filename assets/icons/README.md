@@ -13,7 +13,8 @@ the [Iconify collection](https://github.com/iconify/icon-sets/blob/master/json/a
 Copyright (c) 2026 Andrés Raxón (andrsrxn), [MIT license](LICENSE.andrsrxn).
 Their original paths and translucent fills are retained.
 
-`arrow-repeat.svg` is from [Bootstrap Icons 1.13.2](https://github.com/twbs/icons/blob/v1.13.2/icons/arrow-repeat.svg),
+`arrow-repeat.svg`, `battery-charging.svg`, `battery-full.svg`, `battery-low.svg`,
+and `plug.svg` are from [Bootstrap Icons 1.13.2](https://github.com/twbs/icons/tree/v1.13.2/icons),
 under the [MIT license](../fonts/LICENSE.bootstrap-icons).
 Run `tools/gen_notification_icons.py` with CairoSVG 2.8.2 and Pillow 12.0.0
 to regenerate the 32 px alpha images in `app/ui/notification_icons.h`.

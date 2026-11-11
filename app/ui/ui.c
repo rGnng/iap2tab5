@@ -1996,12 +1996,19 @@ static uint32_t g_mini_rev = 0xffffffffu;
 static uint32_t g_mini_elapsed = 0xffffffffu;
 static lv_obj_t * g_status_time;
 static lv_obj_t * g_status_icon;
+static lv_obj_t * g_status_np_caption;
 static bool g_library_syncing;
+static np_battery_status_t g_np_battery = {.percent=-1};
+static bool g_np_battery_seen;
 typedef enum {
     STATUS_CLOCK = 0,
     STATUS_LIBRARY_SYNC,
     STATUS_BLUETOOTH_CONNECTED,
     STATUS_BLUETOOTH_DISCONNECTED,
+    STATUS_NP_CHARGING,
+    STATUS_NP_UNPLUGGED,
+    STATUS_NP_FULL,
+    STATUS_NP_LOW,
     STATUS_COUNT,
 } status_content_t;
 typedef enum { STATUS_HOLD, STATUS_FADE_OUT, STATUS_FADE_IN } status_phase_t;
@@ -2427,6 +2434,7 @@ static void status_area_opacity(lv_opa_t opacity)
     if(lv_obj_get_style_opa(g_status_time, 0) == opacity) return;
     lv_obj_set_style_opa(g_status_time, opacity, 0);
     lv_obj_set_style_opa(g_status_icon, opacity, 0);
+    lv_obj_set_style_opa(g_status_np_caption, opacity, 0);
 }
 
 static void status_area_show(status_content_t content)
@@ -2434,13 +2442,20 @@ static void status_area_show(status_content_t content)
     g_status_content = content;
     lv_obj_set_hidden(g_status_time, content != STATUS_CLOCK);
     lv_obj_set_hidden(g_status_icon, content == STATUS_CLOCK);
+    bool battery=content>=STATUS_NP_CHARGING && content<=STATUS_NP_LOW;
+    lv_obj_set_hidden(g_status_np_caption,!battery);
     if(content == STATUS_CLOCK) return;
     const lv_image_dsc_t * image = &notification_arrow_repeat;
     if(content == STATUS_BLUETOOTH_CONNECTED) image = &notification_bluetooth_connecting;
     else if(content == STATUS_BLUETOOTH_DISCONNECTED) image = &notification_bluetooth_x;
+    else if(content == STATUS_NP_CHARGING) image = &notification_battery_charging;
+    else if(content == STATUS_NP_UNPLUGGED) image = &notification_plug;
+    else if(content == STATUS_NP_FULL) image = &notification_battery_full;
+    else if(content == STATUS_NP_LOW) image = &notification_battery_low;
     lv_image_set_src(g_status_icon, image);
     lv_image_set_rotation(g_status_icon, 0);
     lv_obj_center(g_status_icon);
+    if(battery) lv_obj_align(g_status_icon,LV_ALIGN_TOP_MID,0,5);
 }
 
 static void status_area_event_start(status_content_t content, uint32_t now)
@@ -2456,7 +2471,7 @@ static status_content_t status_area_latest(uint32_t now)
     for(status_content_t i = STATUS_LIBRARY_SYNC; i < STATUS_COUNT; i++) {
         status_event_t * event = &g_status_events[i];
         if(!event->active) continue;
-        /* Bluetooth changes are brief events; syncing remains active until
+        /* Connection and battery changes are brief events; syncing stays until
          * the backend reports completion. Expire obscured events too, so a
          * completed notification cannot reappear behind a newer one. */
         if(i != STATUS_LIBRARY_SYNC && now - event->started >= STATUS_TRANSIENT_MS) {
@@ -2534,12 +2549,49 @@ static void status_area_update(void)
     }
 }
 
+void ui_set_np_battery_status(const np_battery_status_t *status)
+{
+    if(!status) return;
+    np_battery_status_t previous=g_np_battery;
+    g_np_battery=*status;
+    bool known=status->available && status->present &&
+               status->state>NP_BATTERY_ABSENT;
+    if(!known) {
+        g_np_battery_seen=false;
+        for(int i=STATUS_NP_CHARGING;i<=STATUS_NP_LOW;i++)
+            g_status_events[i].active=false;
+    }
+    else {
+        uint32_t now=lv_tick_get();
+        bool changed=!g_np_battery_seen || previous.state!=status->state;
+        if(changed) {
+            /* Opposite power events supersede one another; they must not
+             * resurface after a newer icon expires. */
+            for(int i=STATUS_NP_CHARGING;i<=STATUS_NP_FULL;i++)
+                g_status_events[i].active=false;
+            if(status->state==NP_BATTERY_CHARGING)
+                status_area_event_start(STATUS_NP_CHARGING,now);
+            else if(status->state==NP_BATTERY_FULL)
+                status_area_event_start(STATUS_NP_FULL,now);
+            else if(g_np_battery_seen && status->state==NP_BATTERY_DISCHARGING)
+                status_area_event_start(STATUS_NP_UNPLUGGED,now);
+        }
+        if(status->low && (!g_np_battery_seen || !previous.low))
+            status_area_event_start(STATUS_NP_LOW,now);
+        if(!status->low) g_status_events[STATUS_NP_LOW].active=false;
+        g_np_battery_seen=true;
+    }
+    if(g_status_time) status_area_update();
+}
+
 /* Images use the same live foreground as the clock, including touch feedback
  * and the artwork-derived Now Playing background. */
 static void status_area_update_color(void)
 {
     lv_obj_set_style_image_recolor(g_status_icon,
                                    lv_obj_get_style_text_color(g_status_time, 0), 0);
+    lv_obj_set_style_text_color(g_status_np_caption,
+                               lv_obj_get_style_text_color(g_status_time,0),0);
 }
 
 static void status_area_color_cb(lv_event_t * event)
@@ -2592,6 +2644,10 @@ static void build_menubar(lv_obj_t * parent)
     lv_obj_set_style_image_recolor_opa(g_status_icon, LV_OPA_COVER, 0);
     lv_obj_set_style_image_recolor(g_status_icon, lv_color_hex(COL_MENU_TOP_FG), 0);
     lv_obj_set_hidden(g_status_icon, true);
+    g_status_np_caption=make_label(time_area,"NP Battery",&inter_14,COL_MENU_TOP_FG);
+    lv_obj_set_clickable(g_status_np_caption,false);
+    lv_obj_align(g_status_np_caption,LV_ALIGN_BOTTOM_MID,0,-6);
+    lv_obj_set_hidden(g_status_np_caption,true);
     lv_obj_add_event_cb(g_status_time, status_area_color_cb, LV_EVENT_STATE_CHANGED, NULL);
     g_status_content = g_status_target = STATUS_CLOCK;
     g_status_phase = STATUS_HOLD;
@@ -7746,6 +7802,7 @@ static counter_t settings_counter;
 static lv_obj_t * settings_detail_time_format_value;
 static lv_obj_t * settings_detail_set_time_value;
 static lv_obj_t * settings_detail_ble_value;
+static lv_obj_t * settings_np_values[5];
 static lv_obj_t * settings_detail_usb_a_check;
 static lv_obj_t * settings_detail_usb_both_check;
 static lv_obj_t * settings_detail_boot_off_check;
@@ -7813,6 +7870,7 @@ static lv_obj_t * settings_detail_sound_none_check;
  * so tick/blink callbacks cannot use labels from the previous visit. */
 static void settings_clear_detail_widgets(void)
 {
+    memset(settings_np_values,0,sizeof(settings_np_values));
     settings_detail_time_format_value = NULL;
     settings_detail_set_time_value = NULL;
     settings_detail_ble_value = NULL;
@@ -8929,10 +8987,36 @@ static void settings_ble_scan_connect_cb(lv_event_t * event)
                   lv_event_get_user_data(event));
 }
 
+static void settings_update_np_battery(void)
+{
+    if(!settings_np_values[0]) return;
+    const np_battery_status_t *b=&g_np_battery;
+    char values[5][48];
+    snprintf(values[0],sizeof(values[0]),"%s",
+        b->state==NP_BATTERY_IDLE && !b->charger_enabled ?
+        "Charging disabled" : np_battery_state_name(b->state));
+    if(b->available && b->present) {
+        snprintf(values[1],sizeof(values[1]),"~%d%%",b->percent);
+        if(b->percent<0) snprintf(values[1],sizeof(values[1]),"--");
+        snprintf(values[2],sizeof(values[2]),"%d.%02d V",b->voltage_mv/1000,
+                 (b->voltage_mv%1000)/10);
+        snprintf(values[3],sizeof(values[3]),"%d mA%s",abs(b->current_ma),
+                 b->current_ma<0 ? " in" : b->current_ma>0 ? " out" : "");
+    }
+    else for(int i=1;i<4;i++) snprintf(values[i],sizeof(values[i]),"--");
+    snprintf(values[4],sizeof(values[4]),"%s",!b->available ? "Unavailable" :
+             b->charger_enabled ? "Enabled" : "Disabled");
+    for(int i=0;i<5;i++) {
+        if(settings_np_values[i] && strcmp(lv_label_get_text(settings_np_values[i]),values[i]))
+            lv_label_set_text(settings_np_values[i],values[i]);
+    }
+}
+
 static void settings_tick(void)
 {
     if(g_current_screen != SCR_SETTINGS || settings_detail_dirty ||
        settings_right_content == NULL) return;
+    if(settings_selected==SETTING_ABOUT) settings_update_np_battery();
     if(settings_selected==SETTING_FAST_SCROLL) settings_update_fast_scroll_checks();
     if(settings_selected == SETTING_SCREEN) {
         settings_update_screen_checks();
@@ -9594,6 +9678,12 @@ static void settings_render_detail(lv_obj_t * parent, bool interactive)
                                     settings_compile_time(), COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2, NULL);
             settings_make_value_row(parent, "Commit", settings_commit(),
                                     COL_MUTED, SETTINGS_ROW_H, FONT_H2, FONT_H2, NULL);
+            settings_section(parent,"NP Battery");
+            const char *battery_labels[]={"State","Charge (est.)","Voltage","Current","Charge control"};
+            for(int i=0;i<5;i++)
+                settings_make_value_row(parent,battery_labels[i],"--",COL_MUTED,
+                    SETTINGS_ROW_H,FONT_H2,FONT_H2,&settings_np_values[i]);
+            settings_update_np_battery();
             break;
         case SETTING_DATETIME:
             settings_render_time_editor(parent, interactive);

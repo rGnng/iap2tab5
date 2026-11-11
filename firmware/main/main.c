@@ -11,6 +11,7 @@
 #include "backlight.h"
 #include "ble_remote.h"
 #include "charge.h"
+#include "np_battery_hw.h"
 #include "debug_log.h"
 #include "display_diag.h"
 #include "nvs_flash.h"
@@ -855,6 +856,9 @@ void app_main(void)
     for(;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         app_config_sd_poll();
+        np_battery_hw_poll((uint32_t)(esp_timer_get_time()/1000));
+        np_battery_status_t np_battery;
+        np_battery_hw_snapshot(&np_battery);
         {
             bool present = false;
             bool library_syncing = false;
@@ -866,6 +870,7 @@ void app_main(void)
                 library_state_valid = true;
             }
             if(bsp_display_lock(1000)) {
+                ui_set_np_battery_status(&np_battery);
                 ui_set_device_state(g_app_config.iap2_mode != 0, present,
                                     app_config_sd_ready());
                 /* A busy snapshot lock does not mean an active sync ended. */
